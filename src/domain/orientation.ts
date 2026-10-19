@@ -122,8 +122,10 @@ export function planInterviewKickoff(goal: string): string {
     "3. After approval call fest_plan {name, plan:<abs path>}.",
     "   If it returns ok:false with 'no festival structure found', your doc didn't match the",
     "   template — rewrite it to the exact shape above and call fest_plan again.",
-    "4. Then fest_markers {list:true}, interview-fill every marker, run fest_validate,",
-    "   then ask 'promote to active?' — after a yes, fest_promote twice, then fest_next.",
+    "4. Then fest_markers {list:true, festival:<name>}, interview-fill every marker,",
+    "   run fest_validate {festival:<name>},",
+    "   then ask 'promote to active?' — after a yes, fest_promote {festival:<name>}",
+    "   twice, then fest_next {festival:<name>}. Always pass festival:<name> — the session cwd is the camp root.",
     "If the human abandons the interview, stop quietly.",
   ].join("\n");
 }
@@ -139,7 +141,7 @@ export function markerInterviewKickoff(listing: string): string {
   return [
     "Fill the unfilled fest markers by interviewing the human — one marker question per reply.",
     "For each marker: ask for the value (explain what it controls in one line), then edit the file.",
-    "When every marker is filled, run fest_validate and report the score.",
+    "When every marker is filled, run fest_validate {festival:<name>} and report the score.",
     "",
     "Unfilled markers:",
     listing,
