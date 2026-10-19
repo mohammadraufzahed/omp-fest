@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { CampFsDetect } from "@/adapters/fs/camp-fs.js";
+import { CampFsDetect } from "../src/adapters/fs/camp-fs.js";
 
 async function makeCamp(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "ompfest-"));

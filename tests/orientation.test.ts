@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildOrientationNote } from "@/domain/orientation.js";
+import { buildOrientationNote } from "../src/domain/orientation.js";
 
 describe("buildOrientationNote", () => {
   it("is empty outside a camp", () => {

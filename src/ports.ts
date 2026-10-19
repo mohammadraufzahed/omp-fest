@@ -12,7 +12,7 @@ import type {
   NextUnit,
   PendingTask,
   ProgressEvent,
-} from "@/domain/types.js";
+} from "./domain/types.js";
 
 export interface ExecResult {
   stdout: string;

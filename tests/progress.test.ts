@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseProgressLine, statusLineText, summarizeProgress } from "@/domain/progress.js";
+import { parseProgressLine, statusLineText, summarizeProgress } from "../src/domain/progress.js";
 
 const LINES = [
   '{"ts":"2026-10-19T08:18:18Z","event":"wf_init","phase":"001_INGEST","total_steps":6}',

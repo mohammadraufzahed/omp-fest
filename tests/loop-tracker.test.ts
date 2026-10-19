@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { LoopTracker } from "@/application/loop-tracker.js";
+import { LoopTracker } from "../src/application/loop-tracker.js";
 
 describe("LoopTracker", () => {
   it("nudges when a task was opened but never completed/committed", () => {

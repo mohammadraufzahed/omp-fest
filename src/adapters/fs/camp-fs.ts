@@ -7,9 +7,9 @@
 import { watch } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { parseProgressLine } from "@/domain/progress.js";
-import type { CampLocation, PendingTask, ProgressEvent } from "@/domain/types.js";
-import type { CampDetect } from "@/ports.js";
+import { parseProgressLine } from "../../domain/progress.js";
+import type { CampLocation, PendingTask, ProgressEvent } from "../../domain/types.js";
+import type { CampDetect } from "../../ports.js";
 
 const FESTIVAL_STATUSES = ["planning", "ready", "parked", "active", "ritual"];
 
