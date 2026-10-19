@@ -9,7 +9,7 @@
  */
 import type { CampCli, CampDetect, FestCli } from "@/ports.js";
 import { LoopTracker } from "@/application/loop-tracker.js";
-import type { NextUnit, OmpFestConfig } from "@/domain/types.js";
+import type { NextUnit } from "@/domain/types.js";
 import type { ZodLike } from "./zod-types.js";
 
 export interface ToolDeps {
@@ -17,7 +17,6 @@ export interface ToolDeps {
   camp: CampCli;
   detect: CampDetect;
   tracker: LoopTracker;
-  config: OmpFestConfig;
 }
 
 export interface PiLike {
