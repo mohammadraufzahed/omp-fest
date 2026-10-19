@@ -1,7 +1,7 @@
 /**
  * Filesystem detection for camps and festivals + the progress watcher.
- * A camp root is identified by its `festivals/` + `.campaign/` pair (written
- * by `camp init`); a festival dir is identified by `fest.yaml` /
+ * A camp root is identified by its `festivals/` dir plus any camp marker
+ * (`.campaign/`, `camp.yaml`, `projects/`); a festival dir by `fest.yaml` /
  * `FESTIVAL_GOAL.md`; progress is tailed from `.fest/progress_events.jsonl`.
  */
 import { watch } from "node:fs";
@@ -144,9 +144,15 @@ export class CampFsDetect implements CampDetect {
   }
 
   private async isCampRoot(dir: string): Promise<boolean> {
-    return (
-      (await exists(join(dir, "festivals"))) && (await exists(join(dir, ".campaign")))
-    );
+    if (!(await exists(join(dir, "festivals")))) {
+      return false;
+    }
+    for (const marker of [".campaign", "camp.yaml", "projects"]) {
+      if (await exists(join(dir, marker))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private async isFestivalDir(dir: string): Promise<boolean> {
