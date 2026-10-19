@@ -49,7 +49,12 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `git commit` like a peasant.
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
-- 🛠️ **11 tools + 10 slash commands** — `/fest-next`, `/fest-task`,
+- 🗺️ **guided planning flow** — `/fest-plan <goal>` posts the protocol:
+  the agent interviews you, writes `STRUCTURE.md`, `fest_plan` scaffolds
+  `festivals/planning/<name>` via real `fest scaffold from-plan`, fills
+  markers, validates — then *you* approve and it `fest_promote`s to active.
+  your brain → festival, no TUI wrangling 🧠
+- 🛠️ **13 tools + 11 slash commands** — `/fest-next`, `/fest-task`,
   `/fest-approve`, `/fest-doctor`, `/camp-idea`... all with **live
   autocomplete** pulled from `fest list` and `camp idea list`. nothing
   hardcoded, everything discovered ✨

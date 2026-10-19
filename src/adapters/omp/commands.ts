@@ -3,6 +3,7 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
+import { PLAN_GUIDE } from "../../domain/orientation.js";
 import type { FestivalSummary } from "../../domain/types.js";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 
@@ -155,6 +156,19 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         });
       }
       send(pi, "fest-status", `Task ${action} applied.`);
+    },
+  });
+
+  pi.registerCommand("fest-plan", {
+    description: "Guided planning: interview -> STRUCTURE.md -> scaffold -> markers -> validate -> approve -> promote",
+    handler: (args, ctx) => {
+      const goal = args.trim();
+      send(
+        pi,
+        "fest-plan",
+        `${goal ? `Goal: ${goal}\n\n` : ""}${PLAN_GUIDE}`,
+      );
+      ctx.ui.notify("Planning guide posted — the agent interviews you, you approve the plan.", "info");
     },
   });
 

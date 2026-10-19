@@ -85,7 +85,7 @@ describe("ompFest extension", () => {
     ompFest(pi as never);
     expect(tools.map((t) => t.name)).toContain("fest_next");
     expect(tools.map((t) => t.name)).toContain("fest_parallel");
-    expect(tools).toHaveLength(11);
+    expect(tools).toHaveLength(13);
     expect([...commands.keys()].sort()).toEqual([
       "camp-idea",
       "fest",
@@ -93,6 +93,7 @@ describe("ompFest extension", () => {
       "fest-doctor",
       "fest-next",
       "fest-parallel",
+      "fest-plan",
       "fest-reject",
       "fest-show",
       "fest-status",

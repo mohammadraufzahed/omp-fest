@@ -43,6 +43,13 @@ export interface FestCli {
   workflowReject(festivalDir: string, reason: string): Promise<string>;
   markersCount(festivalDir: string): Promise<number>;
   markersList(festivalDir: string): Promise<string>;
+  /** `fest scaffold from-plan` — generate a festival from a STRUCTURE.md doc. Runs at campRoot. */
+  scaffoldFromPlan(
+    campRoot: string,
+    opts: { plan: string; name: string; dest?: string; dryRun?: boolean },
+  ): Promise<string>;
+  /** `fest promote` — advance a festival one lifecycle step. Runs at campRoot or inside the festival. */
+  promote(cwd: string, name?: string): Promise<string>;
   list(campRoot: string): Promise<FestivalSummary[]>;
   rules(festivalDir: string): Promise<string>;
   context(cwd: string): Promise<string>;

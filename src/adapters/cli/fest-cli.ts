@@ -130,6 +130,38 @@ export class FestCliAdapter implements FestCli {
     }
   }
 
+  async scaffoldFromPlan(
+    campRoot: string,
+    opts: { plan: string; name: string; dest?: string; dryRun?: boolean },
+  ): Promise<string> {
+    const args = [
+      "scaffold",
+      "from-plan",
+      "--plan",
+      opts.plan,
+      "--name",
+      opts.name,
+      "--dest",
+      opts.dest ?? "planning",
+      "--agent",
+    ];
+    if (opts.dryRun) {
+      args.push("--dry-run");
+    }
+    const result = await this.checked(this.exec.run("fest", args, campRoot));
+    return result.stdout;
+  }
+
+  async promote(cwd: string, name?: string): Promise<string> {
+    const args = ["promote"];
+    if (name) {
+      args.push(name);
+    }
+    args.push("--json");
+    const result = await this.checked(this.exec.run("fest", args, cwd));
+    return result.stdout;
+  }
+
   async rules(festivalDir: string): Promise<string> {
     const result = await this.exec.run("fest", ["rules"], festivalDir);
     return result.stdout;

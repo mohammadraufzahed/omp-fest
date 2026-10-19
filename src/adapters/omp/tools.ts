@@ -202,6 +202,58 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   });
 
   pi.registerTool({
+    name: "fest_plan",
+    label: "Fest Plan (Scaffold From Plan)",
+    description:
+      "Generate a festival from a STRUCTURE.md plan doc the model wrote after interviewing the human. " +
+      "Runs `fest scaffold from-plan --dest planning`. Returns the new festival path and unfilled marker " +
+      "count. Follow with marker fills, fest_validate, human approval, then fest_promote x2.",
+    parameters: z.object({
+      name: z.string().describe("Festival name/slug, e.g. 'prenatal-form-groups'"),
+      plan: z.string().describe("Absolute path to the STRUCTURE.md plan document"),
+      dryRun: z.boolean().optional().describe("Preview without creating files"),
+    }),
+    async execute(_id: string, params: { name: string; plan: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const root = await campRootOf(deps, ctx);
+      if (!root) {
+        return await idleResult(deps, ctx);
+      }
+      const output = await deps.fest.scaffoldFromPlan(root, params);
+      return textResult({
+        kind: "plan_scaffolded",
+        dryRun: params.dryRun === true,
+        output,
+        nextSteps: [
+          "Fill unfilled markers (fest_markers)",
+          "Run fest_validate",
+          "Present the plan to the human and wait for approval",
+          "fest_promote twice: planning -> ready -> active",
+        ],
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "fest_promote",
+    label: "Fest Promote",
+    description:
+      "Advance a festival one lifecycle step (planning -> ready -> active). " +
+      "Call only after the human has approved the plan — never self-promote an unreviewed plan.",
+    parameters: z.object({
+      festival: z.string().optional().describe("Festival name/id; omit to promote the current festival"),
+    }),
+    async execute(_id: string, params: { festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const location = await deps.detect.locate(ctx.cwd);
+      const cwd = location.festivalDir ?? location.campRoot;
+      if (!cwd) {
+        return await idleResult(deps, ctx);
+      }
+      const output = await deps.fest.promote(cwd, params.festival);
+      return textResult({ kind: "promoted", output });
+    },
+  });
+
+  pi.registerTool({
     name: "fest_status",
     label: "Festival Status",
     description: "Current festival progress summary (phases, sequences, tasks, percent).",
