@@ -2,6 +2,7 @@
  * Human-facing slash commands with live autocomplete sourced from the CLIs —
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
+import { matchFestival } from "../../application/fest-resolve.js";
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
 import { IDEA_INTERVIEW, PLAN_GUIDE, markerInterviewKickoff, planInterviewKickoff } from "../../domain/orientation.js";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
@@ -41,17 +42,12 @@ async function festivalDirOf(deps: CommandDeps, ctx: CommandCtx, selector?: stri
   const location = await deps.detect.locate(ctx.cwd);
   if (selector && location.campRoot) {
     const all = await deps.fest.list(location.campRoot);
-    const exact = all.filter((f) => f.id === selector || f.name === selector);
-    const matches =
-      exact.length > 0
-        ? exact
-        : all.filter((f) => f.id.includes(selector) || f.name.includes(selector));
-    if (matches.length > 1) {
-      throw new Error(`Ambiguous festival "${selector}" — matches: ${matches.map((f) => f.id).join(", ")}`);
+    const match = matchFestival(all, selector);
+    if (match.kind === "ambiguous") {
+      throw new Error(`Ambiguous festival "${selector}" — matches: ${match.matches.map((f) => f.id).join(", ")}`);
     }
-    const only = matches.length === 1 ? matches[0] : undefined;
-    if (only) {
-      return only.path;
+    if (match.kind === "match") {
+      return match.festival.path;
     }
     throw new Error(`No festival matches "${selector}" — known: ${all.map((f) => f.id).join(", ") || "none"}`);
   }
@@ -131,8 +127,8 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         const [action = "show", ...rest] = args;
         const dir = await festivalDirOf(deps, ctx);
         if (action === "done") {
-          await deps.fest.taskComplete(dir, rest[0] ?? "");
-          send(pi, "fest-status", "Task completed.");
+          const completion = await deps.fest.taskComplete(dir, rest[0] ?? "");
+          send(pi, "fest-status", completion.ok ? "Task completed." : `Completion blocked:\n${completion.output}`);
           return;
         }
         if (action === "update") {

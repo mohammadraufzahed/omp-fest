@@ -36,10 +36,12 @@ describe("FestCliAdapter", () => {
     expect((await fest.validate("/f")).score).toBe(90);
   });
 
-  it("throws on non-zero mutations", async () => {
+  it("surfaces gate-blocked completion instead of throwing", async () => {
     const exec = fakeExec({ code: 1, stderr: "boom" });
     const fest = new FestCliAdapter(exec);
-    await expect(fest.taskComplete("/f", "x.md")).rejects.toThrow("boom");
+    const result = await fest.taskComplete("/f", "x.md");
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("boom");
   });
 
   it("parses fest list --json across statuses", async () => {

@@ -6,6 +6,7 @@
  * submodule at `.omp/extensions/omp-fest` — keep the dependency footprint at
  * zero; the runtime injects zod and the pi SDK.
  */
+import { CachedDetect } from "./src/application/detect-cache.js";
 import { LoopTracker } from "./src/application/loop-tracker.js";
 import { orientSession } from "./src/application/orient.js";
 import { CampCliAdapter } from "./src/adapters/cli/camp-cli.js";
@@ -43,7 +44,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const exec = new NodeExecRunner();
   const fest = new FestCliAdapter(exec);
   const camp = new CampCliAdapter(exec);
-  const detect = new CampFsDetect();
+  const detect = new CachedDetect(new CampFsDetect());
   const tracker = new LoopTracker();
 
   const cwd = process.cwd();

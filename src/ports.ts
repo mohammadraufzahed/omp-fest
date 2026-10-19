@@ -29,7 +29,16 @@ export interface FestCli {
   available(): Promise<boolean>;
   version(): Promise<string | undefined>;
   next(festivalDir: string): Promise<NextUnit>;
-  taskComplete(festivalDir: string, task: string, evidence?: string): Promise<void>;
+  /**
+   * `fest task completed` — quality gates run first and can block completion,
+   * so this returns the CLI output instead of throwing: ok=false means the
+   * gate blocked it and `output` carries the reason the agent must relay.
+   */
+  taskComplete(
+    festivalDir: string,
+    task: string,
+    evidence?: string,
+  ): Promise<{ ok: boolean; output: string }>;
   taskMutate(
     festivalDir: string,
     action: "blocked" | "defer" | "unblock" | "reset" | "update",
@@ -86,6 +95,8 @@ export interface CampDetect {
   readProgress(festivalDir: string): Promise<ProgressEvent[]>;
   pendingTasks(festivalDir: string): Promise<PendingTask[]>;
   watch(festivalDir: string, onEvent: (event: ProgressEvent) => void): () => void;
+  /** Present on caching wrappers — drop memoized reads after camp mutations. */
+  bustCache?(): void;
 }
 
 export interface Notifier {

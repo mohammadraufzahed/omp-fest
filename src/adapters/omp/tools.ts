@@ -9,6 +9,7 @@
  */
 import { basename } from "node:path";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
+import { matchFestival } from "../../application/fest-resolve.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
 import type { NextUnit } from "../../domain/types.js";
 import type { ZodLike } from "./zod-types.js";
@@ -62,30 +63,25 @@ async function festivalDirOf(
       return { error: { kind: "no_camp", selector, hint: "Not inside a camp — cannot resolve a festival by name." } };
     }
     const all = await deps.detect.listFestivals(location.campRoot);
-    const exact = all.filter((f) => f.id === selector || f.name === selector);
-    const matches =
-      exact.length > 0
-        ? exact
-        : all.filter((f) => f.id.includes(selector) || f.name.includes(selector));
-    if (matches.length > 1) {
+    const match = matchFestival(all, selector);
+    if (match.kind === "match") {
+      return { dir: match.festival.path };
+    }
+    if (match.kind === "ambiguous") {
       return {
         error: {
           kind: "ambiguous_festival",
           selector,
-          matches: matches.map((f) => `${f.id} (${f.status})`),
+          matches: match.matches.map((f) => `${f.id} (${f.status})`),
           hint: "Pass the full festival id to disambiguate.",
         },
       };
-    }
-    const only = matches.length === 1 ? matches[0] : undefined;
-    if (only) {
-      return { dir: only.path };
     }
     return {
       error: {
         kind: "unknown_festival",
         selector,
-        festivals: all.map((f) => `${f.id} (${f.status})`),
+        festivals: match.festivals.map((f) => `${f.id} (${f.status})`),
         hint: "Pick one of the listed festival ids.",
       },
     };
@@ -178,7 +174,15 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       const dir = r.dir;
       const opened = deps.tracker.openTaskPath;
-      await deps.fest.taskComplete(dir, params.task ?? "", params.evidence);
+      const completion = await deps.fest.taskComplete(dir, params.task ?? "", params.evidence);
+      if (!completion.ok) {
+        return textResult({
+          status: "completion_blocked",
+          task: params.task,
+          output: completion.output,
+          hint: "fest refused the completion — quality gates run first. Read the output, fix what it demands, then retry.",
+        });
+      }
       deps.tracker.taskCompleted();
       return textResult({
         status: "completed",
@@ -314,6 +318,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return await idleResult(deps, ctx);
       }
       const output = await deps.fest.scaffoldFromPlan(root, params);
+      deps.detect.bustCache?.();
       let parsed: { ok?: boolean; error?: string; festival_dir?: string } | undefined;
       try {
         parsed = JSON.parse(output) as typeof parsed;
@@ -369,6 +374,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           return await idleResult(deps, ctx);
         }
         const output = await deps.fest.promote(location.campRoot, params.festival);
+        deps.detect.bustCache?.();
         return textResult({ kind: "promoted", output });
       }
       const dir =
@@ -378,6 +384,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return await idleResult(deps, ctx);
       }
       const output = await deps.fest.promote(dir);
+      deps.detect.bustCache?.();
       return textResult({ kind: "promoted", output });
     },
   });
@@ -461,17 +468,15 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       let cwd = location.festivalDir;
       if (!cwd && params.festival && location.campRoot) {
         const all = await deps.detect.listFestivals(location.campRoot);
-        const matches = all.filter(
-          (f) => f.id.includes(params.festival ?? "") || f.name.includes(params.festival ?? ""),
-        );
-        if (matches.length > 1) {
+        const match = matchFestival(all, params.festival ?? "");
+        if (match.kind === "ambiguous") {
           return textResult({
             kind: "ambiguous_festival",
             selector: params.festival,
-            matches: matches.map((f) => `${f.id} (${f.status})`),
+            matches: match.matches.map((f) => `${f.id} (${f.status})`),
           });
         }
-        cwd = matches[0]?.path;
+        cwd = match.kind === "match" ? match.festival.path : undefined;
         if (!cwd) {
           return textResult({ kind: "unknown_festival", selector: params.festival, festivals: all.map((f) => f.id) });
         }
