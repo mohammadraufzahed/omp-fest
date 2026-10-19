@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+/**
+ * fest omp — PATH plugin entrypoint. Any `fest-*` binary on PATH is exposed
+ * inside fest as `fest omp`. Thin shim: forwards `fest next`/`fest status`
+ * so the omp-fest status line is available from the fest CLI itself.
+ */
+import { execFileSync } from "node:child_process";
+
+const [sub, ...rest] = process.argv.slice(2);
+
+function run(args) {
+  try {
+    process.stdout.write(execFileSync("fest", args, { stdio: ["ignore", "pipe", "inherit"] }));
+  } catch (error) {
+    process.exit(typeof error.status === "number" ? error.status : 1);
+  }
+}
+
+switch (sub) {
+  case undefined:
+  case "status":
+    run(["status", ...rest]);
+    break;
+  case "next":
+    run(["next", ...rest]);
+    break;
+  case "help":
+    console.log("fest omp <status|next> — omp-fest plugin shims into the fest CLI");
+    break;
+  default:
+    console.error(`unknown subcommand: ${sub} (expected status|next)`);
+    process.exit(64);
+}
