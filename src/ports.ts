@@ -63,6 +63,8 @@ export interface CampCli {
 export interface CampDetect {
   locate(cwd: string): Promise<CampLocation>;
   activeFestival(campRoot: string): Promise<string | undefined>;
+  /** Every festival in the camp (all status dirs), for guidance when none is active. */
+  listFestivals(campRoot: string): Promise<FestivalSummary[]>;
   progressFile(festivalDir: string): string;
   readProgress(festivalDir: string): Promise<ProgressEvent[]>;
   pendingTasks(festivalDir: string): Promise<PendingTask[]>;

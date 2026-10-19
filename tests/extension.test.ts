@@ -138,6 +138,6 @@ describe("ompFest extension", () => {
     const handler = commands.get("fest")?.handler;
     await handler?.("", ctx);
     expect(sent.at(-1)?.message.content).toContain("Camp:");
-    expect(sent.at(-1)?.message.content).toContain("No active festival");
+    expect(sent.at(-1)?.message.content).toContain("No festivals yet");
   });
 });
