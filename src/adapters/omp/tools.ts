@@ -41,20 +41,16 @@ function textResult(payload: unknown): ToolResult {
   };
 }
 
-async function festivalDirOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string> {
+async function festivalDirOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string | undefined> {
   const location = await deps.detect.locate(ctx.cwd);
-  const dir = location.festivalDir ?? (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
-  if (!dir) {
-    throw new Error("No festival found — not inside a camp festival and no active festival in this camp");
-  }
-  return dir;
+  return (
+    location.festivalDir ??
+    (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined)
+  );
 }
 
-async function campRootOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string> {
+async function campRootOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string | undefined> {
   const location = await deps.detect.locate(ctx.cwd);
-  if (!location.campRoot) {
-    throw new Error("Not inside a camp");
-  }
   return location.campRoot;
 }
 
@@ -69,6 +65,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({}),
     async execute(_id: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       const unit: NextUnit = await deps.fest.next(dir);
       if (unit.kind === "task") {
         deps.tracker.taskOpened(unit.path);
@@ -88,6 +87,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     }),
     async execute(_id: string, params: { task?: string; evidence: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       await deps.fest.taskComplete(dir, params.task ?? "", params.evidence);
       deps.tracker.taskCompleted();
       return textResult({ status: "completed", task: params.task });
@@ -106,6 +108,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     }),
     async execute(_id: string, params: { action: "blocked" | "defer" | "unblock" | "reset" | "update"; task?: string; reason?: string; percent?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       await deps.fest.taskMutate(dir, params.action, params);
       return textResult({ status: "ok", action: params.action });
     },
@@ -119,6 +124,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({ message: z.string().describe("Commit message (task reference is added automatically)") }),
     async execute(_id: string, params: { message: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       const hash = await deps.fest.commit(dir, params.message);
       deps.tracker.committed();
       return textResult({ status: "committed", hash });
@@ -132,6 +140,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({ fix: z.boolean().optional().describe("Auto-fix common structure issues") }),
     async execute(_id: string, params: { fix?: boolean }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       return textResult(await deps.fest.validate(dir, params.fix));
     },
   });
@@ -146,6 +157,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     }),
     async execute(_id: string, params: { action: "status" | "show" | "advance" }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       const output =
         params.action === "advance"
           ? await deps.fest.workflowAdvance(dir)
@@ -162,6 +176,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({ evidence: z.string().describe("Validate score, tasks done, test results, files changed") }),
     async execute(_id: string, params: { evidence: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       await deps.fest.workflowAdvance(dir);
       return textResult({
         status: "awaiting_human",
@@ -178,6 +195,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({}),
     async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       return textResult(await deps.fest.status(dir));
     },
   });
@@ -189,9 +209,40 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({ list: z.boolean().optional() }),
     async execute(_id: string, params: { list?: boolean }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
       const count = await deps.fest.markersCount(dir);
       const listing = params.list ? await deps.fest.markersList(dir) : undefined;
       return textResult({ unfilled: count, ...(listing ? { listing } : {}) });
+    },
+  });
+
+  pi.registerTool({
+    name: "fest_parallel",
+    label: "Fest Parallel",
+    description:
+      "List pending festival tasks grouped by sequence so you can fan out subagents — tasks in different sequences are parallel-safe, tasks in the same sequence run in order. Spawn one subagent per sequence and let them work concurrently.",
+    parameters: z.object({}),
+    async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx);
+      if (!dir) {
+        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+      }
+      const tasks = await deps.detect.pendingTasks(dir);
+      const pending = tasks.filter((t) => !t.done);
+      const groups = new Map<string, string[]>();
+      for (const task of pending) {
+        const list = groups.get(task.sequence) ?? [];
+        list.push(task.path);
+        groups.set(task.sequence, list);
+      }
+      return textResult({
+        hint: "Each sequence is an independent lane — spawn one subagent per sequence to work tasks in parallel; same-sequence tasks stay ordered.",
+        lanes: [...groups.entries()].map(([sequence, files]) => ({ sequence, tasks: files })),
+        pendingCount: pending.length,
+        totalCount: tasks.length,
+      });
     },
   });
 
@@ -202,6 +253,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({ text: z.string() }),
     async execute(_id: string, params: { text: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
+      if (!root) {
+        return textResult({ kind: "idle", reason: "not inside a camp" });
+      }
       return textResult(await deps.camp.ideaAdd(root, params.text));
     },
   });

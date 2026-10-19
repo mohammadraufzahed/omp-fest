@@ -16,7 +16,7 @@ import { registerCommands } from "@/adapters/omp/commands.js";
 import { notifyGate, OmpNotifier } from "@/adapters/omp/notify.js";
 import { registerTools, type PiLike } from "@/adapters/omp/tools.js";
 import { loadConfig } from "@/domain/config.js";
-import { RECOVERY_PLAYBOOK } from "@/domain/orientation.js";
+import { PARALLEL_HINT, RECOVERY_PLAYBOOK } from "@/domain/orientation.js";
 import { statusLineText, summarizeProgress } from "@/domain/progress.js";
 
 interface ExtensionContextLike {
@@ -63,7 +63,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       const orientation = await orientSession(ctx.cwd, detect);
       if (orientation.note) {
         pi.sendMessage(
-          { customType: "fest-orientation", content: `${orientation.note}\n\n${RECOVERY_PLAYBOOK}`, display: false },
+          { customType: "fest-orientation", content: `${orientation.note}\n\n${PARALLEL_HINT}\n\n${RECOVERY_PLAYBOOK}`, display: false },
           { triggerTurn: false },
         );
       }

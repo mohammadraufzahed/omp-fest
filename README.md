@@ -36,7 +36,7 @@ needs the fest toolchain (`npm i -g @obedience-corp/festival`) — that's it �
   `git commit` like a peasant.
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
-- 🛠️ **10 tools + 10 slash commands** — `/fest-next`, `/fest-task`,
+- 🛠️ **11 tools + 10 slash commands** — `/fest-next`, `/fest-task`,
   `/fest-approve`, `/fest-doctor`, `/camp-idea`... all with **live
   autocomplete** pulled from `fest list` and `camp idea list`. nothing
   hardcoded, everything discovered ✨
@@ -46,6 +46,9 @@ needs the fest toolchain (`npm i -g @obedience-corp/festival`) — that's it �
 - 🛑 **gates actually stop** — `fest_gate_submit` freezes and waits for YOU.
   `/fest-approve` / `/fest-reject` run the real attestation. the model can
   *never* approve itself. your gates, your call. period. 🔒
+- 🚄 **parallel lanes** — `fest_parallel` groups pending tasks by sequence so
+  your agent spawns one subagent per lane and tasks grind concurrently.
+  festivals finish in a fraction of the time.
 - 🧘 **zero babysitting** — outside a camp? tools return `idle` and shut up.
   no fest installed? everything still works. graceful like a swan 🦢
 - ⚙️ **`.ompfest.json`** — per-project knobs: gate notification channels
@@ -61,7 +64,7 @@ so drop it on PATH and boom 💥 `fest omp status` / `fest omp next` work
 ## 🏗️ under the hood
 
 hexagonal (ports & adapters), zero runtime deps, strict TypeScript,
-`strictTypeChecked` ESLint, 28 vitest cases. clean enough to read for fun:
+`strictTypeChecked` ESLint, 29 vitest cases. clean enough to read for fun:
 
 ```
 index.ts            🧠 composition root — wires everything onto omp
@@ -78,7 +81,7 @@ tests/              ✅ vitest, one file per module
 
 ```bash
 npm install
-npm test           # 28 tests, all green ✅
+npm test           # 29 tests, all green ✅
 npm run typecheck  # strict tsc 🧊
 npm run lint       # strictTypeChecked eslint 🧹
 ```

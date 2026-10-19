@@ -112,6 +112,14 @@ export interface ProgressEvent {
   [key: string]: unknown;
 }
 
+export interface PendingTask {
+  /** Sequence the task belongs to (tasks in different sequences are parallel-safe). */
+  sequence: string;
+  /** Festival-relative task path. */
+  path: string;
+  done: boolean;
+}
+
 export interface FestivalProgress {
   completed: number;
   total: number;

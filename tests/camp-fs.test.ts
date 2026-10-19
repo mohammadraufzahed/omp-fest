@@ -55,3 +55,23 @@ describe("CampFsDetect", () => {
     expect(location.kind).toBe("outside");
   });
 });
+
+it("pendingTasks groups tasks by sequence and marks completed ones done", async () => {
+  const root = await mkdtemp(join(tmpdir(), "campfs-fest-"));
+  const dir = join(root, "festival-x");
+  await mkdir(join(dir, "003_IMPLEMENT/01_core"), { recursive: true });
+  await mkdir(join(dir, "003_IMPLEMENT/02_extra"), { recursive: true });
+  await mkdir(join(dir, ".fest"), { recursive: true });
+  await writeFile(join(dir, "003_IMPLEMENT/01_core/01_a.md"), "task a");
+  await writeFile(join(dir, "003_IMPLEMENT/01_core/02_b.md"), "task b");
+  await writeFile(join(dir, "003_IMPLEMENT/02_extra/01_c.md"), "task c");
+  await writeFile(
+    join(dir, ".fest/progress_events.jsonl"),
+    `${JSON.stringify({ ts: "2026-01-01T00:00:00Z", event: "completed", task: "003_IMPLEMENT/01_core/01_a.md" })}\n`,
+  );
+  const tasks = await new CampFsDetect().pendingTasks(dir);
+  expect(tasks).toHaveLength(3);
+  expect(tasks.find((t) => t.path.endsWith("01_a.md"))?.done).toBe(true);
+  expect(tasks.find((t) => t.path.endsWith("02_b.md"))?.done).toBe(false);
+  expect(new Set(tasks.map((t) => t.sequence)).size).toBe(2);
+});

@@ -173,6 +173,34 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     },
   });
 
+  pi.registerCommand("fest-parallel", {
+    description: "Pending tasks grouped by sequence — spawn a subagent per lane",
+    getArgumentCompletions: festivalCompleter(deps),
+    handler: async (args, ctx) => {
+      const dir = await festivalDirOf(deps, ctx, args.trim() || undefined);
+      const tasks = await deps.detect.pendingTasks(dir);
+      const pending = tasks.filter((t) => !t.done);
+      if (pending.length === 0) {
+        send(pi, "fest-status", "No pending tasks — festival is done or fully dispatched.");
+        return;
+      }
+      const groups = new Map<string, string[]>();
+      for (const task of pending) {
+        const list = groups.get(task.sequence) ?? [];
+        list.push(task.path);
+        groups.set(task.sequence, list);
+      }
+      const lines = ["Pending tasks by lane (one subagent per sequence):"];
+      for (const [seq, files] of groups) {
+        lines.push(`\n${seq}`);
+        for (const file of files) {
+          lines.push(`  • ${file}`);
+        }
+      }
+      send(pi, "fest-status", lines.join("\n"));
+    },
+  });
+
   pi.registerCommand("camp-idea", {
     description: "Capture an idea into the camp inbox: /camp-idea <text>",
     handler: async (args, ctx) => {

@@ -5,6 +5,7 @@
 import type { FestivalProgress, ProgressEvent } from "./types.js";
 
 const COMPLETE_EVENTS = new Set([
+  "completed",
   "task_completed",
   "wf_step_end",
   "gate_step_approved",

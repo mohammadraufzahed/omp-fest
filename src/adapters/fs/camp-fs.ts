@@ -5,13 +5,21 @@
  * `FESTIVAL_GOAL.md`; progress is tailed from `.fest/progress_events.jsonl`.
  */
 import { watch } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { readdir, readFile, stat } from "node:fs/promises";
+import { basename, dirname, join, relative } from "node:path";
 import { parseProgressLine } from "@/domain/progress.js";
-import type { CampLocation, ProgressEvent } from "@/domain/types.js";
+import type { CampLocation, PendingTask, ProgressEvent } from "@/domain/types.js";
 import type { CampDetect } from "@/ports.js";
 
 const FESTIVAL_STATUSES = ["planning", "ready", "parked", "active", "ritual"];
+
+async function safeReaddir(dir: string): Promise<string[]> {
+  try {
+    return await readdir(dir);
+  } catch {
+    return [];
+  }
+}
 
 export class CampFsDetect implements CampDetect {
   async locate(cwd: string): Promise<CampLocation> {
@@ -61,6 +69,36 @@ export class CampFsDetect implements CampDetect {
 
   progressFile(festivalDir: string): string {
     return join(festivalDir, ".fest", "progress_events.jsonl");
+  }
+
+  async pendingTasks(festivalDir: string): Promise<PendingTask[]> {
+    const events = await this.readProgress(festivalDir);
+    const done = new Set(
+      events
+        .filter((e) => e.event === "completed" && typeof e.task === "string")
+        .map((e) => e.task),
+    );
+    const tasks: PendingTask[] = [];
+    for (const phase of await safeReaddir(festivalDir)) {
+      if (!/^\d{3}_/.test(phase)) {
+        continue;
+      }
+      const phaseDir = join(festivalDir, phase);
+      for (const seq of await safeReaddir(phaseDir)) {
+        const seqDir = join(phaseDir, seq);
+        if (!(await stat(seqDir).catch(() => undefined))?.isDirectory()) {
+          continue;
+        }
+        for (const file of await safeReaddir(seqDir)) {
+          if (!/^\d{2}_.*\.md$/.test(file)) {
+            continue;
+          }
+          const rel = relative(festivalDir, join(seqDir, file));
+          tasks.push({ sequence: `${phase}/${seq}`, path: rel, done: done.has(rel) });
+        }
+      }
+    }
+    return tasks;
   }
 
   async readProgress(festivalDir: string): Promise<ProgressEvent[]> {

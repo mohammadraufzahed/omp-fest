@@ -44,6 +44,10 @@ export function buildOrientationNote(input: OrientationInput): string {
   return lines.join("\n");
 }
 
+export const PARALLEL_HINT =
+  "Independent festival lanes: call fest_parallel to list pending tasks grouped " +
+  "by sequence — spawn one subagent per sequence so tasks finish in parallel.";
+
 export const RECOVERY_PLAYBOOK = [
   "fest_* tool recovery rules:",
   "- kind 'blocked': fix the listed files/markers, then call fest_next again",

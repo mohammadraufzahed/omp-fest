@@ -10,6 +10,7 @@ import type {
   GateDecision,
   GateRequest,
   NextUnit,
+  PendingTask,
   ProgressEvent,
 } from "@/domain/types.js";
 
@@ -64,6 +65,7 @@ export interface CampDetect {
   activeFestival(campRoot: string): Promise<string | undefined>;
   progressFile(festivalDir: string): string;
   readProgress(festivalDir: string): Promise<ProgressEvent[]>;
+  pendingTasks(festivalDir: string): Promise<PendingTask[]>;
   watch(festivalDir: string, onEvent: (event: ProgressEvent) => void): () => void;
 }
 
