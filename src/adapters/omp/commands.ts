@@ -3,6 +3,7 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
+import { PLAN_GUIDE } from "../../domain/orientation.js";
 import type { FestivalSummary } from "../../domain/types.js";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 
@@ -158,6 +159,19 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     },
   });
 
+  pi.registerCommand("fest-plan", {
+    description: "Guided planning: interview -> STRUCTURE.md -> scaffold -> markers -> validate -> approve -> promote",
+    handler: (args, ctx) => {
+      const goal = args.trim();
+      send(
+        pi,
+        "fest-plan",
+        `${goal ? `Goal: ${goal}\n\n` : ""}${PLAN_GUIDE}`,
+      );
+      ctx.ui.notify("Planning guide posted — the agent interviews you, you approve the plan.", "info");
+    },
+  });
+
   pi.registerCommand("fest-approve", {
     description: "Approve the pending gate checkpoint (human attestation)",
     handler: async (_args, ctx) => {
@@ -211,6 +225,33 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         }
       }
       send(pi, "fest-status", lines.join("\n"));
+    },
+  });
+
+  pi.registerCommand("fest-cmd", {
+    description: "Raw fest passthrough: /fest-cmd <args> — e.g. /fest-cmd list --json",
+    handler: async (args, ctx) => {
+      const location = await deps.detect.locate(ctx.cwd);
+      const cwd = location.festivalDir ?? (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined) ?? location.campRoot;
+      if (!cwd) {
+        send(pi, "fest-status", "Not inside a camp.");
+        return;
+      }
+      const result = await deps.fest.raw(cwd, args.trim().split(/\s+/).filter(Boolean));
+      send(pi, "fest-cmd", result.stdout || result.stderr || `exit ${result.code}`);
+    },
+  });
+
+  pi.registerCommand("camp-cmd", {
+    description: "Raw camp passthrough: /camp-cmd <args> — e.g. /camp-cmd idea list",
+    handler: async (args, ctx) => {
+      const location = await deps.detect.locate(ctx.cwd);
+      if (!location.campRoot) {
+        send(pi, "fest-status", "Not inside a camp.");
+        return;
+      }
+      const result = await deps.camp.raw(location.campRoot, args.trim().split(/\s+/).filter(Boolean));
+      send(pi, "camp-cmd", result.stdout || result.stderr || `exit ${result.code}`);
     },
   });
 

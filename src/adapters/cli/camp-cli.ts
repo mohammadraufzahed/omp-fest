@@ -25,6 +25,10 @@ export class CampCliAdapter implements CampCli {
     return projects;
   }
 
+  async raw(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+    return await this.exec.run("camp", args, cwd);
+  }
+
   async ideaAdd(campRoot: string, text: string): Promise<string> {
     const result = await this.exec.run("camp", ["idea", "add", text], campRoot);
     if (result.code !== 0) {
