@@ -1,0 +1,167 @@
+/**
+ * Core domain types for omp-fest.
+ *
+ * These mirror the fest.build model: a camp contains projects and festivals;
+ * a festival contains phases; a phase is either a WORKFLOW.md of steps or
+ * sequences of task files, and ends with a GATES.md phase gate.
+ */
+
+export type CampLocationKind = "camp-root" | "project" | "festival" | "outside";
+
+export interface CampLocation {
+  kind: CampLocationKind;
+  /** Camp root directory when inside a camp. */
+  campRoot?: string;
+  /** Camp display name (directory basename). */
+  campName?: string;
+  /** Festival directory when inside one (or the resolved active festival). */
+  festivalDir?: string;
+  /** Festival id like "demo-fest-DF0001". */
+  festivalId?: string;
+}
+
+export type TaskState =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "blocked"
+  | "deferred";
+
+export type Autonomy = "low" | "medium" | "high";
+
+/** A task-file unit emitted by `fest next` for implementation phases. */
+export interface TaskUnit {
+  kind: "task";
+  /** Festival-relative task path, e.g. 003_IMPLEMENT/01_core/02_implement.md */
+  path: string;
+  phase?: string;
+  sequence?: string;
+  workingDir?: string;
+  autonomy?: Autonomy;
+  /** Rendered task document (objective, requirements, done-when). */
+  doc: string;
+  goals: string[];
+}
+
+/** A WORKFLOW.md step unit (planning/ingest/research phases). */
+export interface WorkflowStepUnit {
+  kind: "wf_step";
+  phase: string;
+  phaseType?: string;
+  step: number;
+  totalSteps: number;
+  title: string;
+  goal: string;
+  actions: string[];
+  checkpoint: boolean;
+  doc: string;
+}
+
+/** A GATES.md phase-gate step — requires human attestation. */
+export interface GateStepUnit {
+  kind: "gate_step";
+  phase: string;
+  step: number;
+  totalSteps: number;
+  question: string;
+  doc: string;
+}
+
+/** `fest next` refused: validation errors must be fixed first. */
+export interface BlockedUnit {
+  kind: "blocked";
+  errors: ValidationIssue[];
+  raw: string;
+}
+
+export interface CompleteUnit {
+  kind: "complete";
+  reason?: string;
+}
+
+export interface IdleUnit {
+  kind: "idle";
+  reason: string;
+}
+
+export type NextUnit =
+  | TaskUnit
+  | WorkflowStepUnit
+  | GateStepUnit
+  | BlockedUnit
+  | CompleteUnit
+  | IdleUnit;
+
+/** One structural problem reported by `fest next` STOP / `fest validate`. */
+export interface ValidationIssue {
+  file: string;
+  /** Unfilled marker tokens like "[REPLACE: ...]" found in the file. */
+  markers: string[];
+  /** Non-marker error text (e.g. missing fest_working_dir). */
+  error?: string;
+}
+
+/** One line of `.fest/progress_events.jsonl`. */
+export interface ProgressEvent {
+  ts: string;
+  event: string;
+  phase?: string;
+  step?: number;
+  totalSteps?: number;
+  task?: string;
+  [key: string]: unknown;
+}
+
+export interface FestivalProgress {
+  completed: number;
+  total: number;
+  percent: number;
+  gatePending: boolean;
+  currentLabel?: string;
+}
+
+export interface FestivalSummary {
+  id: string;
+  name: string;
+  status: string;
+  path: string;
+  progress?: number;
+  tokens?: number;
+}
+
+export interface CampProject {
+  name: string;
+  path: string;
+}
+
+export interface GateRequest {
+  phase: string;
+  step: number;
+  totalSteps: number;
+  question: string;
+  evidence?: string;
+}
+
+export type GateDecision =
+  | { action: "approve" }
+  | { action: "reject"; reason: string }
+  | { action: "pending" };
+
+export interface OmpFestConfig {
+  statusLine: boolean;
+  autoCommitAfterTask: "ask" | "always" | "never";
+  autonomyCeiling: Autonomy;
+  gateNotify: ("ui" | "camp-notify" | "webhook")[];
+  webhookUrl?: string;
+  pauseAtGates: boolean;
+  evidenceRequiredOnGates: boolean;
+}
+
+export const DEFAULT_CONFIG: OmpFestConfig = {
+  statusLine: true,
+  autoCommitAfterTask: "ask",
+  autonomyCeiling: "medium",
+  gateNotify: ["ui", "camp-notify"],
+  pauseAtGates: true,
+  evidenceRequiredOnGates: true,
+};
