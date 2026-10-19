@@ -3,7 +3,7 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
-import { PLAN_GUIDE } from "../../domain/orientation.js";
+import { IDEA_INTERVIEW, PLAN_GUIDE, markerInterviewKickoff, planInterviewKickoff } from "../../domain/orientation.js";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 
 export interface CommandDeps {
@@ -22,6 +22,7 @@ export interface PiCommandsLike {
     },
   ): void;
   sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>): void;
+  sendUserMessage?(text: string): void;
 }
 
 interface CommandCtx {
@@ -140,11 +141,15 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       },
     },
     plan: {
-      desc: "guided planning: interview -> STRUCTURE.md -> scaffold -> markers -> validate -> approve -> promote",
+      desc: "guided planning interview — agent asks, you answer, agent builds the festival: /fest plan [goal]",
       run: (args, ctx) => {
         const goal = args.join(" ");
-        send(pi, "fest-plan", `${goal ? `Goal: ${goal}\n\n` : ""}${PLAN_GUIDE}`);
-        ctx.ui.notify("Planning guide posted — the agent interviews you, you approve the plan.", "info");
+        if (pi.sendUserMessage) {
+          pi.sendUserMessage(planInterviewKickoff(goal));
+          ctx.ui.notify("Planning interview started — answer the agent's questions.", "info");
+        } else {
+          send(pi, "fest-plan", `${goal ? `Goal: ${goal}\n\n` : ""}${PLAN_GUIDE}`);
+        }
       },
     },
     promote: {
@@ -168,10 +173,20 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       },
     },
     markers: {
-      desc: "list unfilled template markers: /fest markers",
-      run: async (_args, ctx) => {
+      desc: "list unfilled markers — 'fill' interviews you for each: /fest markers [fill]",
+      run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx);
-        send(pi, "fest-status", (await deps.fest.markersList(dir)) || "No unfilled markers.");
+        const listing = (await deps.fest.markersList(dir)) || "No unfilled markers.";
+        if (args[0] === "fill" && pi.sendUserMessage) {
+          if (listing === "No unfilled markers.") {
+            send(pi, "fest-status", listing);
+          } else {
+            pi.sendUserMessage(markerInterviewKickoff(listing));
+            ctx.ui.notify("Marker interview started — the agent asks you each missing value.", "info");
+          }
+          return;
+        }
+        send(pi, "fest-status", listing);
       },
     },
     workflow: {
@@ -256,14 +271,19 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       },
     },
     idea: {
-      desc: "capture an idea into the camp inbox: /fest idea <text>",
+      desc: "capture an idea (no args = agent interviews you first): /fest idea [text]",
       run: async (args, ctx) => {
         const location = await deps.detect.locate(ctx.cwd);
         if (!location.campRoot) {
           ctx.ui.notify("Not inside a camp", "warning");
           return;
         }
-        send(pi, "camp-idea", await deps.camp.ideaAdd(location.campRoot, args.join(" ")));
+        const text = args.join(" ");
+        if (!text && pi.sendUserMessage) {
+          pi.sendUserMessage(IDEA_INTERVIEW);
+          return;
+        }
+        send(pi, "camp-idea", await deps.camp.ideaAdd(location.campRoot, text));
       },
     },
     help: {
