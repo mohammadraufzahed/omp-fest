@@ -49,25 +49,26 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `git commit` like a peasant.
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
-- 🗺️ **guided planning flow** — `/fest-plan <goal>` posts the protocol:
+- 🗺️ **guided planning flow** — `/fest plan <goal>` posts the protocol:
   the agent interviews you, writes `STRUCTURE.md`, `fest_plan` scaffolds
   `festivals/planning/<name>` via real `fest scaffold from-plan`, fills
   markers, validates — then *you* approve and it `fest_promote`s to active.
   your brain → festival, no TUI wrangling 🧠
-- 🛠️ **15 tools + 13 slash commands** — `/fest-next`, `/fest-task`,
-  `/fest-approve`, `/fest-doctor`, `/camp-idea`... all with **live
-  autocomplete** pulled from `fest list` and `camp idea list`. nothing
-  hardcoded, everything discovered ✨
+- 🛠️ **15 tools + ONE guided command** — `/fest <sub>` is the whole
+  cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
+  `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
+  `camp`, `idea`, `help` — with **live autocomplete** on subs, task
+  actions, and festival ids. nothing hardcoded, everything discovered ✨
 - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run
   *any* subcommand (list, rules, chain, feedback, links, watch, jobs,
   idea claim/sync, ...) at the right dir, auto-inject `--yes` on task
   mutations, and return `{code, stdout, stderr}` typed. nothing the real
-  CLIs can do is out of reach. `/fest-cmd` + `/camp-cmd` for you too 💪
+  CLIs can do is out of reach. `/fest cmd` + `/fest camp` for you too 💪
 
 ## 🫵 what YOU get (the supervisor seat)
 
 - 🛑 **gates actually stop** — `fest_gate_submit` freezes and waits for YOU.
-  `/fest-approve` / `/fest-reject` run the real attestation. the model can
+  `/fest approve` / `/fest reject` run the real attestation. the model can
   *never* approve itself. your gates, your call. period. 🔒
 - 🚄 **parallel lanes** — `fest_parallel` groups pending tasks by sequence so
   your agent spawns one subagent per lane and tasks grind concurrently.

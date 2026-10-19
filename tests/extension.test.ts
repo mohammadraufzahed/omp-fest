@@ -87,21 +87,7 @@ describe("ompFest extension", () => {
     expect(tools.map((t) => t.name)).toContain("fest_next");
     expect(tools.map((t) => t.name)).toContain("fest_parallel");
     expect(tools).toHaveLength(15);
-    expect([...commands.keys()].sort()).toEqual([
-      "camp-cmd",
-      "camp-idea",
-      "fest",
-      "fest-approve",
-      "fest-cmd",
-      "fest-doctor",
-      "fest-next",
-      "fest-parallel",
-      "fest-plan",
-      "fest-reject",
-      "fest-show",
-      "fest-status",
-      "fest-task",
-    ]);
+    expect([...commands.keys()].sort()).toEqual(["fest"]);
   });
 
   it("fires session_start orientation and hides the injected note", async () => {
@@ -129,9 +115,12 @@ describe("ompFest extension", () => {
         expect(item).toHaveProperty("label");
       }
     }
-    const festTask = commands.get("fest-task");
-    const actions = await festTask?.getArgumentCompletions?.("d");
-    expect(actions?.map((a) => a.value)).toEqual(["done", "defer"]);
+    const festCmd = commands.get("fest");
+    const actions = await festCmd?.getArgumentCompletions?.("d");
+    const values = actions?.map((a) => a.value) ?? [];
+    expect(values).toContain("done");
+    expect(values).toContain("defer");
+    expect(values).toContain("doctor");
   });
 
   it("/fest reports dormant state when no festival exists", async () => {
