@@ -1,7 +1,7 @@
 {
   "name": "omp-fest",
   "version": "0.1.0",
-  "main": "index.js",
+  "main": "index.ts",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -11,7 +11,7 @@
   "keywords": [],
   "author": "",
   "license": "MIT",
-  "description": "oh-my-pi extension for fest.build (Festival) — camp detection, fest next loop, gates, supervisor cards",
+  "description": "oh-my-pi extension for fest.build (Festival) \u2014 camp detection, fest next loop, gates, supervisor cards",
   "type": "module",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -20,5 +20,10 @@
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.2",
     "vitest": "^5.0.5"
+  },
+  "omp": {
+    "extensions": [
+      "./index.ts"
+    ]
   }
 }

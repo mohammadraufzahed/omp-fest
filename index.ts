@@ -46,15 +46,16 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const detect = new CampFsDetect();
   const tracker = new LoopTracker();
 
-  void (async () => {
-    const cwd = process.cwd();
-    const config = await loadConfig(cwd);
-    const deps = { fest, camp, detect, tracker, config };
+  const cwd = process.cwd();
+  const deps = { fest, camp, detect, tracker };
 
-    registerTools(pi as unknown as PiLike, deps);
-    registerCommands(pi, deps);
+  registerTools(pi as unknown as PiLike, deps);
+  registerCommands(pi, deps);
 
-    pi.on("session_start", async (_event, ctx) => {
+  const configFor = async () => loadConfig(cwd);
+
+  pi.on("session_start", async (_event, ctx) => {
+      const config = await configFor();
       const notifier = new OmpNotifier(ctx.ui);
       if (!(await fest.available())) {
         notifier.warn("fest CLI not found — npm i -g @obedience-corp/festival");
@@ -98,7 +99,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       }
     });
 
-    pi.on("session_compact", async (_event, ctx) => {
+  pi.on("session_compact", async (_event, ctx) => {
       const orientation = await orientSession(ctx.cwd, detect);
       if (orientation.note) {
         pi.sendMessage(
@@ -108,7 +109,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       }
     });
 
-    pi.on("tool_call", (event) => {
+  pi.on("tool_call", (event) => {
       const toolCall = event as { toolName?: string; input?: { command?: string } };
       const command = toolCall.input?.command ?? "";
       if (toolCall.toolName === "bash" && /\bgit\s+commit\b/.test(command) && !/fest\s+commit/.test(command)) {
@@ -121,13 +122,10 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return undefined;
     });
 
-    pi.on("agent_end", (_event, ctx) => {
+  pi.on("agent_end", (_event, ctx) => {
       const nudge = tracker.nudge();
       if (nudge) {
         ctx.ui.notify(nudge, "warning");
       }
     });
-  })().catch((error: unknown) => {
-    pi.logger?.warn(`omp-fest init failed: ${String(error)}`);
-  });
 }

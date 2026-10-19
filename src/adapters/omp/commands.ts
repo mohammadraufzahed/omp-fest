@@ -17,7 +17,7 @@ export interface PiCommandsLike {
     name: string,
     options: {
       description?: string;
-      getArgumentCompletions?: (argPrefix: string, argIndex: number, ctx: CommandCtx) => Promise<string[]> | string[];
+      getArgumentCompletions?: (argPrefix: string) => Promise<AutocompleteItemLike[] | null> | AutocompleteItemLike[] | null;
       handler: (args: string, ctx: CommandCtx) => Promise<void> | void;
     },
   ): void;
@@ -52,16 +52,21 @@ async function festivalDirOf(deps: CommandDeps, ctx: CommandCtx, selector?: stri
   return dir;
 }
 
+interface AutocompleteItemLike {
+  value: string;
+  label: string;
+}
+
 function festivalCompleter(deps: CommandDeps) {
-  return async (prefix: string, _i: number, ctx: CommandCtx): Promise<string[]> => {
-    const location = await deps.detect.locate(ctx.cwd);
+  return async (prefix: string): Promise<AutocompleteItemLike[] | null> => {
+    const location = await deps.detect.locate(process.cwd());
     if (!location.campRoot) {
-      return [];
+      return null;
     }
     const festivals = await deps.fest.list(location.campRoot);
     return festivals
-      .map((f: FestivalSummary) => f.id)
-      .filter((id) => id.toLowerCase().includes(prefix.toLowerCase()));
+      .filter((f: FestivalSummary) => f.id.toLowerCase().includes(prefix.toLowerCase()))
+      .map((f: FestivalSummary) => ({ value: f.id, label: f.name }));
   };
 }
 
@@ -120,8 +125,8 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
 
   pi.registerCommand("fest-task", {
     description: "Task state: /fest-task <show|done|block|defer|unblock|reset|update> [task] [reason|pct]",
-    getArgumentCompletions: (prefix, index) =>
-      index === 0 ? TASK_ACTIONS.filter((a) => a.startsWith(prefix)) : [],
+    getArgumentCompletions: (prefix) =>
+      TASK_ACTIONS.filter((a) => a.startsWith(prefix)).map((a) => ({ value: a, label: a })),
     handler: async (args, ctx) => {
       const [action = "show", ...rest] = args.trim().split(/\s+/);
       const dir = await festivalDirOf(deps, ctx);
