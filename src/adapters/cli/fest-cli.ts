@@ -3,6 +3,8 @@
  * and always passes --yes on mutations (fest v0.9.7 refuses headless
  * confirmations otherwise). Output is returned parsed or verbatim per port.
  */
+import { cp, mkdir, readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { classifyNextOutput } from "../../domain/next-unit.js";
 import type { FestivalSummary, NextUnit } from "../../domain/types.js";
 import type { ExecRunner, FestCli } from "../../ports.js";
@@ -150,6 +152,31 @@ export class FestCliAdapter implements FestCli {
     }
     const result = await this.checked(this.exec.run("fest", args, campRoot));
     return result.stdout;
+  }
+
+  async gatesApply(campRoot: string, festivalDir: string): Promise<{ created: number; output: string }> {
+    const gatesDir = join(festivalDir, "gates");
+    const seeded = await readdir(gatesDir).then(() => false, async () => {
+      const source = join(
+        campRoot,
+        "festivals",
+        ".festival",
+        "templates",
+        "phases",
+        "implementation",
+        "gates",
+      );
+      const target = join(gatesDir, "implementation");
+      await mkdir(target, { recursive: true });
+      await cp(source, target, { recursive: true });
+      return true;
+    });
+    const result = await this.exec.run("fest", ["gates", "apply", "--approve"], festivalDir);
+    const created = /(\d+)(?: files)? created/.exec(result.stdout)?.[1] ?? "0";
+    return {
+      created: Number(created),
+      output: `${seeded ? "Seeded missing gates/ templates from camp .festival templates.\n" : ""}${result.stdout}${result.stderr}`,
+    };
   }
 
   async promote(cwd: string, name?: string): Promise<string> {

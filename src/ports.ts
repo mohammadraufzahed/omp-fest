@@ -50,6 +50,12 @@ export interface FestCli {
   ): Promise<string>;
   /** `fest promote` — advance a festival one lifecycle step. Runs at campRoot or inside the festival. */
   promote(cwd: string, name?: string): Promise<string>;
+  /**
+   * `fest gates apply --approve` inside a festival. `fest scaffold from-plan` does NOT create
+   * the festival-level `gates/` template dir, so when it's missing this seeds it from the camp's
+   * `.festival/templates/phases/implementation/gates/` templates first. Returns files created.
+   */
+  gatesApply(campRoot: string, festivalDir: string): Promise<{ created: number; output: string }>;
   /** Raw passthrough for the long tail of `fest` subcommands. */
   raw(cwd: string, args: string[]): Promise<ExecResult>;
   list(campRoot: string): Promise<FestivalSummary[]>;
