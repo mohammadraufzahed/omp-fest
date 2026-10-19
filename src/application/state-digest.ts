@@ -17,14 +17,20 @@ export interface DigestDeps {
 const RULES =
   "fest loop: fest_next → implement → fest_task_complete → fest_commit. Never run fest/camp in the shell — use the fest_*/camp_* tools (fest_raw for uncovered subcommands). Edits to project files need a unit open from fest_next. Parallel: group pending tasks by sequence → one subagent per lane.";
 
-/** Returns the digest text, or undefined outside a camp (no injection). */
-export async function buildStateDigest(deps: DigestDeps, cwd: string): Promise<string | undefined> {
+/** Returns the digest text, or undefined outside a camp (no injection). sessionId scopes the unit/festival pick to that agent. */
+export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId = "default"): Promise<string | undefined> {
   const location = await deps.detect.locate(cwd);
   if (!location.campRoot) {
     return undefined;
   }
+  // Resolution: cwd inside a festival > the festival this session claimed via
+  // fest_* tools > the camp-wide active pick. Without the middle step two
+  // agents on different festivals both see whichever festival sorts first.
+  const claimed = deps.tracker.festivalFor(sessionId);
   const festivalDir =
-    location.festivalDir ?? (await deps.detect.activeFestival(location.campRoot));
+    location.festivalDir ??
+    (claimed?.startsWith(`${location.campRoot}/`) ? claimed : undefined) ??
+    (await deps.detect.activeFestival(location.campRoot));
   if (!festivalDir) {
     const festivals = await deps.detect.listFestivals(location.campRoot);
     const names = festivals.map((f) => `${f.id} (${f.status})`).join(", ") || "none";
@@ -39,7 +45,7 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string): Promise<s
     deps.detect.readProgress(festivalDir),
   ]);
   const progress = summarizeProgress(events);
-  const unit = deps.tracker.openTaskPath ?? "none";
+  const unit = deps.tracker.openTaskPathFor(sessionId) ?? "none";
   const festivalId = location.festivalId ?? basename(festivalDir);
   const lines = [
     `fest: camp=${location.campName ?? "?"} festival=${festivalId} unit=${unit} pending=${pending.length} progress=${progress.completed}/${progress.total}`,

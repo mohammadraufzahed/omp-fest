@@ -19,6 +19,7 @@ import { watchCampTransitions } from "./src/application/camp-watcher.js";
 import { LoopTracker } from "./src/application/loop-tracker.js";
 import { orientSession } from "./src/application/orient.js";
 import { buildStateDigest } from "./src/application/state-digest.js";
+import { sessionIdOf } from "./src/application/session-id.js";
 import { CampCliAdapter } from "./src/adapters/cli/camp-cli.js";
 import { FestCliAdapter } from "./src/adapters/cli/fest-cli.js";
 import { NodeExecRunner } from "./src/adapters/cli/node-exec.js";
@@ -31,6 +32,7 @@ import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 
 interface ExtensionContextLike {
   cwd: string;
+  sessionManager?: { getSessionId?(): string };
   ui: {
     notify(message: string, type?: "info" | "warning" | "error"): void;
     setStatus(key: string, text: string | undefined): void;
@@ -197,7 +199,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   // never goes stale, replacing the old one-shot orientation/compaction
   // re-inject.
   pi.on("before_agent_start", async (_event, ctx) => {
-    const digest = await buildStateDigest(deps, ctx.cwd);
+    const digest = await buildStateDigest(deps, ctx.cwd, sessionIdOf(ctx));
     const config = await configFor();
     ctx.ui.setWidget?.(
       "ompfest",
@@ -271,8 +273,10 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return undefined;
     }
     const location = await detect.locate(ctx.cwd);
+    const claimed = tracker.festivalFor(sessionIdOf(ctx));
     const festivalDir =
       location.festivalDir ??
+      (location.campRoot && claimed?.startsWith(`${location.campRoot}/`) ? claimed : undefined) ??
       (location.campRoot ? await detect.activeFestival(location.campRoot) : undefined);
     if (!festivalDir) {
       return undefined;
@@ -283,14 +287,15 @@ export default function ompFest(pi: ExtensionApiLike): void {
     if (targets.length === 0) {
       return undefined;
     }
-    if (tracker.openTaskPath !== undefined) {
+    if (tracker.openTaskPathFor(sessionIdOf(ctx)) !== undefined) {
       return undefined;
     }
     const pending = await detect.pendingTasks(festivalDir);
     if (pending.length === 0) {
       return undefined;
     }
-    const fresh = targets.filter((p) => tracker.markWarned(p));
+    const sid = sessionIdOf(ctx);
+    const fresh = targets.filter((p) => tracker.markWarned(sid, p));
     if (fresh.length === 0) {
       return undefined;
     }
@@ -308,7 +313,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   });
 
   pi.on("agent_end", (_event, ctx) => {
-    const nudge = tracker.nudge();
+    const nudge = tracker.nudge(sessionIdOf(ctx));
     if (nudge) {
       ctx.ui.notify(nudge, "warning");
     }

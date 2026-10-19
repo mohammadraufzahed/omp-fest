@@ -2,6 +2,11 @@
  * LoopTracker: watches task lifecycle so the plugin can nudge when work was
  * done but `fest task completed` + `fest commit` never landed — the most
  * common way a festival's work record goes stale.
+ *
+ * Everything is keyed by omp session id: parallel agents (main + subagent
+ * lanes) work different festivals in the same process, so a shared
+ * openTaskPath or warn-set would leak one agent's unit into another's
+ * digest and discipline rules.
  */
 export interface LoopState {
   /** Task currently being executed (festival-relative path). */
@@ -10,48 +15,68 @@ export interface LoopState {
   commitDone: boolean;
 }
 
-export class LoopTracker {
-  private state: LoopState = { taskCompleted: false, commitDone: false };
-  private readonly warnedPaths = new Set<string>();
+const EMPTY: LoopState = { taskCompleted: false, commitDone: false };
 
-  /** Dedupe untracked-edit warnings: true when this path wasn't warned yet. */
-  markWarned(path: string): boolean {
-    if (this.warnedPaths.has(path)) {
+export class LoopTracker {
+  private readonly states = new Map<string, LoopState>();
+  private readonly warned = new Map<string, Set<string>>();
+  private readonly festivals = new Map<string, string>();
+
+  private stateOf(sessionId: string): LoopState {
+    return this.states.get(sessionId) ?? EMPTY;
+  }
+
+  /** Dedupe untracked-edit warnings per session: true when this session wasn't warned for the path yet. */
+  markWarned(sessionId: string, path: string): boolean {
+    const set = this.warned.get(sessionId) ?? new Set<string>();
+    this.warned.set(sessionId, set);
+    if (set.has(path)) {
       return false;
     }
-    this.warnedPaths.add(path);
+    set.add(path);
     return true;
   }
 
-  taskOpened(path: string): void {
-    this.state = { openTask: path, taskCompleted: false, commitDone: false };
+  /** Record which festival this session is working — digest/tracking then follow it instead of the camp-wide active pick. */
+  claimFestival(sessionId: string, festivalDir: string): void {
+    this.festivals.set(sessionId, festivalDir);
   }
 
-  taskCompleted(): void {
-    this.state.taskCompleted = true;
+  festivalFor(sessionId: string): string | undefined {
+    return this.festivals.get(sessionId);
   }
 
-  committed(): void {
-    this.state.commitDone = true;
+  taskOpened(sessionId: string, path: string): void {
+    this.states.set(sessionId, { openTask: path, taskCompleted: false, commitDone: false });
   }
 
-  cleared(): void {
-    this.state = { taskCompleted: false, commitDone: false };
+  taskCompleted(sessionId: string): void {
+    const s = { ...this.stateOf(sessionId), taskCompleted: true };
+    this.states.set(sessionId, s);
   }
 
-  get openTaskPath(): string | undefined {
-    return this.state.openTask;
+  committed(sessionId: string): void {
+    const s = { ...this.stateOf(sessionId), commitDone: true };
+    this.states.set(sessionId, s);
+  }
+
+  cleared(sessionId: string): void {
+    this.states.set(sessionId, { taskCompleted: false, commitDone: false });
+  }
+
+  openTaskPathFor(sessionId: string): string | undefined {
+    return this.stateOf(sessionId).openTask;
   }
 
   /** A task was opened via fest_next but complete+commit haven't both landed. */
-  get unfinished(): boolean {
-    const s = this.state;
+  unfinishedFor(sessionId: string): boolean {
+    const s = this.stateOf(sessionId);
     return s.openTask !== undefined && !(s.taskCompleted && s.commitDone);
   }
 
   /** Nudge message when the record is stale, or undefined when clean. */
-  nudge(): string | undefined {
-    const { openTask, taskCompleted, commitDone } = this.state;
+  nudge(sessionId: string): string | undefined {
+    const { openTask, taskCompleted, commitDone } = this.stateOf(sessionId);
     if (!openTask || (taskCompleted && commitDone)) {
       return undefined;
     }
