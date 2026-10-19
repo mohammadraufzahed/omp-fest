@@ -34,6 +34,7 @@ interface ExtensionContextLike {
   ui: {
     notify(message: string, type?: "info" | "warning" | "error"): void;
     setStatus(key: string, text: string | undefined): void;
+    setWidget?(key: string, content: string[] | undefined, options?: { placement?: string }): void;
   };
 }
 
@@ -197,6 +198,17 @@ export default function ompFest(pi: ExtensionApiLike): void {
   // re-inject.
   pi.on("before_agent_start", async (_event, ctx) => {
     const digest = await buildStateDigest(deps, ctx.cwd);
+    const config = await configFor();
+    ctx.ui.setWidget?.(
+      "ompfest",
+      digest && config.progressWidget
+        ? [
+            `⛺ ${(digest.split("\n")[0] ?? "").replace(/^fest: /, "")}`,
+            ...(digest.includes("GATE PENDING") ? ["⚑ GATE PENDING — needs your approval (/fest approve)"] : []),
+          ]
+        : undefined,
+      { placement: "aboveEditor" },
+    );
     if (!digest) {
       return undefined;
     }

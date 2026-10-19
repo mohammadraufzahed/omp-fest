@@ -3,6 +3,7 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { matchFestival } from "../../application/fest-resolve.js";
+import { showCard, type OverlayUiLike } from "./overlay.js";
 import { loadConfig, saveConfig } from "../../domain/config.js";
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
 import { DEFAULT_CONFIG, type OmpFestConfig } from "../../domain/types.js";
@@ -30,7 +31,16 @@ export interface PiCommandsLike {
 
 interface CommandCtx {
   cwd: string;
-  ui: { notify(message: string, type?: string): void };
+  ui: OverlayUiLike & {
+    notify(message: string, type?: string): void;
+    select?(
+      title: string,
+      options: (string | { label: string; description?: string })[],
+      opts?: Record<string, unknown>,
+    ): Promise<string | undefined>;
+    confirm?(title: string, message: string, opts?: Record<string, unknown>): Promise<boolean>;
+    input?(title: string, placeholder?: string, opts?: Record<string, unknown>): Promise<string | undefined>;
+  };
 }
 
 function send(pi: PiCommandsLike, customType: string, content: string): void {
@@ -46,6 +56,17 @@ async function festivalDirOf(deps: CommandDeps, ctx: CommandCtx, selector?: stri
     const all = await deps.fest.list(location.campRoot);
     const match = matchFestival(all, selector);
     if (match.kind === "ambiguous") {
+      const picked =
+        typeof ctx.ui.select === "function"
+          ? await ctx.ui.select(
+              `Multiple festivals match "${selector}"`,
+              match.matches.map((f) => ({ label: f.id, description: f.status })),
+            )
+          : undefined;
+      const resolved = picked ? matchFestival(all, picked) : undefined;
+      if (resolved?.kind === "match") {
+        return resolved.festival.path;
+      }
       throw new Error(`Ambiguous festival "${selector}" — matches: ${match.matches.map((f) => f.id).join(", ")}`);
     }
     if (match.kind === "match") {
@@ -77,6 +98,9 @@ type SettingParse = { value: unknown } | { error: string };
 interface SettingSpec {
   key: keyof OmpFestConfig;
   desc: string;
+  /** Drives the interactive editor: bool toggles, enum/list pick from choices, text prompts via ui.input. */
+  kind: "bool" | "enum" | "list" | "text";
+  choices?: readonly string[];
   /** Undefined raw = toggle (booleans only). */
   parse: (raw: string | undefined, current: unknown) => SettingParse;
 }
@@ -105,16 +129,21 @@ const enumOf = (values: readonly string[]) =>
 
 const GATE_CHANNELS = ["ui", "camp-notify", "webhook"] as const;
 
+const GATE_PRESETS = ["ui", "camp-notify", "webhook", "ui,camp-notify", "ui,camp-notify,webhook", "none"] as const;
+
 const SETTING_SPECS: SettingSpec[] = [
-  { key: "statusLine", desc: "festival progress in the omp status line", parse: BOOL },
-  { key: "watchTransitions", desc: "notify on festival lifecycle moves (planning→ready→active)", parse: BOOL },
-  { key: "pauseAtGates", desc: "stop for human approval at gates", parse: BOOL },
-  { key: "evidenceRequiredOnGates", desc: "require evidence text on gate approval", parse: BOOL },
-  { key: "autoCommitAfterTask", desc: "auto fest_commit after task completed", parse: enumOf(["ask", "always", "never"]) },
-  { key: "autonomyCeiling", desc: "max autonomy level", parse: enumOf(["low", "medium", "high"]) },
+  { key: "statusLine", desc: "festival progress in the omp status line", kind: "bool", parse: BOOL },
+  { key: "watchTransitions", desc: "notify on festival lifecycle moves (planning→ready→active)", kind: "bool", parse: BOOL },
+  { key: "progressWidget", desc: "persistent progress widget above the editor", kind: "bool", parse: BOOL },
+  { key: "pauseAtGates", desc: "stop for human approval at gates", kind: "bool", parse: BOOL },
+  { key: "evidenceRequiredOnGates", desc: "require evidence text on gate approval", kind: "bool", parse: BOOL },
+  { key: "autoCommitAfterTask", desc: "auto fest_commit after task completed", kind: "enum", choices: ["ask", "always", "never"], parse: enumOf(["ask", "always", "never"]) },
+  { key: "autonomyCeiling", desc: "max autonomy level", kind: "enum", choices: ["low", "medium", "high"], parse: enumOf(["low", "medium", "high"]) },
   {
     key: "gateNotify",
     desc: "gate notification channels (comma list: ui,camp-notify,webhook; 'none' disables)",
+    kind: "list",
+    choices: GATE_PRESETS,
     parse: (raw) => {
       if (raw === undefined) {
         return err("expected a comma list like ui,camp-notify or 'none'");
@@ -130,9 +159,71 @@ const SETTING_SPECS: SettingSpec[] = [
   {
     key: "webhookUrl",
     desc: "gate webhook target ('none' clears)",
+    kind: "text",
     parse: (raw) => (raw === undefined ? err("expected a URL or 'none'") : val(raw === "none" ? undefined : raw)),
   },
 ];
+
+const formatSetting = (value: unknown): string => (value === undefined ? "—" : JSON.stringify(value));
+
+/** One interactive settings pass: pick a key → edit it → repeat until Done. */
+async function interactiveSettings(ctx: CommandCtx, dir: string): Promise<boolean> {
+  if (typeof ctx.ui.select !== "function") {
+    return false;
+  }
+  for (;;) {
+    const config = await loadConfig(dir);
+    const choice = await ctx.ui.select(
+      "omp-fest settings",
+      [
+        ...SETTING_SPECS.map((spec) => ({
+          label: spec.key,
+          description: `${formatSetting(config[spec.key])} — ${spec.desc}`,
+        })),
+        { label: "reset", description: "restore all defaults" },
+        { label: "done", description: "close settings" },
+      ],
+    );
+    if (choice === undefined || choice === "done") {
+      return true;
+    }
+    if (choice === "reset") {
+      await saveConfig(dir, { ...DEFAULT_CONFIG, webhookUrl: undefined });
+      ctx.ui.notify("Settings reset to defaults.", "info");
+      continue;
+    }
+    const spec = SETTING_SPECS.find((s) => s.key === choice);
+    if (!spec) {
+      continue;
+    }
+    const current = config[spec.key];
+    if (spec.kind === "bool") {
+      const next = !current;
+      await saveConfig(dir, { [spec.key]: next });
+      ctx.ui.notify(`${spec.key} = ${next}`, "info");
+      continue;
+    }
+    let value: unknown;
+    if (spec.kind === "text") {
+      value = await ctx.ui.input?.(`${spec.key} — ${spec.desc}`, "type 'none' to clear");
+      if (value === undefined) {
+        continue;
+      }
+      value = value === "none" ? undefined : value;
+    } else if (typeof ctx.ui.select === "function") {
+      const picked = await ctx.ui.select(
+        `${spec.key} (current: ${formatSetting(current)})`,
+        spec.choices?.map((c) => ({ label: c, description: spec.desc })) ?? [],
+      );
+      if (picked === undefined) {
+        continue;
+      }
+      value = spec.kind === "list" ? (picked === "none" ? [] : picked.split(",")) : picked;
+    }
+    await saveConfig(dir, { [spec.key]: value });
+    ctx.ui.notify(`${spec.key} = ${formatSetting(value)}`, "info");
+  }
+}
 
 export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   const subs: Record<string, Sub> = {
@@ -159,7 +250,14 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
             lines.push("No festivals yet — `/fest plan <goal>` starts the planning flow.");
           }
         }
-        send(pi, "fest-status", lines.join("\n"));
+        const shown = await showCard(ctx.ui, {
+          title: `✦ camp ${location.campName ?? "fest"}`,
+          lines,
+          footer: "esc close · /fest help for commands",
+        });
+        if (!shown) {
+          send(pi, "fest-status", lines.join("\n"));
+        }
       },
     },
     next: {
@@ -182,7 +280,16 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "festival tree with per-step checkmarks: /fest show [festival]",
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx, args[0]);
-        send(pi, "fest-show", await deps.fest.show(dir, args[1]));
+        const output = await deps.fest.show(dir, args[1]);
+        const name = dir.split("/").filter(Boolean).at(-1) ?? "festival";
+        const shown = await showCard(ctx.ui, {
+          title: `✦ ${name}`,
+          lines: output.split("\n"),
+          footer: "esc/q close · j/k/↑↓ scroll · space pgdn",
+        });
+        if (!shown) {
+          send(pi, "fest-show", output);
+        }
       },
     },
     task: {
@@ -268,13 +375,31 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     approve: {
       desc: "approve the pending gate checkpoint (human attestation)",
       run: async (_args, ctx) => {
-        send(pi, "fest-gate", await deps.fest.workflowApprove(await festivalDirOf(deps, ctx)));
+        const dir = await festivalDirOf(deps, ctx);
+        const yes =
+          typeof ctx.ui.confirm === "function"
+            ? await ctx.ui.confirm("Approve gate", `Approve the pending gate in ${dir.split("/").filter(Boolean).at(-1) ?? "festival"}?`)
+            : true;
+        if (!yes) {
+          send(pi, "fest-gate", "Approval cancelled — the gate stays pending.");
+          return;
+        }
+        send(pi, "fest-gate", await deps.fest.workflowApprove(dir));
       },
     },
     reject: {
       desc: "reject the pending checkpoint: /fest reject <reason>",
       run: async (args, ctx) => {
-        send(pi, "fest-gate", await deps.fest.workflowReject(await festivalDirOf(deps, ctx), args.join(" ") || "no reason given"));
+        let reason = args.join(" ");
+        if (!reason && typeof ctx.ui.input === "function") {
+          const typed = await ctx.ui.input("Reject checkpoint — reason", "what should be fixed?");
+          if (typed === undefined) {
+            send(pi, "fest-gate", "Rejection cancelled — the gate stays pending.");
+            return;
+          }
+          reason = typed;
+        }
+        send(pi, "fest-gate", await deps.fest.workflowReject(await festivalDirOf(deps, ctx), reason || "no reason given"));
       },
     },
     parallel: {
@@ -311,7 +436,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         lines.push(`camp: ${(await deps.camp.available()) ? "installed" : "NOT INSTALLED"}`);
         const location = await deps.detect.locate(ctx.cwd);
         lines.push(`location: ${location.kind}${location.campRoot ? ` (${location.campRoot})` : ""}`);
-        send(pi, "fest-doctor", lines.join("\n"));
+        const shown = await showCard(ctx.ui, { title: "✦ fest doctor", lines });
+        if (!shown) {
+          send(pi, "fest-doctor", lines.join("\n"));
+        }
       },
     },
     cmd: {
@@ -362,6 +490,9 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         const dir = location.campRoot ?? ctx.cwd;
         const config = await loadConfig(dir);
         if (args.length === 0) {
+          if (await interactiveSettings(ctx, dir)) {
+            return;
+          }
           const lines = [`omp-fest settings (${dir}/.ompfest.json):`];
           for (const spec of SETTING_SPECS) {
             const value = config[spec.key] === undefined ? "—" : JSON.stringify(config[spec.key]);
