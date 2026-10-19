@@ -39,6 +39,7 @@ function mockPi(cwd: string) {
   const commands = new Map<string, RegisteredCommand>();
   const tools: { name: string }[] = [];
   const sent: SentMessage[] = [];
+  const userMessages: string[] = [];
   const statuses: Record<string, string | undefined> = {};
   const ctx = {
     cwd,
@@ -67,9 +68,12 @@ function mockPi(cwd: string) {
     sendMessage: (message: SentMessage["message"], options?: SentMessage["options"]) => {
       sent.push({ message, options });
     },
+    sendUserMessage: (text: string) => {
+      userMessages.push(text);
+    },
     setLabel: vi.fn(),
   };
-  return { pi, handlers, commands, tools, sent, statuses, ctx };
+  return { pi, handlers, commands, tools, sent, userMessages, statuses, ctx };
 }
 
 async function makeCamp(): Promise<string> {
@@ -121,6 +125,25 @@ describe("ompFest extension", () => {
     expect(values).toContain("done");
     expect(values).toContain("defer");
     expect(values).toContain("doctor");
+  });
+
+  it("/fest plan kicks off a guided interview instead of a static guide", async () => {
+    const root = await makeCamp();
+    const { pi, commands, userMessages, ctx } = mockPi(root);
+    ompFest(pi as never);
+    const handler = commands.get("fest")?.handler;
+    await handler?.("plan restructure prenatal form", ctx);
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]).toContain("interview");
+    expect(userMessages[0]).toContain("restructure prenatal form");
+  });
+
+  it("/fest idea without text interviews the user first", async () => {
+    const root = await makeCamp();
+    const { pi, commands, userMessages, ctx } = mockPi(root);
+    ompFest(pi as never);
+    await commands.get("fest")?.handler("idea", ctx);
+    expect(userMessages[0]).toContain("idea-capture interview");
   });
 
   it("/fest reports dormant state when no festival exists", async () => {

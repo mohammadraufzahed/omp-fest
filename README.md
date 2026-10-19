@@ -49,7 +49,9 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `git commit` like a peasant.
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
-- 🗺️ **guided planning flow** — `/fest plan <goal>` posts the protocol:
+- 🗺️ **interactive planning interview** — `/fest plan <goal>` makes the
+  agent interview YOU in chat (one question per turn, like `/guided-goal`),
+  then it builds the festival itself:
   the agent interviews you, writes `STRUCTURE.md`, `fest_plan` scaffolds
   `festivals/planning/<name>` via real `fest scaffold from-plan`, fills
   markers, validates — then *you* approve and it `fest_promote`s to active.
