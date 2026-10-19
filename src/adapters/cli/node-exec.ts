@@ -3,7 +3,7 @@
  * args are passed verbatim so paths/messages can't be injected.
  */
 import { execFile } from "node:child_process";
-import type { ExecResult, ExecRunner } from "@/ports.js";
+import type { ExecResult, ExecRunner } from "../../ports.js";
 
 const TIMEOUT_MS = 60_000;
 

@@ -2,10 +2,10 @@
  * OrientSession use case: detect where the session opened inside a camp and
  * produce the orientation note + status-line text the omp adapters render.
  */
-import { buildOrientationNote } from "@/domain/orientation.js";
-import { statusLineText, summarizeProgress } from "@/domain/progress.js";
-import type { CampLocation, FestivalProgress } from "@/domain/types.js";
-import type { CampDetect } from "@/ports.js";
+import { buildOrientationNote } from "../domain/orientation.js";
+import { statusLineText, summarizeProgress } from "../domain/progress.js";
+import type { CampLocation, FestivalProgress } from "../domain/types.js";
+import type { CampDetect } from "../ports.js";
 
 export interface Orientation {
   location: CampLocation;

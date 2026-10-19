@@ -6,18 +6,18 @@
  * submodule at `.omp/extensions/omp-fest` — keep the dependency footprint at
  * zero; the runtime injects zod and the pi SDK.
  */
-import { LoopTracker } from "@/application/loop-tracker.js";
-import { orientSession } from "@/application/orient.js";
-import { CampCliAdapter } from "@/adapters/cli/camp-cli.js";
-import { FestCliAdapter } from "@/adapters/cli/fest-cli.js";
-import { NodeExecRunner } from "@/adapters/cli/node-exec.js";
-import { CampFsDetect } from "@/adapters/fs/camp-fs.js";
-import { registerCommands } from "@/adapters/omp/commands.js";
-import { notifyGate, OmpNotifier } from "@/adapters/omp/notify.js";
-import { registerTools, type PiLike } from "@/adapters/omp/tools.js";
-import { loadConfig } from "@/domain/config.js";
-import { PARALLEL_HINT, RECOVERY_PLAYBOOK } from "@/domain/orientation.js";
-import { statusLineText, summarizeProgress } from "@/domain/progress.js";
+import { LoopTracker } from "./src/application/loop-tracker.js";
+import { orientSession } from "./src/application/orient.js";
+import { CampCliAdapter } from "./src/adapters/cli/camp-cli.js";
+import { FestCliAdapter } from "./src/adapters/cli/fest-cli.js";
+import { NodeExecRunner } from "./src/adapters/cli/node-exec.js";
+import { CampFsDetect } from "./src/adapters/fs/camp-fs.js";
+import { registerCommands } from "./src/adapters/omp/commands.js";
+import { notifyGate, OmpNotifier } from "./src/adapters/omp/notify.js";
+import { registerTools, type PiLike } from "./src/adapters/omp/tools.js";
+import { loadConfig } from "./src/domain/config.js";
+import { PARALLEL_HINT, RECOVERY_PLAYBOOK } from "./src/domain/orientation.js";
+import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 
 interface ExtensionContextLike {
   cwd: string;

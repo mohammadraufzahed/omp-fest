@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyNextOutput } from "@/domain/next-unit.js";
+import { classifyNextOutput } from "../src/domain/next-unit.js";
 
 const TASK_OUTPUT = `
 NEXT TASK

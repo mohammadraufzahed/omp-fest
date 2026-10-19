@@ -2,8 +2,8 @@
  * Notifier adapter over omp's ui.notify plus optional camp-notify/webhook
  * fan-out for gate events on headless boxes.
  */
-import type { CampCli, Notifier } from "@/ports.js";
-import type { OmpFestConfig } from "@/domain/types.js";
+import type { CampCli, Notifier } from "../../ports.js";
+import type { OmpFestConfig } from "../../domain/types.js";
 
 export interface UiLike {
   notify(message: string, type?: "info" | "warning" | "error"): void;

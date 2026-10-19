@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { FestCliAdapter } from "@/adapters/cli/fest-cli.js";
-import type { ExecResult, ExecRunner } from "@/ports.js";
+import { FestCliAdapter } from "../src/adapters/cli/fest-cli.js";
+import type { ExecResult, ExecRunner } from "../src/ports.js";
 
 function fakeExec(result: Partial<ExecResult>): ExecRunner & { calls: { command: string; args: string[]; cwd?: string }[] } {
   const calls: { command: string; args: string[]; cwd?: string }[] = [];

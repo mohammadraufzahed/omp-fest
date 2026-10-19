@@ -2,9 +2,9 @@
  * Human-facing slash commands with live autocomplete sourced from the CLIs —
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
-import { statusLineText, summarizeProgress } from "@/domain/progress.js";
-import type { FestivalSummary } from "@/domain/types.js";
-import type { CampCli, CampDetect, FestCli } from "@/ports.js";
+import { statusLineText, summarizeProgress } from "../../domain/progress.js";
+import type { FestivalSummary } from "../../domain/types.js";
+import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 
 export interface CommandDeps {
   fest: FestCli;

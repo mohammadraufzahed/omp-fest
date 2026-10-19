@@ -3,9 +3,9 @@
  * and always passes --yes on mutations (fest v0.9.7 refuses headless
  * confirmations otherwise). Output is returned parsed or verbatim per port.
  */
-import { classifyNextOutput } from "@/domain/next-unit.js";
-import type { FestivalSummary, NextUnit } from "@/domain/types.js";
-import type { ExecRunner, FestCli } from "@/ports.js";
+import { classifyNextOutput } from "../../domain/next-unit.js";
+import type { FestivalSummary, NextUnit } from "../../domain/types.js";
+import type { ExecRunner, FestCli } from "../../ports.js";
 
 function str(value: unknown): string {
   return typeof value === "string" ? value : "";

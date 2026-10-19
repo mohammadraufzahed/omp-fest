@@ -2,8 +2,8 @@
  * CampCli adapter — wraps the camp command surface the plugin needs:
  * projects, idea capture, notifications, and deferred-commit job lanes.
  */
-import type { CampProject } from "@/domain/types.js";
-import type { CampCli, ExecRunner } from "@/ports.js";
+import type { CampProject } from "../../domain/types.js";
+import type { CampCli, ExecRunner } from "../../ports.js";
 
 export class CampCliAdapter implements CampCli {
   constructor(private readonly exec: ExecRunner) {}
