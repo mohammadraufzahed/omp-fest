@@ -259,11 +259,16 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             "'  - **Phase 1:** name (type)', '    - Sequence 1: name', '      - Task 1: title' — then call fest_plan again.",
         });
       }
+      let gates: { created: number; output: string } | undefined;
+      if (parsed?.festival_dir && params.dryRun !== true) {
+        gates = await deps.fest.gatesApply(root, parsed.festival_dir).catch(() => undefined);
+      }
       return textResult({
         kind: "plan_scaffolded",
         dryRun: params.dryRun === true,
         output,
         ...(parsed?.festival_dir ? { festivalDir: parsed.festival_dir } : {}),
+        ...(gates ? { qualityGates: gates } : {}),
         nextSteps: [
           `Fill unfilled markers: fest_markers {list:true, festival:"${params.name}"}`,
           `Run fest_validate {festival:"${params.name}"}`,
