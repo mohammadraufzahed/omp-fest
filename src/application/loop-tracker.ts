@@ -29,6 +29,16 @@ export class LoopTracker {
     this.state = { taskCompleted: false, commitDone: false };
   }
 
+  get openTaskPath(): string | undefined {
+    return this.state.openTask;
+  }
+
+  /** A task was opened via fest_next but complete+commit haven't both landed. */
+  get unfinished(): boolean {
+    const s = this.state;
+    return s.openTask !== undefined && !(s.taskCompleted && s.commitDone);
+  }
+
   /** Nudge message when the record is stale, or undefined when clean. */
   nudge(): string | undefined {
     const { openTask, taskCompleted, commitDone } = this.state;

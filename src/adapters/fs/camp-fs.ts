@@ -5,13 +5,16 @@
  * `FESTIVAL_GOAL.md`; progress is tailed from `.fest/progress_events.jsonl`.
  */
 import { watch } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import { parseProgressLine } from "../../domain/progress.js";
 import type { CampLocation, FestivalSummary, PendingTask, ProgressEvent } from "../../domain/types.js";
 import type { CampDetect } from "../../ports.js";
 
-const FESTIVAL_STATUSES = ["planning", "ready", "parked", "active", "ritual"];
+/** Resolution priority when picking "the" festival at camp root — the live one first. */
+const ACTIVE_FIRST = ["active", "ready", "planning", "parked", "ritual"];
+/** Every status dir a festival can live under (completed added for selectors). */
+const ALL_STATUSES = [...ACTIVE_FIRST, "completed"];
 
 async function safeReaddir(dir: string): Promise<string[]> {
   try {
@@ -53,7 +56,7 @@ export class CampFsDetect implements CampDetect {
   }
 
   async activeFestival(campRoot: string): Promise<string | undefined> {
-    for (const status of FESTIVAL_STATUSES) {
+    for (const status of ACTIVE_FIRST) {
       const dir = join(campRoot, "festivals", status);
       const entries = await readDirSafe(dir);
       const active = entries.find((name) => !name.startsWith("."));
@@ -69,7 +72,7 @@ export class CampFsDetect implements CampDetect {
 
   async listFestivals(campRoot: string): Promise<FestivalSummary[]> {
     const found: FestivalSummary[] = [];
-    for (const status of FESTIVAL_STATUSES) {
+    for (const status of ALL_STATUSES) {
       const dir = join(campRoot, "festivals", status);
       for (const name of await safeReaddir(dir)) {
         if (name.startsWith(".")) {
@@ -110,7 +113,13 @@ export class CampFsDetect implements CampDetect {
           if (!/^\d{2}_.*\.md$/.test(file)) {
             continue;
           }
-          const rel = relative(festivalDir, join(seqDir, file));
+          const full = join(seqDir, file);
+          const head = await readFile(full, "utf8").catch(() => "");
+          const festType = /^fest_type:\s*(\w+)/m.exec(head)?.[1];
+          if (festType && festType !== "task") {
+            continue;
+          }
+          const rel = relative(festivalDir, full);
           tasks.push({ sequence: `${phase}/${seq}`, path: rel, done: done.has(rel) });
         }
       }

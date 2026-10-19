@@ -31,10 +31,10 @@ export class FestCliAdapter implements FestCli {
     return classifyNextOutput(result.stdout + result.stderr, result.code);
   }
 
-  async taskComplete(festivalDir: string, task: string): Promise<void> {
-    await this.checked(
-      this.exec.run("fest", ["task", "completed", task, "--yes", "--json"], festivalDir),
-    );
+  async taskComplete(festivalDir: string, task: string): Promise<{ ok: boolean; output: string }> {
+    const args = task ? ["task", "completed", task, "--yes", "--json"] : ["task", "completed", "--yes", "--json"];
+    const result = await this.exec.run("fest", args, festivalDir);
+    return { ok: result.code === 0, output: result.stdout + result.stderr };
   }
 
   async taskMutate(

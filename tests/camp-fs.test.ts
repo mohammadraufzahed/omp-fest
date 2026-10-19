@@ -75,3 +75,28 @@ it("pendingTasks groups tasks by sequence and marks completed ones done", async 
   expect(tasks.find((t) => t.path.endsWith("02_b.md"))?.done).toBe(false);
   expect(new Set(tasks.map((t) => t.sequence)).size).toBe(2);
 });
+
+it("activeFestival prefers the active festival over planning/parked ones", async () => {
+  const root = await mkdtemp(join(tmpdir(), "campfs-prio-"));
+  for (const status of ["planning", "active", "parked"]) {
+    await mkdir(join(root, "festivals", status, `f-${status}`), { recursive: true });
+    await writeFile(join(root, "festivals", status, `f-${status}`, "fest.yaml"), "a: 1\n");
+  }
+  const dir = await new CampFsDetect().activeFestival(root);
+  expect(dir).toContain("f-active");
+});
+
+it("pendingTasks skips quality-gate files (fest_type: gate)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "campfs-gates-"));
+  const dir = join(root, "festival-x");
+  await mkdir(join(dir, "003_IMPLEMENT/01_core"), { recursive: true });
+  await writeFile(join(dir, "003_IMPLEMENT/01_core/01_design.md"), "fest_type: task\nbody");
+  await writeFile(join(dir, "003_IMPLEMENT/01_core/02_implement.md"), "fest_type: task\nbody");
+  await writeFile(join(dir, "003_IMPLEMENT/01_core/03_testing.md"), "fest_type: gate\nbody");
+  await writeFile(join(dir, "003_IMPLEMENT/01_core/06_fest_commit.md"), "fest_type: gate\nbody");
+  const tasks = await new CampFsDetect().pendingTasks(dir);
+  expect(tasks.map((t) => t.path)).toEqual([
+    "003_IMPLEMENT/01_core/01_design.md",
+    "003_IMPLEMENT/01_core/02_implement.md",
+  ]);
+});

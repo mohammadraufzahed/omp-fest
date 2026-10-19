@@ -40,7 +40,7 @@ export function buildOrientationNote(input: OrientationInput): string {
   if (input.pendingGate) {
     lines.push(`Pending gate: ${input.pendingGate} — requires human approval`);
   }
-  lines.push("Use the fest_* tools for the festival loop; run `fest rules` before the first task.");
+  lines.push("Use the fest_* tools for the festival loop (fest_raw for uncovered commands) — never the shell.");
   return lines.join("\n");
 }
 
@@ -54,6 +54,7 @@ export const RECOVERY_PLAYBOOK = [
   "- NEVER implement festival work ad hoc — once a festival exists, EVERY change goes through the",
   "  fest_next loop: call fest_next, implement ONLY the unit it returns, then fest_task_complete",
   "  + fest_commit. Editing project files outside the loop leaves tasks pending and gates unsatisfied.",
+  "- NEVER track festival work with ad hoc todo lists — the festival plan IS the task list; fest_next is the only source of what to do next",
   "- kind 'idle': at camp root with no festival — call camp_status to list festivals; for NEW work, start the plan workflow instead of writing your own todo list",
   "- kind 'blocked': fix the listed files/markers, then call fest_next again",
   "- kind 'gate_step': present evidence and STOP — do not approve; wait for the human",

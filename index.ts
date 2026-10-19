@@ -6,6 +6,7 @@
  * submodule at `.omp/extensions/omp-fest` — keep the dependency footprint at
  * zero; the runtime injects zod and the pi SDK.
  */
+import { CachedDetect } from "./src/application/detect-cache.js";
 import { LoopTracker } from "./src/application/loop-tracker.js";
 import { orientSession } from "./src/application/orient.js";
 import { CampCliAdapter } from "./src/adapters/cli/camp-cli.js";
@@ -43,7 +44,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const exec = new NodeExecRunner();
   const fest = new FestCliAdapter(exec);
   const camp = new CampCliAdapter(exec);
-  const detect = new CampFsDetect();
+  const detect = new CachedDetect(new CampFsDetect());
   const tracker = new LoopTracker();
 
   const cwd = process.cwd();
@@ -102,21 +103,41 @@ export default function ompFest(pi: ExtensionApiLike): void {
   pi.on("session_compact", async (_event, ctx) => {
       const orientation = await orientSession(ctx.cwd, detect);
       if (orientation.note) {
+        // Compaction drops context — re-inject the full protocol, not just the note.
         pi.sendMessage(
-          { customType: "fest-orientation", content: orientation.note, display: false },
+          { customType: "fest-orientation", content: `${orientation.note}\n\n${PARALLEL_HINT}\n\n${RECOVERY_PLAYBOOK}`, display: false },
           { triggerTurn: false },
         );
       }
     });
 
-  pi.on("tool_call", (event) => {
+  pi.on("tool_call", async (event, ctx) => {
       const toolCall = event as { toolName?: string; input?: { command?: string } };
+      const toolName = toolCall.toolName ?? "";
+      if (toolName.startsWith("fest_") || toolName.startsWith("camp_")) {
+        return undefined;
+      }
+      const location = await detect.locate(ctx.cwd);
+      if (!location.campRoot) {
+        return undefined;
+      }
       const command = toolCall.input?.command ?? "";
-      if (toolCall.toolName === "bash" && /\bgit\s+commit\b/.test(command) && !/fest\s+commit/.test(command)) {
+      if (toolName === "bash" && /\b(?:fest|camp)\s+[a-z]/i.test(command) && !/^\s*(?:cd|ls|which)\b/.test(command)) {
         return {
-          block: false,
-          reason: undefined,
-          message: "omp-fest: prefer fest_commit inside linked projects so commits get [camp:festival] tags",
+          additionalContext:
+            "omp-fest: do not run fest/camp via shell — use the fest_*/camp_* tools (fest_raw/camp_raw for uncovered subcommands); they resolve the festival dir, inject --yes, and parse output.",
+        };
+      }
+      if (toolName === "bash" && /\bgit\s+commit\b/.test(command) && !/fest\s+commit/.test(command)) {
+        return {
+          additionalContext:
+            "omp-fest: prefer fest_commit inside linked projects so commits get [camp:festival] tags and the work record stays truthful.",
+        };
+      }
+      if (toolName === "todo") {
+        return {
+          additionalContext:
+            "omp-fest: inside a camp the festival plan is the task list — do not track festival work with ad hoc todos. Call fest_next for the next unit; use fest_task_update for progress/blocked state.",
         };
       }
       return undefined;
