@@ -364,7 +364,8 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         if (args.length === 0) {
           const lines = [`omp-fest settings (${dir}/.ompfest.json):`];
           for (const spec of SETTING_SPECS) {
-            lines.push(`  ${spec.key.padEnd(24)} ${JSON.stringify(config[spec.key]).padEnd(14)} ${spec.desc}`);
+            const value = config[spec.key] === undefined ? "—" : JSON.stringify(config[spec.key]);
+            lines.push(`  ${spec.key.padEnd(24)} ${value.padEnd(14)} ${spec.desc}`);
           }
           lines.push(
             "Toggle: /fest settings <key> [value] — omit value to flip a boolean. '/fest settings reset' restores defaults.",
