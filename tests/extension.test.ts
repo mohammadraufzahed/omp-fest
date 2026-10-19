@@ -179,6 +179,57 @@ describe("ompFest extension", () => {
     expect(sent.at(-1)?.message.content).toContain("Unknown setting");
   });
 
+  it("/fest dashboard floats via ui.custom when available, text otherwise", async () => {
+    const root = await makeCamp();
+    const { pi, commands, sent, ctx } = mockPi(root);
+    ompFest(pi as never);
+    const handler = commands.get("fest")?.handler;
+    // No ui.custom → plain transcript fallback
+    await handler?.("", ctx);
+    expect(sent.at(-1)?.message.content).toContain("No festivals yet");
+    // With ui.custom the dashboard goes to the overlay instead of the transcript
+    const customCalls: unknown[] = [];
+    (ctx.ui as Record<string, unknown>).custom = (factory: unknown, options: unknown) => {
+      customCalls.push(options);
+      (factory as (t: null, th: null, k: null, done: (r: string) => void) => unknown)(null, null, null, () => "closed");
+      return Promise.resolve("closed");
+    };
+    const before = sent.length;
+    await handler?.("", ctx);
+    expect(customCalls.length).toBe(1);
+    expect(sent.length).toBe(before);
+  });
+
+  it("/fest settings interactive loop toggles a bool via ui.select", async () => {
+    const root = await makeCamp();
+    const { pi, commands, ctx } = mockPi(root);
+    ompFest(pi as never);
+    const picks = ["statusLine", "done"];
+    const select = vi.fn(() => Promise.resolve(picks.shift()));
+    (ctx.ui as Record<string, unknown>).select = select;
+    await commands.get("fest")?.handler("settings", ctx);
+    expect(select).toHaveBeenCalledTimes(2);
+    const saved = JSON.parse(
+      await import("node:fs/promises").then((fs) => fs.readFile(join(root, ".ompfest.json"), "utf8")),
+    ) as Record<string, unknown>;
+    expect(saved.statusLine).toBe(false);
+  });
+
+  it("before_agent_start sets the progress widget in a camp and clears it outside", async () => {
+    const root = await makeCamp();
+    const { pi, handlers, ctx } = mockPi(root);
+    const widgets: Record<string, unknown> = {};
+    (ctx.ui as Record<string, unknown>).setWidget = (key: string, content: unknown) => {
+      widgets[key] = content;
+    };
+    ompFest(pi as never);
+    await handlers.get("before_agent_start")?.({}, ctx);
+    expect(String(widgets.ompfest)).toContain("camp=");
+    const outer = { cwd: "/tmp", ui: ctx.ui };
+    await handlers.get("before_agent_start")?.({}, outer);
+    expect(widgets.ompfest).toBeUndefined();
+  });
+
   it("/fest reports dormant state when no festival exists", async () => {
     const root = await makeCamp();
     await writeFile(join(root, "AGENTS.md"), "# camp");

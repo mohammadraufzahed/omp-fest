@@ -158,6 +158,7 @@ export type GateDecision =
 export interface OmpFestConfig {
   statusLine: boolean;
   watchTransitions: boolean;
+  progressWidget: boolean;
   autoCommitAfterTask: "ask" | "always" | "never";
   autonomyCeiling: Autonomy;
   gateNotify: ("ui" | "camp-notify" | "webhook")[];
@@ -169,6 +170,7 @@ export interface OmpFestConfig {
 export const DEFAULT_CONFIG: OmpFestConfig = {
   statusLine: true,
   watchTransitions: true,
+  progressWidget: true,
   autoCommitAfterTask: "ask",
   autonomyCeiling: "medium",
   gateNotify: ["ui", "camp-notify"],

@@ -80,6 +80,14 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
 - ⚙️ **`.ompfest.json`** — per-project knobs: gate notification channels
   (UI / camp-notify / webhook 📡), autonomy ceiling. you set the rules,
   the agent plays by them.
+- ✨ **it FLOATS** — `/fest`, `/fest show`, `/fest doctor` render in a
+  floating overlay card (esc/q close, j/k/↑↓ scroll) instead of dumping
+  walls of text. `/fest settings` opens an interactive picker — arrow to a
+  key, hit enter, it toggles or lets you pick the value. `/fest approve`
+  asks with a real confirm dialog, `/fest reject` prompts for the reason.
+  ambiguous festival names? picker. a tiny ⛺ progress widget hovers above
+  your editor while a festival runs (turn it off: `/fest settings
+  progressWidget`). headless/RPC mode gets plain text, zero drama.
 
 ## 🔌 bonus: `fest omp`
 
