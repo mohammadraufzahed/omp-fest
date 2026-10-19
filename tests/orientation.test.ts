@@ -28,6 +28,6 @@ describe("buildOrientationNote", () => {
     expect(note).toContain("02_implement.md");
     expect(note).toContain("Unfilled markers: 3");
     expect(note).toContain("Pending gate");
-    expect(note).toContain("fest rules");
+    expect(note).toContain("fest_* tools");
   });
 });

@@ -7,6 +7,7 @@
  * runtime hands us (kept loose-typed here so the module compiles without the
  * coding-agent package installed).
  */
+import { basename } from "node:path";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
 import type { NextUnit } from "../../domain/types.js";
@@ -40,24 +41,75 @@ function textResult(payload: unknown): ToolResult {
   };
 }
 
+interface FestDirResolution {
+  dir?: string;
+  error?: unknown;
+}
+
+/**
+ * Resolve which festival a tool call targets. A selector matches the full id
+ * exactly, then by substring — but an ambiguous or unknown selector errors
+ * instead of silently targeting the wrong festival.
+ */
 async function festivalDirOf(
   deps: ToolDeps,
   ctx: ToolContextLike,
   selector?: string,
-): Promise<string | undefined> {
+): Promise<FestDirResolution> {
   const location = await deps.detect.locate(ctx.cwd);
-  if (selector && location.campRoot) {
-    const match = (await deps.detect.listFestivals(location.campRoot)).find(
-      (f) => f.id.includes(selector) || f.name.includes(selector),
-    );
-    if (match) {
-      return match.path;
+  if (selector) {
+    if (!location.campRoot) {
+      return { error: { kind: "no_camp", selector, hint: "Not inside a camp — cannot resolve a festival by name." } };
     }
+    const all = await deps.detect.listFestivals(location.campRoot);
+    const exact = all.filter((f) => f.id === selector || f.name === selector);
+    const matches =
+      exact.length > 0
+        ? exact
+        : all.filter((f) => f.id.includes(selector) || f.name.includes(selector));
+    if (matches.length > 1) {
+      return {
+        error: {
+          kind: "ambiguous_festival",
+          selector,
+          matches: matches.map((f) => `${f.id} (${f.status})`),
+          hint: "Pass the full festival id to disambiguate.",
+        },
+      };
+    }
+    const only = matches.length === 1 ? matches[0] : undefined;
+    if (only) {
+      return { dir: only.path };
+    }
+    return {
+      error: {
+        kind: "unknown_festival",
+        selector,
+        festivals: all.map((f) => `${f.id} (${f.status})`),
+        hint: "Pick one of the listed festival ids.",
+      },
+    };
   }
-  return (
+  const dir =
     location.festivalDir ??
-    (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined)
-  );
+    (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
+  return { dir };
+}
+
+/** Unwrap a FestDirResolution into either a ToolResult to return or the dir. */
+async function dirOrResult(
+  deps: ToolDeps,
+  ctx: ToolContextLike,
+  selector?: string,
+): Promise<{ dir: string } | { result: ToolResult }> {
+  const resolved = await festivalDirOf(deps, ctx, selector);
+  if (resolved.error) {
+    return { result: textResult(resolved.error) };
+  }
+  if (!resolved.dir) {
+    return { result: await idleResult(deps, ctx) };
+  }
+  return { dir: resolved.dir };
 }
 
 async function campRootOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string | undefined> {
@@ -74,8 +126,8 @@ async function idleResult(deps: ToolDeps, ctx: ToolContextLike) {
     ...(location.campRoot ? { campRoot: location.campRoot } : {}),
     festivals: festivals.map((f) => ({ id: f.id, status: f.status, path: f.path })),
     hint: festivals.length > 0
-      ? "Choose one of the listed festivals (run /fest-next <name>) or, for brand-new work, run the camp planning flow (/camp-idea). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools."
-      : "No festival exists in this camp yet — brand-new work starts with the camp planning flow (/camp-idea). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools.",
+      ? "Choose one of the listed festivals (/fest next <id> or pass festival:<id> to the fest_* tools) or, for brand-new work, the planning flow (/fest idea → /fest plan). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools."
+      : "No festival exists in this camp yet — brand-new work starts with the planning flow (/fest idea → /fest plan <goal>). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools.",
   });
 }
 
@@ -89,13 +141,21 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "Get the next unit of work in the current festival (task, workflow step, gate step, blocked, or complete). This is the engine of the festival loop — call it, do what it returns, then call it again.",
     parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
     async execute(_id: string, params: { festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
+      const dir = r.dir;
       const unit: NextUnit = await deps.fest.next(dir);
       if (unit.kind === "task") {
+        const stale = deps.tracker.unfinished ? deps.tracker.openTaskPath : undefined;
         deps.tracker.taskOpened(unit.path);
+        if (stale) {
+          return textResult({
+            ...unit,
+            warning: `Previous unit ${stale} was opened but never completed+committed — the work record is stale. Finish its fest_task_complete/fest_commit before starting this one.`,
+          });
+        }
       }
       return textResult(unit);
     },
@@ -112,13 +172,24 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { task?: string; evidence: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
+      const dir = r.dir;
+      const opened = deps.tracker.openTaskPath;
       await deps.fest.taskComplete(dir, params.task ?? "", params.evidence);
       deps.tracker.taskCompleted();
-      return textResult({ status: "completed", task: params.task });
+      return textResult({
+        status: "completed",
+        task: params.task,
+        ...(opened
+          ? {}
+          : {
+              warning:
+                "No unit was opened via fest_next this session — the festival only tracks work the loop hands out. Call fest_next before implementing next time.",
+            }),
+      });
     },
   });
 
@@ -134,11 +205,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { action: "blocked" | "defer" | "unblock" | "reset" | "update"; task?: string; reason?: string; percent?: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
-      await deps.fest.taskMutate(dir, params.action, params);
+      await deps.fest.taskMutate(r.dir, params.action, params);
       return textResult({ status: "ok", action: params.action });
     },
   });
@@ -153,11 +224,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { message: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
-      const hash = await deps.fest.commit(dir, params.message);
+      const hash = await deps.fest.commit(r.dir, params.message);
       deps.tracker.committed();
       return textResult({ status: "committed", hash });
     },
@@ -172,11 +243,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { fix?: boolean; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
-      return textResult(await deps.fest.validate(dir, params.fix));
+      return textResult(await deps.fest.validate(r.dir, params.fix));
     },
   });
 
@@ -190,14 +261,14 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { action: "status" | "show" | "advance"; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
       const output =
         params.action === "advance"
-          ? await deps.fest.workflowAdvance(dir)
-          : await deps.fest.workflowStatus(dir);
+          ? await deps.fest.workflowAdvance(r.dir)
+          : await deps.fest.workflowStatus(r.dir);
       return textResult(output);
     },
   });
@@ -212,11 +283,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { evidence: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
-      await deps.fest.workflowAdvance(dir);
+      await deps.fest.workflowAdvance(r.dir);
       return textResult({
         status: "awaiting_human",
         evidence: params.evidence,
@@ -259,9 +330,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             "'  - **Phase 1:** name (type)', '    - Sequence 1: name', '      - Task 1: title' — then call fest_plan again.",
         });
       }
+      const festId = parsed?.festival_dir ? basename(parsed.festival_dir) : params.name;
       let gates: { created: number; output: string } | undefined;
       if (parsed?.festival_dir && params.dryRun !== true) {
-        gates = await deps.fest.gatesApply(root, parsed.festival_dir).catch(() => undefined);
+        gates = await deps.fest
+          .gatesApply(root, parsed.festival_dir)
+          .catch((err: unknown) => ({ created: 0, output: `gates apply failed: ${String(err)}` }));
       }
       return textResult({
         kind: "plan_scaffolded",
@@ -270,10 +344,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         ...(parsed?.festival_dir ? { festivalDir: parsed.festival_dir } : {}),
         ...(gates ? { qualityGates: gates } : {}),
         nextSteps: [
-          `Fill unfilled markers: fest_markers {list:true, festival:"${params.name}"}`,
-          `Run fest_validate {festival:"${params.name}"}`,
+          `Fill unfilled markers: fest_markers {list:true, festival:"${festId}"}`,
+          `Run fest_validate {festival:"${festId}"}`,
           "Present the plan to the human and wait for approval",
-          `fest_promote {festival:"${params.name}"} twice: planning -> ready -> active`,
+          `fest_promote {festival:"${festId}"} twice: planning -> ready -> active`,
         ],
       });
     },
@@ -290,11 +364,20 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     }),
     async execute(_id: string, params: { festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const location = await deps.detect.locate(ctx.cwd);
-      const cwd = location.festivalDir ?? location.campRoot;
-      if (!cwd) {
+      if (params.festival) {
+        if (!location.campRoot) {
+          return await idleResult(deps, ctx);
+        }
+        const output = await deps.fest.promote(location.campRoot, params.festival);
+        return textResult({ kind: "promoted", output });
+      }
+      const dir =
+        location.festivalDir ??
+        (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
+      if (!dir) {
         return await idleResult(deps, ctx);
       }
-      const output = await deps.fest.promote(cwd, params.festival);
+      const output = await deps.fest.promote(dir);
       return textResult({ kind: "promoted", output });
     },
   });
@@ -305,11 +388,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description: "Current festival progress summary (phases, sequences, tasks, percent).",
     parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
     async execute(_id: string, params: { festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
-      return textResult(await deps.fest.status(dir));
+      return textResult(await deps.fest.status(r.dir));
     },
   });
 
@@ -322,10 +405,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { list?: boolean; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
+      const dir = r.dir;
       const count = await deps.fest.markersCount(dir);
       const listing = params.list ? await deps.fest.markersList(dir) : undefined;
       return textResult({ unfilled: count, ...(listing ? { listing } : {}) });
@@ -339,11 +423,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "List pending festival tasks grouped by sequence so you can fan out subagents — tasks in different sequences are parallel-safe, tasks in the same sequence run in order. Spawn one subagent per sequence and let them work concurrently.",
     parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
     async execute(_id: string, params: { festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx, params.festival);
-      if (!dir) {
-        return await idleResult(deps, ctx);
+      const r = await dirOrResult(deps, ctx, params.festival);
+      if ("result" in r) {
+        return r.result;
       }
-      const tasks = await deps.detect.pendingTasks(dir);
+      const tasks = await deps.detect.pendingTasks(r.dir);
       const pending = tasks.filter((t) => !t.done);
       const groups = new Map<string, string[]>();
       for (const task of pending) {
@@ -376,9 +460,21 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const location = await deps.detect.locate(ctx.cwd);
       let cwd = location.festivalDir;
       if (!cwd && params.festival && location.campRoot) {
-        cwd = (await deps.detect.listFestivals(location.campRoot)).find(
+        const all = await deps.detect.listFestivals(location.campRoot);
+        const matches = all.filter(
           (f) => f.id.includes(params.festival ?? "") || f.name.includes(params.festival ?? ""),
-        )?.path;
+        );
+        if (matches.length > 1) {
+          return textResult({
+            kind: "ambiguous_festival",
+            selector: params.festival,
+            matches: matches.map((f) => `${f.id} (${f.status})`),
+          });
+        }
+        cwd = matches[0]?.path;
+        if (!cwd) {
+          return textResult({ kind: "unknown_festival", selector: params.festival, festivals: all.map((f) => f.id) });
+        }
       }
       cwd ??= location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined;
       cwd ??= location.campRoot;

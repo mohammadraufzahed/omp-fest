@@ -2,6 +2,7 @@
  * OrientSession use case: detect where the session opened inside a camp and
  * produce the orientation note + status-line text the omp adapters render.
  */
+import { basename } from "node:path";
 import { buildOrientationNote } from "../domain/orientation.js";
 import { statusLineText, summarizeProgress } from "../domain/progress.js";
 import type { CampLocation, FestivalProgress } from "../domain/types.js";
@@ -32,7 +33,7 @@ export async function orientSession(
       statusLine,
     };
   }
-  const resolved: CampLocation = { ...location, festivalDir };
+  const resolved: CampLocation = { ...location, festivalDir, festivalId: basename(festivalDir) };
   const events = await detect.readProgress(festivalDir);
   const progress = summarizeProgress(events);
   const statusLine = statusLineText({

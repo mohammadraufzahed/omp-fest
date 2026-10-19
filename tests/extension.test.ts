@@ -157,3 +157,40 @@ describe("ompFest extension", () => {
     expect(sent.at(-1)?.message.content).toContain("No festivals yet");
   });
 });
+
+it("re-injects the full protocol playbook on session_compact", async () => {
+  const root = await makeCamp();
+  const { pi, handlers, sent, ctx } = mockPi(root);
+  ompFest(pi as never);
+  await handlers.get("session_compact")?.({}, ctx);
+  const note = sent.find((s) => s.message.customType === "fest-orientation");
+  expect(note?.message.content).toContain("NEVER run `fest` or `camp` in the shell");
+  expect(note?.message.content).toContain("fest_parallel");
+});
+
+it("tool_call hook nudges raw fest bash + ad hoc todos inside a camp", async () => {
+  const root = await makeCamp();
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const hook = handlers.get("tool_call") as (
+    event: unknown,
+    ctx: unknown,
+  ) => Promise<{ additionalContext?: string } | undefined>;
+  const festBash = await hook({ toolName: "bash", input: { command: "fest next" } }, ctx);
+  expect(festBash?.additionalContext).toContain("fest_*");
+  const todo = await hook({ toolName: "todo", input: {} }, ctx);
+  expect(todo?.additionalContext).toContain("festival plan");
+  const ownTool = await hook({ toolName: "fest_next", input: {} }, ctx);
+  expect(ownTool).toBeUndefined();
+});
+
+it("tool_call hook stays silent outside a camp", async () => {
+  const { pi, handlers, ctx } = mockPi("/tmp");
+  ompFest(pi as never);
+  const hook = handlers.get("tool_call") as (
+    event: unknown,
+    ctx: unknown,
+  ) => Promise<{ additionalContext?: string } | undefined>;
+  expect(await hook({ toolName: "bash", input: { command: "fest next" } }, ctx)).toBeUndefined();
+  expect(await hook({ toolName: "todo", input: {} }, ctx)).toBeUndefined();
+});

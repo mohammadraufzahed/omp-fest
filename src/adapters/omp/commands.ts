@@ -40,11 +40,20 @@ function send(pi: PiCommandsLike, customType: string, content: string): void {
 async function festivalDirOf(deps: CommandDeps, ctx: CommandCtx, selector?: string): Promise<string> {
   const location = await deps.detect.locate(ctx.cwd);
   if (selector && location.campRoot) {
-    const matches = await deps.fest.list(location.campRoot);
-    const hit = matches.find((f) => f.id.includes(selector) || f.name.includes(selector));
-    if (hit) {
-      return hit.path;
+    const all = await deps.fest.list(location.campRoot);
+    const exact = all.filter((f) => f.id === selector || f.name === selector);
+    const matches =
+      exact.length > 0
+        ? exact
+        : all.filter((f) => f.id.includes(selector) || f.name.includes(selector));
+    if (matches.length > 1) {
+      throw new Error(`Ambiguous festival "${selector}" — matches: ${matches.map((f) => f.id).join(", ")}`);
     }
+    const only = matches.length === 1 ? matches[0] : undefined;
+    if (only) {
+      return only.path;
+    }
+    throw new Error(`No festival matches "${selector}" — known: ${all.map((f) => f.id).join(", ") || "none"}`);
   }
   const dir = location.festivalDir ?? (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
   if (!dir) {
