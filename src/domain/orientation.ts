@@ -50,6 +50,8 @@ export const PARALLEL_HINT =
 
 export const RECOVERY_PLAYBOOK = [
   "fest_* tool recovery rules:",
+  "- NEVER run `fest` or `camp` in the shell — the fest_*/camp_* tools handle cwd, --yes, and JSON",
+  "- kind 'idle': at camp root with no festival — call camp_status to list festivals; for NEW work, start the plan workflow instead of writing your own todo list",
   "- kind 'blocked': fix the listed files/markers, then call fest_next again",
   "- kind 'gate_step': present evidence and STOP — do not approve; wait for the human",
   "- kind 'task': work in the returned working_dir, then fest_task_complete + fest_commit",

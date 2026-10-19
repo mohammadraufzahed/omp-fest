@@ -86,7 +86,15 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       if (dir) {
         lines.push(`Festival dir: ${dir}`, await deps.fest.status(dir));
       } else {
-        lines.push("No active festival — `/fest-plan <goal>` starts one.");
+        const festivals = location.campRoot ? await deps.detect.listFestivals(location.campRoot) : [];
+        if (festivals.length > 0) {
+          lines.push("No active festival. Available:");
+          for (const f of festivals) {
+            lines.push(`  ${f.id} (${f.status}) — /fest-next ${f.id}`);
+          }
+        } else {
+          lines.push("No festivals yet — `/camp-idea` starts the planning flow.");
+        }
       }
       send(pi, "fest-status", lines.join("\n"));
     },

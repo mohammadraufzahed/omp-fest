@@ -53,6 +53,20 @@ async function campRootOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string 
   return location.campRoot;
 }
 
+async function idleResult(deps: ToolDeps, ctx: ToolContextLike) {
+  const location = await deps.detect.locate(ctx.cwd);
+  const festivals = location.campRoot ? await deps.detect.listFestivals(location.campRoot) : [];
+  return textResult({
+    kind: "idle",
+    reason: "not inside a camp festival",
+    ...(location.campRoot ? { campRoot: location.campRoot } : {}),
+    festivals: festivals.map((f) => ({ id: f.id, status: f.status, path: f.path })),
+    hint: festivals.length > 0
+      ? "Choose one of the listed festivals (run /fest-next <name>) or, for brand-new work, run the camp planning flow (/camp-idea). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools."
+      : "No festival exists in this camp yet — brand-new work starts with the camp planning flow (/camp-idea). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools.",
+  });
+}
+
 export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const z = pi.zod;
 
@@ -65,7 +79,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       const unit: NextUnit = await deps.fest.next(dir);
       if (unit.kind === "task") {
@@ -87,7 +101,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, params: { task?: string; evidence: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       await deps.fest.taskComplete(dir, params.task ?? "", params.evidence);
       deps.tracker.taskCompleted();
@@ -108,7 +122,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, params: { action: "blocked" | "defer" | "unblock" | "reset" | "update"; task?: string; reason?: string; percent?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       await deps.fest.taskMutate(dir, params.action, params);
       return textResult({ status: "ok", action: params.action });
@@ -124,7 +138,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, params: { message: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       const hash = await deps.fest.commit(dir, params.message);
       deps.tracker.committed();
@@ -140,7 +154,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, params: { fix?: boolean }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       return textResult(await deps.fest.validate(dir, params.fix));
     },
@@ -157,7 +171,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, params: { action: "status" | "show" | "advance" }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       const output =
         params.action === "advance"
@@ -176,7 +190,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, params: { evidence: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       await deps.fest.workflowAdvance(dir);
       return textResult({
@@ -195,7 +209,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       return textResult(await deps.fest.status(dir));
     },
@@ -209,7 +223,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, params: { list?: boolean }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       const count = await deps.fest.markersCount(dir);
       const listing = params.list ? await deps.fest.markersList(dir) : undefined;
@@ -226,7 +240,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const dir = await festivalDirOf(deps, ctx);
       if (!dir) {
-        return textResult({ kind: "idle", reason: "not inside a camp festival" });
+        return await idleResult(deps, ctx);
       }
       const tasks = await deps.detect.pendingTasks(dir);
       const pending = tasks.filter((t) => !t.done);
