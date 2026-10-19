@@ -54,6 +54,7 @@ function mockPi(cwd: string) {
       object: (shape: Record<string, unknown>) => ({ shape }),
       string: () => zodNode("string"),
       enum: (values: string[]) => ({ kind: "enum", values }),
+      array: (item: unknown) => ({ kind: "array", item, describe: () => ({ kind: "array", item }), optional: () => ({ kind: "array", item }) }),
       boolean: () => zodNode("boolean"),
       number: () => zodNode("number"),
     },
@@ -85,11 +86,13 @@ describe("ompFest extension", () => {
     ompFest(pi as never);
     expect(tools.map((t) => t.name)).toContain("fest_next");
     expect(tools.map((t) => t.name)).toContain("fest_parallel");
-    expect(tools).toHaveLength(13);
+    expect(tools).toHaveLength(15);
     expect([...commands.keys()].sort()).toEqual([
+      "camp-cmd",
       "camp-idea",
       "fest",
       "fest-approve",
+      "fest-cmd",
       "fest-doctor",
       "fest-next",
       "fest-parallel",

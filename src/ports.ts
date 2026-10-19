@@ -50,6 +50,8 @@ export interface FestCli {
   ): Promise<string>;
   /** `fest promote` — advance a festival one lifecycle step. Runs at campRoot or inside the festival. */
   promote(cwd: string, name?: string): Promise<string>;
+  /** Raw passthrough for the long tail of `fest` subcommands. */
+  raw(cwd: string, args: string[]): Promise<ExecResult>;
   list(campRoot: string): Promise<FestivalSummary[]>;
   rules(festivalDir: string): Promise<string>;
   context(cwd: string): Promise<string>;
@@ -62,6 +64,8 @@ export interface CampCli {
   available(): Promise<boolean>;
   projects(campRoot: string): Promise<CampProject[]>;
   ideaAdd(campRoot: string, text: string): Promise<string>;
+  /** Raw passthrough for the long tail of `camp` subcommands. */
+  raw(cwd: string, args: string[]): Promise<ExecResult>;
   notify(campRoot: string, message: string): Promise<void>;
   jobsPending(campRoot: string): Promise<number>;
 }

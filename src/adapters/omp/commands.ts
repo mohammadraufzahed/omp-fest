@@ -228,6 +228,33 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     },
   });
 
+  pi.registerCommand("fest-cmd", {
+    description: "Raw fest passthrough: /fest-cmd <args> — e.g. /fest-cmd list --json",
+    handler: async (args, ctx) => {
+      const location = await deps.detect.locate(ctx.cwd);
+      const cwd = location.festivalDir ?? (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined) ?? location.campRoot;
+      if (!cwd) {
+        send(pi, "fest-status", "Not inside a camp.");
+        return;
+      }
+      const result = await deps.fest.raw(cwd, args.trim().split(/\s+/).filter(Boolean));
+      send(pi, "fest-cmd", result.stdout || result.stderr || `exit ${result.code}`);
+    },
+  });
+
+  pi.registerCommand("camp-cmd", {
+    description: "Raw camp passthrough: /camp-cmd <args> — e.g. /camp-cmd idea list",
+    handler: async (args, ctx) => {
+      const location = await deps.detect.locate(ctx.cwd);
+      if (!location.campRoot) {
+        send(pi, "fest-status", "Not inside a camp.");
+        return;
+      }
+      const result = await deps.camp.raw(location.campRoot, args.trim().split(/\s+/).filter(Boolean));
+      send(pi, "camp-cmd", result.stdout || result.stderr || `exit ${result.code}`);
+    },
+  });
+
   pi.registerCommand("camp-idea", {
     description: "Capture an idea into the camp inbox: /camp-idea <text>",
     handler: async (args, ctx) => {

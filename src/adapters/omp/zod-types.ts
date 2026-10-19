@@ -13,4 +13,5 @@ export interface ZodLike {
   string(): ZodSchema;
   boolean(): ZodSchema;
   enum(values: readonly string[]): ZodSchema;
+  array(item: ZodSchema): ZodSchema;
 }

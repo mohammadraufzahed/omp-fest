@@ -183,6 +183,14 @@ export class FestCliAdapter implements FestCli {
     return result.stdout;
   }
 
+  async raw(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
+    const TASK_MUTATIONS = new Set(["completed", "blocked", "defer", "unblock", "reset", "update", "progress"]);
+    if (args[0] === "task" && args[1] && TASK_MUTATIONS.has(args[1]) && !args.includes("--yes")) {
+      args = [...args, "--yes"];
+    }
+    return await this.exec.run("fest", args, cwd);
+  }
+
   private async checked(promise: Promise<{ stdout: string; stderr: string; code: number }>) {
     const result = await promise;
     if (result.code !== 0) {

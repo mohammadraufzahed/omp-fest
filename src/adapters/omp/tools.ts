@@ -312,6 +312,56 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   });
 
   pi.registerTool({
+    name: "fest_raw",
+    label: "Fest Raw",
+    description:
+      "Run ANY `fest` subcommand not covered by the typed tools (list, rules, context, show, markers, " +
+      "workflow, chain, feedback, promote, types, watch, deps, parse, tokens, links, ...) at the resolved " +
+      "festival or camp directory. task mutations get --yes auto-injected. Returns {code, stdout, stderr} " +
+      "and never throws — check code before trusting output.",
+    parameters: z.object({
+      args: z.array(z.string()).describe("fest args, e.g. ['list','--json'] or ['workflow','status']"),
+      festival: z.string().optional().describe("Festival dir/name override when at camp root"),
+    }),
+    async execute(_id: string, params: { args: string[]; festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const location = await deps.detect.locate(ctx.cwd);
+      let cwd = location.festivalDir;
+      if (!cwd && params.festival && location.campRoot) {
+        cwd = (await deps.detect.listFestivals(location.campRoot)).find(
+          (f) => f.id.includes(params.festival ?? "") || f.name.includes(params.festival ?? ""),
+        )?.path;
+      }
+      cwd ??= location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined;
+      cwd ??= location.campRoot;
+      if (!cwd) {
+        return await idleResult(deps, ctx);
+      }
+      const result = await deps.fest.raw(cwd, params.args);
+      return textResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "camp_raw",
+    label: "Camp Raw",
+    description:
+      "Run ANY `camp` subcommand not covered by the typed tools (idea list/show/claim/sync, project, " +
+      "machine, notify, jobs, worktree, fresh, triage, wi, ...) at the resolved camp root. Returns " +
+      "{code, stdout, stderr} and never throws.",
+    parameters: z.object({
+      args: z.array(z.string()).describe("camp args, e.g. ['idea','list','--json']"),
+    }),
+    async execute(_id: string, params: { args: string[] }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const root = await campRootOf(deps, ctx);
+      if (!root) {
+        return await idleResult(deps, ctx);
+      }
+      const result = await deps.camp.raw(root, params.args);
+      return textResult(result);
+    },
+  });
+
+  pi.registerTool({
     name: "camp_idea_add",
     label: "Capture Camp Idea",
     description: "Quick-capture an idea into the camp inbox (camp idea add).",
