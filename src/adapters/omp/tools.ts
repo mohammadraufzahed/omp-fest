@@ -11,6 +11,7 @@ import { basename } from "node:path";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { matchFestival } from "../../application/fest-resolve.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
+import { sessionIdOf } from "../../application/session-id.js";
 import type { NextUnit } from "../../domain/types.js";
 import type { ZodLike } from "./zod-types.js";
 
@@ -28,6 +29,7 @@ export interface PiLike {
 
 interface ToolContextLike {
   cwd: string;
+  sessionManager?: { getSessionId?(): string };
 }
 
 interface ToolResult {
@@ -105,6 +107,9 @@ async function dirOrResult(
   if (!resolved.dir) {
     return { result: await idleResult(deps, ctx) };
   }
+  // This session touched this festival — later digests/tracking key off it so
+  // parallel agents on different festivals don't see each other's pick.
+  deps.tracker.claimFestival(sessionIdOf(ctx), resolved.dir);
   return { dir: resolved.dir };
 }
 
@@ -144,8 +149,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const dir = r.dir;
       const unit: NextUnit = await deps.fest.next(dir);
       if (unit.kind === "task") {
-        const stale = deps.tracker.unfinished ? deps.tracker.openTaskPath : undefined;
-        deps.tracker.taskOpened(unit.path);
+        const sid = sessionIdOf(ctx);
+        const stale = deps.tracker.unfinishedFor(sid) ? deps.tracker.openTaskPathFor(sid) : undefined;
+        deps.tracker.taskOpened(sid, unit.path);
         if (stale) {
           return textResult({
             ...unit,
@@ -173,7 +179,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return r.result;
       }
       const dir = r.dir;
-      const opened = deps.tracker.openTaskPath;
+      const sid = sessionIdOf(ctx);
+      const opened = deps.tracker.openTaskPathFor(sid);
       const completion = await deps.fest.taskComplete(dir, params.task ?? "", params.evidence);
       if (!completion.ok) {
         return textResult({
@@ -183,7 +190,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           hint: "fest refused the completion — quality gates run first. Read the output, fix what it demands, then retry.",
         });
       }
-      deps.tracker.taskCompleted();
+      deps.tracker.taskCompleted(sid);
       return textResult({
         status: "completed",
         task: params.task,
@@ -233,7 +240,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return r.result;
       }
       const hash = await deps.fest.commit(r.dir, params.message);
-      deps.tracker.committed();
+      deps.tracker.committed(sessionIdOf(ctx));
       return textResult({ status: "committed", hash });
     },
   });
