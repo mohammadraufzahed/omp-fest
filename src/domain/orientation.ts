@@ -51,6 +51,9 @@ export const PARALLEL_HINT =
 export const RECOVERY_PLAYBOOK = [
   "fest_* tool recovery rules:",
   "- NEVER run `fest` or `camp` in the shell — the fest_*/camp_* tools handle cwd, --yes, and JSON",
+  "- NEVER implement festival work ad hoc — once a festival exists, EVERY change goes through the",
+  "  fest_next loop: call fest_next, implement ONLY the unit it returns, then fest_task_complete",
+  "  + fest_commit. Editing project files outside the loop leaves tasks pending and gates unsatisfied.",
   "- kind 'idle': at camp root with no festival — call camp_status to list festivals; for NEW work, start the plan workflow instead of writing your own todo list",
   "- kind 'blocked': fix the listed files/markers, then call fest_next again",
   "- kind 'gate_step': present evidence and STOP — do not approve; wait for the human",
@@ -126,6 +129,9 @@ export function planInterviewKickoff(goal: string): string {
     "   run fest_validate {festival:<name>},",
     "   then ask 'promote to active?' — after a yes, fest_promote {festival:<name>}",
     "   twice, then fest_next {festival:<name>}. Always pass festival:<name> — the session cwd is the camp root.",
+    "   EXECUTION RULE: after promote, ALL implementation happens through fest_next units —",
+    "   never start editing project files on your own from the plan. Call fest_next, implement only",
+    "   the returned unit, then fest_task_complete {evidence} + fest_commit, and repeat.",
     "If the human abandons the interview, stop quietly.",
   ].join("\n");
 }
