@@ -40,8 +40,20 @@ function textResult(payload: unknown): ToolResult {
   };
 }
 
-async function festivalDirOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string | undefined> {
+async function festivalDirOf(
+  deps: ToolDeps,
+  ctx: ToolContextLike,
+  selector?: string,
+): Promise<string | undefined> {
   const location = await deps.detect.locate(ctx.cwd);
+  if (selector && location.campRoot) {
+    const match = (await deps.detect.listFestivals(location.campRoot)).find(
+      (f) => f.id.includes(selector) || f.name.includes(selector),
+    );
+    if (match) {
+      return match.path;
+    }
+  }
   return (
     location.festivalDir ??
     (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined)
@@ -75,9 +87,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     label: "Fest Next",
     description:
       "Get the next unit of work in the current festival (task, workflow step, gate step, blocked, or complete). This is the engine of the festival loop — call it, do what it returns, then call it again.",
-    parameters: z.object({}),
-    async execute(_id: string, _params: unknown, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
+    async execute(_id: string, params: { festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -97,9 +109,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({
       task: z.string().optional().describe("Festival-relative task path; omit for the current task"),
       evidence: z.string().describe("What was verified: tests run, files changed, checks passed"),
+      festival: z.string().optional().describe("Festival name/id override"),
     }),
-    async execute(_id: string, params: { task?: string; evidence: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    async execute(_id: string, params: { task?: string; evidence: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -118,9 +131,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       task: z.string().optional(),
       reason: z.string().optional(),
       percent: z.string().optional(),
+      festival: z.string().optional().describe("Festival name/id override"),
     }),
-    async execute(_id: string, params: { action: "blocked" | "defer" | "unblock" | "reset" | "update"; task?: string; reason?: string; percent?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    async execute(_id: string, params: { action: "blocked" | "defer" | "unblock" | "reset" | "update"; task?: string; reason?: string; percent?: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -134,9 +148,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     label: "Fest Commit",
     description:
       "Commit changes through fest (auto-tags the message with [camp:festival]). Use instead of git commit inside linked projects so the work record stays truthful.",
-    parameters: z.object({ message: z.string().describe("Commit message (task reference is added automatically)") }),
-    async execute(_id: string, params: { message: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    parameters: z.object({
+      message: z.string().describe("Commit message (task reference is added automatically)"),
+      festival: z.string().optional().describe("Festival name/id override"),
+    }),
+    async execute(_id: string, params: { message: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -150,9 +167,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_validate",
     label: "Validate Festival",
     description: "Validate festival structure; returns the /100 score plus issues to fix.",
-    parameters: z.object({ fix: z.boolean().optional().describe("Auto-fix common structure issues") }),
-    async execute(_id: string, params: { fix?: boolean }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    parameters: z.object({
+      fix: z.boolean().optional().describe("Auto-fix common structure issues"),
+      festival: z.string().optional().describe("Festival name/id override"),
+    }),
+    async execute(_id: string, params: { fix?: boolean; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -167,9 +187,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "Advance or inspect a WORKFLOW.md phase: status shows the step list, advance marks the current step done. For gates, submit with 'submit' then STOP — never approve on your own.",
     parameters: z.object({
       action: z.enum(["status", "show", "advance"]),
+      festival: z.string().optional().describe("Festival name/id override"),
     }),
-    async execute(_id: string, params: { action: "status" | "show" | "advance" }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    async execute(_id: string, params: { action: "status" | "show" | "advance"; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -186,9 +207,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     label: "Submit Fest Gate",
     description:
       "Present a gate/checkpoint for human review with evidence. Returns awaiting_human — you must STOP and wait for the operator. There is no self-approval path.",
-    parameters: z.object({ evidence: z.string().describe("Validate score, tasks done, test results, files changed") }),
-    async execute(_id: string, params: { evidence: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    parameters: z.object({
+      evidence: z.string().describe("Validate score, tasks done, test results, files changed"),
+      festival: z.string().optional().describe("Festival name/id override"),
+    }),
+    async execute(_id: string, params: { evidence: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -219,15 +243,32 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return await idleResult(deps, ctx);
       }
       const output = await deps.fest.scaffoldFromPlan(root, params);
+      let parsed: { ok?: boolean; error?: string; festival_dir?: string } | undefined;
+      try {
+        parsed = JSON.parse(output) as typeof parsed;
+      } catch {
+        parsed = undefined;
+      }
+      if (parsed?.ok === false) {
+        return textResult({
+          kind: "plan_failed",
+          error: parsed.error ?? output,
+          hint:
+            "The STRUCTURE.md didn't parse. Rewrite it to the exact shape — '# Festival Structure' / " +
+            "'## Festival Goal' / '## Hierarchy' headers, then list items: '- **Festival:** name', " +
+            "'  - **Phase 1:** name (type)', '    - Sequence 1: name', '      - Task 1: title' — then call fest_plan again.",
+        });
+      }
       return textResult({
         kind: "plan_scaffolded",
         dryRun: params.dryRun === true,
         output,
+        ...(parsed?.festival_dir ? { festivalDir: parsed.festival_dir } : {}),
         nextSteps: [
-          "Fill unfilled markers (fest_markers)",
-          "Run fest_validate",
+          `Fill unfilled markers: fest_markers {list:true, festival:"${params.name}"}`,
+          `Run fest_validate {festival:"${params.name}"}`,
           "Present the plan to the human and wait for approval",
-          "fest_promote twice: planning -> ready -> active",
+          `fest_promote {festival:"${params.name}"} twice: planning -> ready -> active`,
         ],
       });
     },
@@ -257,9 +298,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_status",
     label: "Festival Status",
     description: "Current festival progress summary (phases, sequences, tasks, percent).",
-    parameters: z.object({}),
-    async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
+    async execute(_id: string, params: { festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -271,9 +312,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_markers",
     label: "Fest Markers",
     description: "List/count unfilled [REPLACE:] and [FILL:] template markers that block fest next.",
-    parameters: z.object({ list: z.boolean().optional() }),
-    async execute(_id: string, params: { list?: boolean }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    parameters: z.object({
+      list: z.boolean().optional(),
+      festival: z.string().optional().describe("Festival name/id override"),
+    }),
+    async execute(_id: string, params: { list?: boolean; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
@@ -288,9 +332,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     label: "Fest Parallel",
     description:
       "List pending festival tasks grouped by sequence so you can fan out subagents — tasks in different sequences are parallel-safe, tasks in the same sequence run in order. Spawn one subagent per sequence and let them work concurrently.",
-    parameters: z.object({}),
-    async execute(_id: string, _p: unknown, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const dir = await festivalDirOf(deps, ctx);
+    parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
+    async execute(_id: string, params: { festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const dir = await festivalDirOf(deps, ctx, params.festival);
       if (!dir) {
         return await idleResult(deps, ctx);
       }
