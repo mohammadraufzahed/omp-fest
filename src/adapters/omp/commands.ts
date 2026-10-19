@@ -3,7 +3,9 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { matchFestival } from "../../application/fest-resolve.js";
+import { loadConfig, saveConfig } from "../../domain/config.js";
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
+import { DEFAULT_CONFIG, type OmpFestConfig } from "../../domain/types.js";
 import { IDEA_INTERVIEW, PLAN_GUIDE, markerInterviewKickoff, planInterviewKickoff } from "../../domain/orientation.js";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 
@@ -69,6 +71,68 @@ interface Sub {
   desc: string;
   run: (args: string[], ctx: CommandCtx) => Promise<void> | void;
 }
+
+type SettingParse = { value: unknown } | { error: string };
+
+interface SettingSpec {
+  key: keyof OmpFestConfig;
+  desc: string;
+  /** Undefined raw = toggle (booleans only). */
+  parse: (raw: string | undefined, current: unknown) => SettingParse;
+}
+
+const err = (error: string): SettingParse => ({ error });
+const val = (value: unknown): SettingParse => ({ value });
+
+const BOOL = (raw: string | undefined, current: unknown): SettingParse => {
+  if (raw === undefined) {
+    return val(!current);
+  }
+  if (/^(on|true|1|yes)$/i.test(raw)) {
+    return val(true);
+  }
+  if (/^(off|false|0|no)$/i.test(raw)) {
+    return val(false);
+  }
+  return err("expected on/off (omit the value to toggle)");
+};
+
+const enumOf = (values: readonly string[]) =>
+  (raw: string | undefined): SettingParse =>
+    raw !== undefined && values.includes(raw)
+      ? val(raw)
+      : err(`expected one of: ${values.join(", ")}`);
+
+const GATE_CHANNELS = ["ui", "camp-notify", "webhook"] as const;
+
+const SETTING_SPECS: SettingSpec[] = [
+  { key: "statusLine", desc: "festival progress in the omp status line", parse: BOOL },
+  { key: "watchTransitions", desc: "notify on festival lifecycle moves (planning→ready→active)", parse: BOOL },
+  { key: "pauseAtGates", desc: "stop for human approval at gates", parse: BOOL },
+  { key: "evidenceRequiredOnGates", desc: "require evidence text on gate approval", parse: BOOL },
+  { key: "autoCommitAfterTask", desc: "auto fest_commit after task completed", parse: enumOf(["ask", "always", "never"]) },
+  { key: "autonomyCeiling", desc: "max autonomy level", parse: enumOf(["low", "medium", "high"]) },
+  {
+    key: "gateNotify",
+    desc: "gate notification channels (comma list: ui,camp-notify,webhook; 'none' disables)",
+    parse: (raw) => {
+      if (raw === undefined) {
+        return err("expected a comma list like ui,camp-notify or 'none'");
+      }
+      if (/^(none|off)$/i.test(raw)) {
+        return val([]);
+      }
+      const channels = raw.split(/[\s,]+/).filter(Boolean);
+      const bad = channels.filter((c) => !(GATE_CHANNELS as readonly string[]).includes(c));
+      return bad.length > 0 ? err(`unknown channel(s): ${bad.join(", ")} — use ${GATE_CHANNELS.join(", ")}`) : val(channels);
+    },
+  },
+  {
+    key: "webhookUrl",
+    desc: "gate webhook target ('none' clears)",
+    parse: (raw) => (raw === undefined ? err("expected a URL or 'none'") : val(raw === "none" ? undefined : raw)),
+  },
+];
 
 export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   const subs: Record<string, Sub> = {
@@ -291,6 +355,44 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         send(pi, "camp-idea", await deps.camp.ideaAdd(location.campRoot, text));
       },
     },
+    settings: {
+      desc: "view or toggle plugin settings (.ompfest.json): /fest settings [key] [value]",
+      run: async (args, ctx) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        const dir = location.campRoot ?? ctx.cwd;
+        const config = await loadConfig(dir);
+        if (args.length === 0) {
+          const lines = [`omp-fest settings (${dir}/.ompfest.json):`];
+          for (const spec of SETTING_SPECS) {
+            const value = config[spec.key] === undefined ? "—" : JSON.stringify(config[spec.key]);
+            lines.push(`  ${spec.key.padEnd(24)} ${value.padEnd(14)} ${spec.desc}`);
+          }
+          lines.push(
+            "Toggle: /fest settings <key> [value] — omit value to flip a boolean. '/fest settings reset' restores defaults.",
+          );
+          send(pi, "fest-status", lines.join("\n"));
+          return;
+        }
+        const [key, ...valueParts] = args;
+        if (key === "reset") {
+          await saveConfig(dir, { ...DEFAULT_CONFIG, webhookUrl: undefined });
+          send(pi, "fest-status", "Settings reset to defaults.");
+          return;
+        }
+        const spec = SETTING_SPECS.find((s) => s.key === key);
+        if (!spec) {
+          send(pi, "fest-status", `Unknown setting "${key}" — keys: ${SETTING_SPECS.map((s) => s.key).join(", ")}`);
+          return;
+        }
+        const parsed = spec.parse(valueParts.join(" ") || undefined, config[spec.key]);
+        if ("error" in parsed) {
+          send(pi, "fest-status", `${key}: ${parsed.error}`);
+          return;
+        }
+        await saveConfig(dir, { [spec.key]: parsed.value });
+        send(pi, "fest-status", `${key} = ${JSON.stringify(parsed.value)} (saved to ${dir}/.ompfest.json)`);
+      },
+    },
     help: {
       desc: "list every /fest subcommand",
       run: (_args, _ctx) => {
@@ -308,13 +410,16 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Guided festival control: /fest [next|status|show|task|plan|promote|validate|markers|workflow|approve|reject|parallel|doctor|cmd|camp|idea|help]",
+    description: "Guided festival control: /fest [next|status|show|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")
         .map((name) => ({ value: name, label: `/fest ${name}` }));
       for (const action of TASK_ACTIONS) {
         items.push({ value: action, label: `task ${action}` });
+      }
+      for (const spec of SETTING_SPECS) {
+        items.push({ value: spec.key, label: `settings ${spec.key}` });
       }
       const location = await deps.detect.locate(process.cwd());
       if (location.campRoot) {

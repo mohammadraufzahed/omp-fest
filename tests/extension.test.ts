@@ -159,6 +159,26 @@ describe("ompFest extension", () => {
     expect(userMessages[0]).toContain("idea-capture interview");
   });
 
+  it("/fest settings lists keys and toggles booleans into .ompfest.json", async () => {
+    const root = await makeCamp();
+    const { pi, commands, sent, ctx } = mockPi(root);
+    ompFest(pi as never);
+    const handler = commands.get("fest")?.handler;
+    await handler?.("settings", ctx);
+    expect(sent.at(-1)?.message.content).toContain("statusLine");
+    expect(sent.at(-1)?.message.content).toContain("watchTransitions");
+    await handler?.("settings statusLine", ctx);
+    expect(sent.at(-1)?.message.content).toContain("statusLine = false");
+    const saved = JSON.parse(
+      await import("node:fs/promises").then((fs) => fs.readFile(join(root, ".ompfest.json"), "utf8")),
+    ) as Record<string, unknown>;
+    expect(saved.statusLine).toBe(false);
+    await handler?.("settings gateNotify none", ctx);
+    expect(sent.at(-1)?.message.content).toContain("gateNotify = []");
+    await handler?.("settings bogus", ctx);
+    expect(sent.at(-1)?.message.content).toContain("Unknown setting");
+  });
+
   it("/fest reports dormant state when no festival exists", async () => {
     const root = await makeCamp();
     await writeFile(join(root, "AGENTS.md"), "# camp");
