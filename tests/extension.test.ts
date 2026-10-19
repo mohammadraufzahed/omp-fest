@@ -94,17 +94,30 @@ describe("ompFest extension", () => {
     expect([...commands.keys()].sort()).toEqual(["fest"]);
   });
 
-  it("fires session_start orientation and hides the injected note", async () => {
+  it("injects a live state digest into every turn inside a camp", async () => {
     const root = await makeCamp();
-    const { pi, handlers, sent, ctx } = mockPi(root);
+    const { pi, handlers, ctx } = mockPi(root);
     ompFest(pi as never);
-    const sessionStart = handlers.get("session_start");
-    expect(sessionStart).toBeDefined();
-    await sessionStart?.({}, ctx);
-    expect(sent.length).toBeGreaterThan(0);
-    expect(sent[0]?.message.customType).toBe("fest-orientation");
-    expect(sent[0]?.message.display).toBe(false);
-    expect(sent[0]?.options?.triggerTurn).toBe(false);
+    const hook = handlers.get("before_agent_start") as (
+      event: unknown,
+      ctx: unknown,
+    ) => Promise<{ message?: { customType: string; content: string; display: boolean } } | undefined>;
+    const result = await hook({}, ctx);
+    expect(result?.message?.customType).toBe("fest-state");
+    expect(result?.message?.display).toBe(false);
+    expect(result?.message?.content).toContain("fest:");
+    expect(result?.message?.content).toContain("no active festival");
+    expect(result?.message?.content).toContain("fest_next");
+  });
+
+  it("before_agent_start digest stays silent outside a camp", async () => {
+    const { pi, handlers, ctx } = mockPi("/tmp");
+    ompFest(pi as never);
+    const hook = handlers.get("before_agent_start") as (
+      event: unknown,
+      ctx: unknown,
+    ) => Promise<unknown>;
+    expect(await hook({}, ctx)).toBeUndefined();
   });
 
   it("completers return AutocompleteItem-shaped results or null outside camps", async () => {
@@ -158,14 +171,36 @@ describe("ompFest extension", () => {
   });
 });
 
-it("re-injects the full protocol playbook on session_compact", async () => {
+it("registers no session_compact handler — the per-turn digest covers it", async () => {
   const root = await makeCamp();
-  const { pi, handlers, sent, ctx } = mockPi(root);
+  const { pi, handlers } = mockPi(root);
   ompFest(pi as never);
-  await handlers.get("session_compact")?.({}, ctx);
-  const note = sent.find((s) => s.message.customType === "fest-orientation");
-  expect(note?.message.content).toContain("NEVER run `fest` or `camp` in the shell");
-  expect(note?.message.content).toContain("fest_parallel");
+  expect(handlers.get("session_compact")).toBeUndefined();
+});
+
+it("tool_result hook warns on untracked edits and dedupes per path", async () => {
+  const root = await makeCamp();
+  const festivalDir = join(root, "festivals", "active", "fest-A1");
+  await mkdir(join(festivalDir, "001_P", "01_seq"), { recursive: true });
+  await writeFile(join(festivalDir, "fest.yaml"), "festival: fest-A1\n");
+  await writeFile(
+    join(festivalDir, "001_P", "01_seq", "01_task.md"),
+    "---\nfest_type: task\n---\n# Task\n",
+  );
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const hook = handlers.get("tool_result") as (
+    event: unknown,
+    ctx: unknown,
+  ) => Promise<{ additionalContext?: string } | undefined>;
+  const edit = { toolName: "edit", input: { path: join(root, "projects", "p", "x.ts") }, isError: false };
+  const first = await hook(edit, ctx);
+  expect(first?.additionalContext).toContain("fest_next");
+  expect(await hook(edit, ctx)).toBeUndefined();
+  const inside = { toolName: "edit", input: { path: join(festivalDir, "001_P", "01_seq", "01_task.md") }, isError: false };
+  expect(await hook(inside, ctx)).toBeUndefined();
+  const failed = { ...edit, isError: true };
+  expect(await hook(failed, ctx)).toBeUndefined();
 });
 
 it("tool_call hook nudges raw fest bash + ad hoc todos inside a camp", async () => {

@@ -12,6 +12,16 @@ export interface LoopState {
 
 export class LoopTracker {
   private state: LoopState = { taskCompleted: false, commitDone: false };
+  private readonly warnedPaths = new Set<string>();
+
+  /** Dedupe untracked-edit warnings: true when this path wasn't warned yet. */
+  markWarned(path: string): boolean {
+    if (this.warnedPaths.has(path)) {
+      return false;
+    }
+    this.warnedPaths.add(path);
+    return true;
+  }
 
   taskOpened(path: string): void {
     this.state = { openTask: path, taskCompleted: false, commitDone: false };
