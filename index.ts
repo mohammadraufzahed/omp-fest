@@ -180,7 +180,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
         })();
       });
     }
-    if (orientation.location.campRoot) {
+    if (orientation.location.campRoot && config.watchTransitions) {
       watchCampTransitions(detect, orientation.location.campRoot, (messages) => {
         for (const message of messages) {
           ctx.ui.notify(`fest: ${message}`, "info");
