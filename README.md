@@ -14,10 +14,23 @@ just say yes. 😎
 ## 🎬 install in 10 seconds
 
 ```bash
-git submodule add https://github.com/mohammadraufzahed/omp-fest .omp/extensions/omp-fest
+omp plugin install github:mohammadraufzahed/omp-fest
 ```
 
-needs the fest toolchain (`npm i -g @obedience-corp/festival`) — that's it 🔥
+that's it — omp handles the rest. want it only in one project?
+`omp plugin install --scope project github:mohammadraufzahed/omp-fest`
+
+needs the fest toolchain too (`npm i -g @obedience-corp/festival`) 🔥
+
+<details>
+<summary>hacking on it? install a local checkout instead</summary>
+
+```bash
+git clone https://github.com/mohammadraufzahed/omp-fest
+omp install ./omp-fest   # symlinks it — edits go live instantly
+```
+
+</details>
 
 ## 🤖 what your agent gets (the superpowers)
 
