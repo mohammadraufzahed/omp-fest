@@ -56,6 +56,12 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `festivals/planning/<name>` via real `fest scaffold from-plan`, fills
   markers, validates — then *you* approve and it `fest_promote`s to active.
   your brain → festival, no TUI wrangling 🧠
+- 🖼️ **visual planning in the same interview** — attach a screenshot with
+  `/fest plan <goal>`. The agent drafts a labeled SVG wireframe and `PAGE.md`
+  beside the structure plan, asks about behavior the image cannot show, and
+  presents both for the same approval. No new command or approval lifecycle.
+  This requires the selected model to support images; otherwise the agent
+  should tell you it cannot see the screenshot rather than guessing.
 - 🛠️ **15 tools + ONE guided command** — `/fest <sub>` is the whole
   cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
   `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
@@ -66,6 +72,74 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   idea claim/sync, ...) at the right dir, auto-inject `--yes` on task
   mutations, and return `{code, stdout, stderr}` typed. nothing the real
   CLIs can do is out of reach. `/fest cmd` + `/fest camp` for you too 💪
+
+### Plan a page from a screenshot
+
+Attach a screenshot to `/fest plan build this page`. The interview uses the
+image as reference data, not as instructions. The agent should omit personal
+data from the draft, ask only about behavior the picture cannot establish,
+and review the wireframe, states, acceptance checks and structure plan with
+you before scaffolding. Text-only `/fest plan` still works as before.
+
+```text
+<camp>/.ompfest/plans/feature.STRUCTURE.md
+<camp>/.ompfest/plans/feature.references/pages/results/PAGE.md
+<camp>/.ompfest/plans/feature.references/pages/results/wireframe.svg
+```
+
+The plan uses the unchanged `STRUCTURE.md` syntax. Once approved, the agent
+calls `fest_plan` with `referencesDir` pointing to the matching `.references`
+directory (omit it for text-only plans). The extension copies only the two
+reviewed files per page into `<festival>/references/pages/<slug>/`, rejecting
+symlinks, raw screenshots and active/external SVG content. The agent then adds
+`Visual reference: references/pages/results/PAGE.md` to each relevant task's
+document, with component-specific Done-When checks. Each page has a `## Components`
+list of stable IDs (matching the SVG `id` attributes), a `## States` table with
+`Viewport | State | Status | Expected` columns (desktop, mobile, initial,
+loading, empty and error; `observed`/`agreed`/`unknown`/`n/a`), and unique
+`## Acceptance checks` such as `- [AC-01] Search filters results in RTL`.
+Every check must be linked to a task with a Done-When item like
+`- [ ] Acceptance: results/AC-01 — Search filters results in RTL`. Unknown
+behaviors stay `unknown` until discussed; duplicate, missing, or unlinked IDs
+fail validation. Agreed visual constraints
+such as RTL order go in the existing `rules` argument, so the existing
+`FESTIVAL_RULES.md` and gate checklist carry them forward.
+
+Before scaffolding, the agent calls `fest_plan` with `referenceAction: "preview"`
+and `referencesDir` to write a local `feature.preview.html` beside the plan.
+It shows the validated SVG beside escaped page notes, never the original image.
+The same result suggests project-local reuse candidates from route, layout,
+component, form, table, token and test file names for the agent to inspect;
+it never edits project files. The preview is not copied into the Festival and
+does not introduce a separate approval step.
+
+`fest_next` returns linked page paths, notes and wireframe paths with the task;
+`fest_parallel` includes the relevant pages for each lane. `fest_validate`
+checks reference coverage and completed-task verification. For visual tasks,
+`fest_task_complete` requires one `visualEvidence` item per acceptance ID:
+`{page:"results", check:"AC-01", status:"verified", proof:"search test log",
+route:"/results", viewport:"1280x800", state:"initial"}`. Use `untested`
+with a reason if the interaction cannot be exercised; never invent browser
+proof. `failed` checks block completion. Evidence is saved with the reference
+revision in `references/verification.json`. `fest_gate_submit` can take new
+evidence (including `task` for already completed tasks) to reverify checks.
+Missing, failed, or stale evidence blocks submission; untested checks are
+explicitly shown to the human. `/fest approve` also enforces these checks;
+in headless mode it requires `--allow-untested` to attest to untested items.
+Human approval remains the gate. Verification covers structure, behavior,
+control presence, order, direction and states, not pixel-perfect matching.
+
+For an approved reference change, preview the candidate with `fest_plan`
+`referenceAction: "preview"` and `festival: "<festival path>"`. The response
+lists changed/added/removed pages, affected acceptance IDs, affected tasks and
+whether they are done. Apply only after review with `referenceAction: "revise"`,
+`festival`, `referencesDir`, `baseRevision` and `proposalRevision` from the
+preview. If either digest changed meanwhile, preview again. Completed tasks
+stay completed, but old verification becomes stale and requires targeted
+reverification or follow-up work before gate submission. A page still linked
+to a task cannot be removed. Text-only plans need none of these visual fields.
+SVGs are intentionally simple wireframes, not screenshot reconstructions or
+generated UI code.
 
 ## 🫵 what YOU get (the supervisor seat)
 
@@ -98,7 +172,7 @@ so drop it on PATH and boom 💥 `fest omp status` / `fest omp next` work
 ## 🏗️ under the hood
 
 hexagonal (ports & adapters), zero runtime deps, strict TypeScript,
-`strictTypeChecked` ESLint, 29 vitest cases. clean enough to read for fun:
+`strictTypeChecked` ESLint, Vitest coverage. clean enough to read for fun:
 
 ```
 index.ts            🧠 composition root — wires everything onto omp
@@ -115,7 +189,8 @@ tests/              ✅ vitest, one file per module
 
 ```bash
 npm install
-npm test           # 29 tests, all green ✅
+npm install -g @obedience-corp/festival  # needed by the session-start smoke test
+npm test           # automated tests ✅
 npm run typecheck  # strict tsc 🧊
 npm run lint       # strictTypeChecked eslint 🧹
 ```

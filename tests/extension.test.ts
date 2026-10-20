@@ -54,8 +54,8 @@ function mockPi(cwd: string) {
     zod: {
       object: (shape: Record<string, unknown>) => ({ shape }),
       string: () => zodNode("string"),
-      enum: (values: string[]) => ({ kind: "enum", values }),
-      array: (item: unknown) => ({ kind: "array", item, describe: () => ({ kind: "array", item }), optional: () => ({ kind: "array", item }) }),
+      enum: (values: string[]) => ({ ...zodNode("enum"), values }),
+      array: (item: unknown) => ({ ...zodNode("array"), item }),
       boolean: () => zodNode("boolean"),
       number: () => zodNode("number"),
     },
@@ -149,6 +149,22 @@ describe("ompFest extension", () => {
     expect(userMessages).toHaveLength(1);
     expect(userMessages[0]).toContain("interview");
     expect(userMessages[0]).toContain("restructure prenatal form");
+  });
+
+  it("passes images through the input hook when /fest plan has an attachment", async () => {
+    const root = await makeCamp();
+    const { pi, handlers, ctx, userMessages } = mockPi(root);
+    ompFest(pi as never);
+    const hook = handlers.get("input") as (event: unknown, context: unknown) => { text: string } | undefined;
+    const screenshot = { type: "image", data: "opaque-image" };
+    const event = { type: "input", text: "/fest plan build this page", images: [screenshot], source: "interactive" };
+    const result = hook(event, ctx);
+    expect(result?.text).toContain("build this page");
+    expect(result?.text).toContain("wireframe.svg");
+    expect(event.images).toEqual([screenshot]);
+    expect(userMessages).toEqual([]);
+    expect(hook({ ...event, text: "/fest next" }, ctx)).toBeUndefined();
+    expect(hook({ ...event, images: [] }, ctx)).toBeUndefined();
   });
 
   it("/fest idea without text interviews the user first", async () => {
@@ -298,6 +314,8 @@ it("tool_result hook warns on untracked edits and dedupes per path", async () =>
   expect(await hook(edit, ctx)).toBeUndefined();
   const inside = { toolName: "edit", input: { path: join(festivalDir, "001_P", "01_seq", "01_task.md") }, isError: false };
   expect(await hook(inside, ctx)).toBeUndefined();
+  const wireframe = { toolName: "write", input: { path: join(root, ".ompfest", "plans", "new.references", "pages", "results", "wireframe.svg") }, isError: false };
+  expect(await hook(wireframe, ctx)).toBeUndefined();
   const failed = { ...edit, isError: true };
   expect(await hook(failed, ctx)).toBeUndefined();
 });

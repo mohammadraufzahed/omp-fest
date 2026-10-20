@@ -3,6 +3,10 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { matchFestival } from "../../application/fest-resolve.js";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { referencesForTask, validateVisualReferences } from "../../application/visual-references.js";
+import { visualEvidenceStatus } from "../../application/visual-evidence.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import { loadConfig, saveConfig } from "../../domain/config.js";
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
@@ -264,7 +268,14 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "pull the next festival unit into the conversation: /fest next [festival]",
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx, args[0]);
-        send(pi, "fest-next", JSON.stringify(await deps.fest.next(dir), null, 2));
+        const unit = await deps.fest.next(dir);
+        const visual = await validateVisualReferences(dir, deps.detect);
+        if (visual.issues.length > 0) {
+          send(pi, "fest-next", `Visual references need repair:\n${visual.issues.join("\n")}`);
+          return;
+        }
+        const refs = unit.kind === "task" ? await referencesForTask(dir, unit.doc) : [];
+        send(pi, "fest-next", JSON.stringify({ ...unit, ...(refs.length ? { visualReferences: refs } : {}) }, null, 2));
       },
     },
     status: {
@@ -337,6 +348,12 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           send(pi, "fest-status", "Not inside a camp.");
           return;
         }
+        const dir = await festivalDirOf(deps, ctx, args[0]);
+        const visual = await validateVisualReferences(dir, deps.detect);
+        if (visual.issues.length > 0) {
+          send(pi, "fest-status", `Promotion blocked by visual references:\n${visual.issues.join("\n")}`);
+          return;
+        }
         send(pi, "fest-status", await deps.fest.promote(cwd, args[0]));
       },
     },
@@ -345,7 +362,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx);
         const result = await deps.fest.validate(dir, args.includes("--fix"));
-        send(pi, "fest-status", `score: ${result.score}\n${result.output}`);
+        const visual = await validateVisualReferences(dir, deps.detect);
+        const verification = visual.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
+        send(pi, "fest-status", `score: ${result.score}\n${result.output}\nVisual references: ${visual.issues.length ? visual.issues.join("\n") : "valid"}` +
+          (verification ? `\nVisual verification: ${verification.verified.length} verified; ${verification.untested.length} untested\n${verification.issues.join("\n")}` : ""));
       },
     },
     markers: {
@@ -374,14 +394,32 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     },
     approve: {
       desc: "approve the pending gate checkpoint (human attestation)",
-      run: async (_args, ctx) => {
+      run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx);
+        const visual = await validateVisualReferences(dir, deps.detect);
+        const verification = visual.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
+        if (visual.issues.length || verification?.issues.length) {
+          send(pi, "fest-gate", `Approval blocked:\n${[...visual.issues, ...(verification?.issues ?? [])].join("\n")}`);
+          return;
+        }
+        const untested = verification?.untested ?? [];
+        const warning = untested.map((entry) => `UNTESTED ${entry.page}/${entry.check}: ${entry.proof}`).join("\n");
+        if (untested.length && !ctx.ui.confirm && !args.includes("--allow-untested")) {
+          send(pi, "fest-gate", `${warning}\nGate remains pending. Human may explicitly waive these checks with /fest approve --allow-untested.`);
+          return;
+        }
         const yes =
           typeof ctx.ui.confirm === "function"
-            ? await ctx.ui.confirm("Approve gate", `Approve the pending gate in ${dir.split("/").filter(Boolean).at(-1) ?? "festival"}?`)
+            ? await ctx.ui.confirm("Approve gate", `${warning}\nApprove the pending gate in ${dir.split("/").filter(Boolean).at(-1) ?? "festival"}?`)
             : true;
         if (!yes) {
           send(pi, "fest-gate", "Approval cancelled — the gate stays pending.");
+          return;
+        }
+        const currentReferences = await validateVisualReferences(dir, deps.detect);
+        const currentEvidence = currentReferences.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
+        if (currentReferences.issues.length || JSON.stringify(currentEvidence) !== JSON.stringify(verification)) {
+          send(pi, "fest-gate", "References or evidence changed during review. Review the gate again.");
           return;
         }
         send(pi, "fest-gate", await deps.fest.workflowApprove(dir));
@@ -406,6 +444,11 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "pending tasks grouped by sequence — spawn a subagent per lane",
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx, args[0]);
+        const visual = await validateVisualReferences(dir, deps.detect);
+        if (visual.issues.length > 0) {
+          send(pi, "fest-status", `Visual references need repair:\n${visual.issues.join("\n")}`);
+          return;
+        }
         const tasks = await deps.detect.pendingTasks(dir);
         const pending = tasks.filter((t) => !t.done);
         if (pending.length === 0) {
@@ -423,6 +466,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           lines.push(`\n${seq}`);
           for (const file of files) {
             lines.push(`  • ${file}`);
+            const refs = await referencesForTask(dir, await readFile(join(dir, file), "utf8"));
+            for (const ref of refs) {
+              lines.push(`    Visual reference: ${ref.spec} (wireframe: ${ref.wireframe})`);
+            }
           }
         }
         send(pi, "fest-status", lines.join("\n"));
