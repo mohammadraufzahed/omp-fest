@@ -93,15 +93,53 @@ directory (omit it for text-only plans). The extension copies only the two
 reviewed files per page into `<festival>/references/pages/<slug>/`, rejecting
 symlinks, raw screenshots and active/external SVG content. The agent then adds
 `Visual reference: references/pages/results/PAGE.md` to each relevant task's
-document, with component-specific Done-When checks. Agreed visual constraints
+document, with component-specific Done-When checks. Each page has a `## Components`
+list of stable IDs (matching the SVG `id` attributes), a `## States` table with
+`Viewport | State | Status | Expected` columns (desktop, mobile, initial,
+loading, empty and error; `observed`/`agreed`/`unknown`/`n/a`), and unique
+`## Acceptance checks` such as `- [AC-01] Search filters results in RTL`.
+Every check must be linked to a task with a Done-When item like
+`- [ ] Acceptance: results/AC-01 — Search filters results in RTL`. Unknown
+behaviors stay `unknown` until discussed; duplicate, missing, or unlinked IDs
+fail validation. Agreed visual constraints
 such as RTL order go in the existing `rules` argument, so the existing
 `FESTIVAL_RULES.md` and gate checklist carry them forward.
 
+Before scaffolding, the agent calls `fest_plan` with `referenceAction: "preview"`
+and `referencesDir` to write a local `feature.preview.html` beside the plan.
+It shows the validated SVG beside escaped page notes, never the original image.
+The same result suggests project-local reuse candidates from route, layout,
+component, form, table, token and test file names for the agent to inspect;
+it never edits project files. The preview is not copied into the Festival and
+does not introduce a separate approval step.
+
 `fest_next` returns linked page paths, notes and wireframe paths with the task;
 `fest_parallel` includes the relevant pages for each lane. `fest_validate`
-checks referenced files and unlinked pages; promotion and gate submission are
-blocked while visual references are broken. SVGs are intentionally simple
-wireframes, not pixel-perfect screenshot reconstructions or generated UI code.
+checks reference coverage and completed-task verification. For visual tasks,
+`fest_task_complete` requires one `visualEvidence` item per acceptance ID:
+`{page:"results", check:"AC-01", status:"verified", proof:"search test log",
+route:"/results", viewport:"1280x800", state:"initial"}`. Use `untested`
+with a reason if the interaction cannot be exercised; never invent browser
+proof. `failed` checks block completion. Evidence is saved with the reference
+revision in `references/verification.json`. `fest_gate_submit` can take new
+evidence (including `task` for already completed tasks) to reverify checks.
+Missing, failed, or stale evidence blocks submission; untested checks are
+explicitly shown to the human. `/fest approve` also enforces these checks;
+in headless mode it requires `--allow-untested` to attest to untested items.
+Human approval remains the gate. Verification covers structure, behavior,
+control presence, order, direction and states, not pixel-perfect matching.
+
+For an approved reference change, preview the candidate with `fest_plan`
+`referenceAction: "preview"` and `festival: "<festival path>"`. The response
+lists changed/added/removed pages, affected acceptance IDs, affected tasks and
+whether they are done. Apply only after review with `referenceAction: "revise"`,
+`festival`, `referencesDir`, `baseRevision` and `proposalRevision` from the
+preview. If either digest changed meanwhile, preview again. Completed tasks
+stay completed, but old verification becomes stale and requires targeted
+reverification or follow-up work before gate submission. A page still linked
+to a task cannot be removed. Text-only plans need none of these visual fields.
+SVGs are intentionally simple wireframes, not screenshot reconstructions or
+generated UI code.
 
 ## 🫵 what YOU get (the supervisor seat)
 

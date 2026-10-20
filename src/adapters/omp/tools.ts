@@ -16,7 +16,9 @@ import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { resolveWorkingDir, stampWorkingDir } from "../../application/sequence-goals.js";
 import { festivalConstraints, seedFestivalRules, stampGateRules } from "../../application/festival-rules.js";
-import { installVisualReferences, prepareVisualReferences, referencesForTask, validateVisualReferences } from "../../application/visual-references.js";
+import { recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
+import { applyReferenceRevision, findReuseCandidates, inspectReferenceRevision, renderPlanPreview } from "../../application/visual-plan-review.js";
+import { installVisualReferences, prepareVisualReferences, referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import type { ZodLike } from "./zod-types.js";
@@ -213,9 +215,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     parameters: z.object({
       task: z.string().optional().describe("Festival-relative task path; omit for the current task"),
       evidence: z.string().describe("What was verified: tests run, files changed, checks passed"),
+      visualEvidence: z.array(z.object({
+        page: z.string(), check: z.string(), status: z.enum(["verified", "failed", "untested"]),
+        proof: z.string(), route: z.string().optional(), viewport: z.string().optional(), state: z.string().optional(),
+      })).optional().describe("For each page acceptance check in this task, give a truthful status and evidence; verified requires route, viewport, state"),
       festival: z.string().optional().describe("Festival name/id override"),
     }),
-    async execute(_id: string, params: { task?: string; evidence: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { task?: string; evidence: string; festival?: string; visualEvidence?: VisualEvidence[] }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
@@ -223,7 +229,32 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const dir = r.dir;
       const sid = sessionIdOf(ctx);
       const opened = deps.tracker.openTaskPathFor(sid);
-      const completion = await deps.fest.taskComplete(dir, params.task ?? "", params.evidence);
+      const visual = await validateVisualReferences(dir, deps.detect);
+      if (visual.issues.length) {
+        return textResult({ kind: "completion_blocked", issues: visual.issues });
+      }
+      const current = !params.task && !opened && visual.pages.length ? await deps.fest.next(dir) : undefined;
+      const taskPath = params.task ?? opened ?? (current?.kind === "task" ? current.path : undefined);
+      const task = taskPath ? (await deps.detect.pendingTasks(dir)).find((item) => item.path === taskPath) : undefined;
+      if (visual.pages.length && !task) {
+        return textResult({ kind: "completion_blocked", hint: "Use the exact festival-relative task path returned by fest_next so its visual checks can be verified." });
+      }
+      if (task) {
+        const doc = await readFile(join(dir, task.path), "utf8");
+        const checks = taskChecks(doc);
+        if (checks.length > 0) {
+          try {
+            const proposed = params.visualEvidence ?? [];
+            if (proposed.some((entry) => entry.status === "failed")) {
+              return textResult({ kind: "completion_blocked", hint: "Fix failed visual checks before marking the task completed." });
+            }
+            await recordVisualEvidence(dir, task.path, doc, proposed);
+          } catch (error) {
+            return textResult({ kind: "completion_blocked", error: String(error), hint: "Provide evidence for each task acceptance check, or mark it untested for human review." });
+          }
+        }
+      }
+      const completion = await deps.fest.taskComplete(dir, task?.path ?? params.task ?? "", params.evidence);
       if (!completion.ok) {
         return textResult({
           status: "completion_blocked",
@@ -302,7 +333,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       const structure = await deps.fest.validate(r.dir, params.fix);
       const visual = await validateVisualReferences(r.dir, deps.detect);
-      return textResult({ ...structure, visualReferences: visual, ...(visual.issues.length > 0 ? { kind: "validation_failed" } : {}) });
+      const verification = visual.issues.length ? undefined : await visualEvidenceStatus(r.dir, deps.detect);
+      return textResult({ ...structure, visualReferences: visual, ...(verification ? { visualVerification: verification } : {}),
+        ...(visual.issues.length > 0 || (verification?.issues.length ?? 0) > 0 ? { kind: "validation_failed" } : {}) });
     },
   });
 
@@ -339,9 +372,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "for /fest approve|reject. The model can never approve itself.",
     parameters: z.object({
       evidence: z.string().describe("Validate score, tasks done, test results, files changed — cite a check per recorded constraint"),
+      visualEvidence: z.array(z.object({
+        task: z.string(), page: z.string(), check: z.string(), status: z.enum(["verified", "failed", "untested"]),
+        proof: z.string(), route: z.string().optional(), viewport: z.string().optional(), state: z.string().optional(),
+      })).optional().describe("Reverify changed page checks for completed tasks. Never claim untested checks as verified."),
       festival: z.string().optional().describe("Festival name/id override"),
     }),
-    async execute(_id: string, params: { evidence: string; festival?: string }, signal: { aborted?: boolean } | undefined, _u: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { evidence: string; festival?: string; visualEvidence?: (VisualEvidence & { task: string })[] }, signal: { aborted?: boolean } | undefined, _u: unknown, ctx: ToolContextLike) {
       const config = deps.config ? await deps.config() : DEFAULT_CONFIG;
       if (config.evidenceRequiredOnGates && params.evidence.trim().length === 0) {
         return textResult({
@@ -358,6 +395,25 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (visual.issues.length > 0) {
         return textResult({ kind: "gate_blocked", issues: visual.issues, hint: "Repair visual references before submitting this gate." });
       }
+      if (params.visualEvidence?.length) {
+        const completed = (await deps.detect.pendingTasks(dir)).filter((task) => task.done);
+        for (const taskPath of new Set(params.visualEvidence.map((entry) => entry.task))) {
+          const task = completed.find((item) => item.path === taskPath);
+          if (!task) {
+            return textResult({ kind: "gate_blocked", issues: [`Not a completed task: ${taskPath}`] });
+          }
+          const doc = await readFile(join(dir, task.path), "utf8");
+          try {
+            await recordVisualEvidence(dir, task.path, doc, params.visualEvidence.filter((entry) => entry.task === task.path));
+          } catch (error) {
+            return textResult({ kind: "gate_blocked", issues: [String(error)] });
+          }
+        }
+      }
+      const verification = await visualEvidenceStatus(dir, deps.detect);
+      if (verification.issues.length) {
+        return textResult({ kind: "gate_blocked", issues: verification.issues, hint: "Reverify changed or missing checks before submitting this gate." });
+      }
       const constraints = await festivalConstraints(dir);
       const ui = ctx.ui;
       if (!config.pauseAtGates || ui === undefined || typeof ui.confirm !== "function") {
@@ -366,7 +422,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           status: "awaiting_human",
           evidence: params.evidence,
           ...(constraints ? { rulesEvidence: constraints } : {}),
-          instruction: "Present this evidence to the user and wait. Do not approve the checkpoint yourself.",
+          visualVerification: verification,
+          instruction: "Present this evidence, including untested checks, to the user and wait. Do not approve the checkpoint yourself.",
         });
       }
 
@@ -380,6 +437,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         "",
         "Evidence:",
         ...params.evidence.split("\n"),
+        ...(verification.verified.length || verification.untested.length ? ["", "Visual checks (human must review evidence):",
+          ...verification.verified.map((entry) => `VERIFIED ${entry.page}/${entry.check} at ${entry.route} (${entry.viewport}, ${entry.state}): ${entry.proof}`),
+          ...verification.untested.map((entry) => `UNTESTED ${entry.page}/${entry.check}: ${entry.proof}`)] : []),
         ...(constraints ? ["", "Constraints agreed at plan time (a violated rule fails the gate):", ...constraints.split("\n")] : []),
       ];
       const floated = await showCard(ui, {
@@ -397,6 +457,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return textResult({ status: "cancelled", hint: "Gate dialog aborted — the gate stays pending." });
       }
       if (approved) {
+        const currentReferences = await validateVisualReferences(dir, deps.detect);
+        const currentEvidence = currentReferences.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
+        if (currentReferences.issues.length || currentEvidence?.issues.length || JSON.stringify(currentEvidence) !== JSON.stringify(verification)) {
+          return textResult({ kind: "gate_blocked", issues: [...currentReferences.issues, ...(currentEvidence?.issues ?? [])],
+            hint: "References or evidence changed during review; verify them again." });
+        }
         const output = await deps.fest.workflowApprove(dir);
         return textResult({ status: "approved", output });
       }
@@ -431,8 +497,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       rules: z.string().optional().describe("Constraints/rules the human agreed to during planning, as bullet lines — written verbatim into FESTIVAL_RULES.md so fest rules shows them"),
       referencesDir: z.string().optional().describe("Absolute <camp>/.ompfest/plans/<name>.references directory containing pages/<slug>/PAGE.md and wireframe.svg"),
       dryRun: z.boolean().optional().describe("Preview without creating files"),
+      referenceAction: z.enum(["preview", "revise"]).optional().describe("preview renders the approved wireframe/notes and revision impact without scaffolding; revise updates an existing festival's references only after human approval"),
+      festival: z.string().optional().describe("Existing festival selector for reference previews/revisions; omit for an initial plan preview"),
+      baseRevision: z.string().optional().describe("Original reference digest from the approved revision preview"),
+      proposalRevision: z.string().optional().describe("Proposed reference digest from the approved revision preview"),
     }),
-    async execute(_id: string, params: { name: string; plan: string; workingDir?: string; rules?: string; referencesDir?: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { name: string; plan: string; workingDir?: string; rules?: string; referencesDir?: string; dryRun?: boolean; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -443,6 +513,37 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           bundle = await prepareVisualReferences(root, params.plan, params.referencesDir);
         } catch (error) {
           return textResult({ kind: "plan_failed", error: String(error), hint: "Fix the visual bundle before scaffolding." });
+        }
+      }
+      if (params.referenceAction) {
+        if (!bundle || (params.referenceAction === "revise" && !params.festival)) {
+          return textResult({ kind: "plan_failed", error: "Reference previews require referencesDir; revisions also require an existing festival." });
+        }
+        try {
+          const resolved = params.festival ? await festivalDirOf(deps, ctx, params.festival) : undefined;
+          if (resolved?.error || (params.festival && !resolved?.dir)) {
+            return textResult({ kind: "plan_failed", error: resolved?.error ?? "Festival not found" });
+          }
+          if (params.referenceAction === "preview") {
+            const preview = await renderPlanPreview(params.plan, bundle);
+            const project = await resolveWorkingDir(root, deps.camp, params.workingDir);
+            const reuseCandidates = await findReuseCandidates(root, project.dir, bundle);
+            const impact = resolved?.dir ? await inspectReferenceRevision(resolved.dir, bundle, deps.detect) : undefined;
+            return textResult({ kind: "plan_preview", preview, reuseCandidates,
+              ...(impact ? { revisionImpact: impact } : {}),
+              nextSteps: impact
+                ? "Review affected tasks and stale checks with the human; after approval call fest_plan with referenceAction:'revise', festival and both revision digests. This does not change STRUCTURE.md or tasks."
+                : "Review the rendered wireframe, page notes, task structure, states and reuse candidates with the human before scaffolding." });
+          }
+          if (!resolved?.dir) {
+            return textResult({ kind: "plan_failed", error: "Festival not found" });
+          }
+          const impact = await applyReferenceRevision(resolved.dir, bundle, deps.detect,
+            params.baseRevision ?? "", params.proposalRevision ?? "");
+          return textResult({ kind: "references_revised", impact,
+            nextSteps: "Update affected tasks, reverify stale completed checks and run fest_validate before the next gate. No tasks were silently reopened." });
+        } catch (error) {
+          return textResult({ kind: "plan_failed", error: String(error) });
         }
       }
       const output = await deps.fest.scaffoldFromPlan(root, params);

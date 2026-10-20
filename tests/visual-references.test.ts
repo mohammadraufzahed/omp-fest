@@ -1,31 +1,44 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CampFsDetect } from "../src/adapters/fs/camp-fs.js";
-import { installVisualReferences, linkedPages, prepareVisualReferences, referencesForTask, validateVisualReferences } from "../src/application/visual-references.js";
-
-const SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 100"><rect x="4" y="4" width="300" height="80" fill="none" stroke="black"/><text x="8" y="22">Search</text></svg>';
-const TASK = "---\nfest_type: task\n---\n# UI\nVisual reference: references/pages/results/PAGE.md\n- [ ] filters.search works in RTL";
-
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "visual-plan-"));
-  const plans = join(root, ".ompfest", "plans");
-  const referencesDir = join(plans, "feature.references");
-  const pageDir = join(referencesDir, "pages", "results");
-  const plan = join(plans, "feature.STRUCTURE.md");
-  const festival = join(root, "festivals", "planning", "feature");
-  const sequence = join(festival, "001_BUILD", "01_ui");
-  await mkdir(pageDir, { recursive: true });
-  await mkdir(sequence, { recursive: true });
-  await writeFile(plan, "# Festival Structure");
-  await writeFile(join(pageDir, "PAGE.md"), "# Results\n\nfilters.search; RTL; loading/empty/error states; Done When: search works");
-  await writeFile(join(pageDir, "wireframe.svg"), SVG);
-  await writeFile(join(sequence, "01_results.md"), TASK);
-  return { root, referencesDir, pageDir, plan, festival, task: join(sequence, "01_results.md") };
-}
+import { installVisualReferences, linkedPages, prepareVisualReferences, referencesForTask, taskChecks, validateVisualReferences } from "../src/application/visual-references.js";
+import { createVisualFixture as fixture, PAGE, SVG, TASK } from "./visual-fixture.js";
 
 describe("visual planning references", () => {
+  it.each([
+    ["duplicate acceptance IDs", `${PAGE}- [AC-01] Duplicate\n`, SVG, "unique"],
+    ["invalid acceptance IDs", PAGE.replace("[AC-01]", "[AC-search]"), SVG, "unique"],
+    ["missing mobile state", PAGE.replace("| mobile | initial | unknown | Ask about layout |\n", ""), SVG, "Document mobile"],
+    ["missing loading state", PAGE.replace("| desktop | loading | unknown | Ask about spinner |\n", ""), SVG, "Document mobile"],
+    ["implicit states", PAGE.replace("| unknown |", "| inferred |"), SVG, "Document mobile"],
+    ["mismatched component", PAGE.replace("filters.search", "filters.other"), SVG, "matching component"],
+    ["undocumented SVG ID", PAGE, SVG.replace("<rect ", '<rect id="extra" '), "not documented"],
+    ["duplicate SVG ID", PAGE, SVG.replace("<rect ", '<rect id="filters.search" '), "duplicate component"],
+    ["duplicate attribute", PAGE, SVG.replace('id="filters.search"', 'id="filters.search" id="wrong"'), "duplicate attribute"],
+  ])("rejects %s", async (_label, spec, svg, reason) => {
+    const { root, referencesDir, pageDir, plan } = await fixture();
+    await writeFile(join(pageDir, "PAGE.md"), spec);
+    await writeFile(join(pageDir, "wireframe.svg"), svg);
+    await expect(prepareVisualReferences(root, plan, referencesDir)).rejects.toThrow(reason);
+  });
+
+  it("requires task coverage for each AC and rejects unknown or malformed Done-When IDs", async () => {
+    const { root, referencesDir, plan, festival, task } = await fixture();
+    await installVisualReferences(festival, await prepareVisualReferences(root, plan, referencesDir));
+    await writeFile(task, TASK.replace("AC-01", "AC-99"));
+    const invalid = (await validateVisualReferences(festival, new CampFsDetect())).issues.join("\n");
+    expect(invalid).toContain("results/AC-01 has no linked task Done-When");
+    expect(invalid).toContain("Unknown acceptance check results/AC-99");
+    await writeFile(task, TASK.replace("results/AC-01", "results/AC-01/extra"));
+    expect((await validateVisualReferences(festival, new CampFsDetect())).issues.join("\n")).toContain("Invalid or duplicate acceptance marker");
+    await writeFile(task, TASK.replace(" — filters.search works in RTL", ""));
+    expect((await validateVisualReferences(festival, new CampFsDetect())).issues.join("\n")).toContain("Invalid or duplicate acceptance marker");
+    await writeFile(task, TASK.replace("[ ]", "[x]"));
+    expect(taskChecks(await readFile(task, "utf8"))).toEqual([{ page: "results", id: "AC-01" }]);
+    expect((await validateVisualReferences(festival, new CampFsDetect())).issues).toEqual([]);
+  });
+
   it("installs a reviewed page bundle and resolves task references", async () => {
     const { root, referencesDir, plan, festival } = await fixture();
     const bundle = await prepareVisualReferences(root, plan, referencesDir);
@@ -36,7 +49,7 @@ describe("visual planning references", () => {
     expect(page?.wireframe).toBe(join(festival, "references", "pages", "results", "wireframe.svg"));
     expect((await validateVisualReferences(festival, new CampFsDetect())).issues).toEqual([]);
     expect(linkedPages(`${TASK}\n${TASK}`)).toEqual(["results"]);
-    expect(await readFile(page!.spec, "utf8")).toContain("loading/empty/error");
+    expect(await readFile(page!.spec, "utf8")).toContain("| desktop | loading | unknown |");
   });
 
   it("rejects source paths outside the matching planning directory", async () => {

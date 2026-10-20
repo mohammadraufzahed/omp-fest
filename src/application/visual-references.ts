@@ -1,12 +1,13 @@
-import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rmdir, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { setTimeout } from "node:timers/promises";
 import type { CampDetect } from "../ports.js";
 
 const REFERENCE_LINE = /^\s*Visual reference:\s*(\S.*?)\s*$/gim;
 const REFERENCE_PATH = /^references\/pages\/([a-z0-9]+(?:-[a-z0-9]+)*)\/PAGE\.md$/;
 const PAGE_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_FILE_BYTES = 1024 * 1024;
-const MAX_PAGES = 40;
+export const MAX_PAGES = 40;
 const SVG_ELEMENTS = new Set(["svg", "g", "rect", "circle", "ellipse", "line", "polyline", "polygon", "path", "text", "tspan", "title", "desc"]);
 const SVG_ATTRIBUTES = new Set([
   "xmlns", "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry",
@@ -25,23 +26,89 @@ export interface PageReference {
   spec: string;
   wireframe: string;
   content: string;
+  checks: { id: string; description: string }[];
 }
 
-function checkSvg(svg: string): void {
+const ACCEPTANCE_LINE = /^[ \t]*-[ \t]*\[[ xX]?\][ \t]*Acceptance:[ \t]*([a-z0-9]+(?:-[a-z0-9]+)*)\/(AC-\d+)[ \t]+[—:-][ \t]*\S[^\r\n]*$/gm;
+const SVG_TAG = /<\/?([a-z][\w:-]*)([^<>]*)>/gi;
+const SVG_ATTRIBUTE = /([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+
+function section(markdown: string, heading: string): string {
+  const match = new RegExp(`^## ${heading}\\s*$`, "im").exec(markdown);
+  if (!match) {
+    throw new Error(`Page specification needs a ## ${heading} section`);
+  }
+  const rest = markdown.slice(match.index + match[0].length);
+  const next = rest.search(/^## /m);
+  return next === -1 ? rest : rest.slice(0, next);
+}
+
+export function pageChecks(markdown: string): { id: string; description: string }[] {
+  const lines = section(markdown, "Acceptance checks");
+  const checks = [...lines.matchAll(/^[ \t]*-[ \t]*\[(AC-\d+)\][ \t]+([^\r\n]+)$/gm)]
+    .map((m) => ({ id: m[1] ?? "", description: (m[2] ?? "").trim() }));
+  const bullets = lines.split("\n").filter((line) => /^\s*-\s*\[/.test(line));
+  if (!checks.length || checks.length !== bullets.length || checks.some((check) => !check.description) ||
+    new Set(checks.map((c) => c.id)).size !== checks.length) {
+    throw new Error("Page acceptance checks must have unique [AC-01] identifiers");
+  }
+  return checks;
+}
+
+export function taskChecks(markdown: string): { page: string; id: string }[] {
+  return [...markdown.matchAll(ACCEPTANCE_LINE)].map((m) => ({ page: m[1] ?? "", id: m[2] ?? "" }));
+}
+
+function checkPageSpec(spec: string, svg: string): void {
+  const components = [...section(spec, "Components").matchAll(/^\s*-\s*`([a-z][\w.-]+)`\s+.+$/gm)]
+    .map((m) => m[1] ?? "");
+  if (!components.length || new Set(components).size !== components.length) {
+    throw new Error("Page components need unique backticked IDs");
+  }
+  const svgIds = new Set([...svg.matchAll(SVG_TAG)].flatMap((tag) => [...(tag[2] ?? "").matchAll(SVG_ATTRIBUTE)]
+    .filter((attribute) => attribute[1] === "id").map((attribute) => attribute[2] ?? attribute[3] ?? "")));
+  for (const id of components) {
+    if (!svgIds.has(id)) {
+      throw new Error(`Wireframe has no matching component ID: ${id}`);
+    }
+  }
+  for (const id of svgIds) {
+    if (!components.includes(id)) {
+      throw new Error(`Wireframe component ID is not documented in PAGE.md: ${id}`);
+    }
+  }
+  pageChecks(spec);
+  const rows = section(spec, "States").split("\n").filter((line) => /^\s*\|/.test(line))
+    .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim().toLowerCase()));
+  if (rows[0]?.join("|") !== "viewport|state|status|expected" ||
+      !rows[1]?.every((cell) => /^:?-+:?$/.test(cell))) {
+    throw new Error("Page states need a Viewport | State | Status | Expected table");
+  }
+  const states = rows.slice(2);
+  const required = ["initial", "loading", "empty", "error"];
+  if (states.some((row) => row.length !== 4 || !row.every(Boolean) || !["observed", "agreed", "unknown", "n/a"].includes(row[2] ?? "")) ||
+      !states.some((row) => row[0] === "mobile") ||
+      !states.some((row) => row[0] === "desktop") ||
+      required.some((state) => !states.some((row) => row[1] === state))) {
+    throw new Error("Document mobile and initial/loading/empty/error states as observed, agreed, unknown or n/a");
+  }
+}
+
+export function validateWireframe(svg: string): void {
   if (!/^\s*<svg(?:\s|>)/i.test(svg) || !/<\/svg>\s*$/i.test(svg)) {
     throw new Error("Wireframe must be a standalone SVG document");
   }
   if (/<!|<\?|&(?!(?:amp|lt|gt|quot|apos);)|url\s*\(|(?:javascript|data):/i.test(svg)) {
     throw new Error("Wireframe contains active or external SVG content; use only inert shapes and text");
   }
-  const tag = /<\/?([a-z][\w:-]*)([^<>]*)>/gi;
   const stack: string[] = [];
+  const ids = new Set<string>();
   let rooted = false;
-  const remainder = svg.replace(tag, "");
+  const remainder = svg.replace(SVG_TAG, "");
   if (remainder.includes("<") || remainder.includes(">")) {
     throw new Error("Wireframe contains invalid markup");
   }
-  for (const match of svg.matchAll(tag)) {
+  for (const match of svg.matchAll(SVG_TAG)) {
     const name = match[1];
     if (!name || !SVG_ELEMENTS.has(name)) {
       throw new Error(`Wireframe has an unsupported element: ${name}`);
@@ -62,16 +129,27 @@ function checkSvg(svg: string): void {
       stack.push(name);
     }
     const attributes = (match[2] ?? "").replace(/\/$/, "");
-    const attribute = /([\w:-]+)\s*=\s*(?:"[^"]*"|'[^']*')/g;
-    for (const item of attributes.matchAll(attribute)) {
+    const names = new Set<string>();
+    for (const item of attributes.matchAll(SVG_ATTRIBUTE)) {
       if (!item[1] || !SVG_ATTRIBUTES.has(item[1])) {
         throw new Error(`Wireframe has an unsupported attribute: ${item[1]}`);
+      }
+      if (names.has(item[1])) {
+        throw new Error(`Wireframe has a duplicate attribute: ${item[1]}`);
+      }
+      names.add(item[1]);
+      if (item[1] === "id") {
+        const id = item[2] ?? item[3] ?? "";
+        if (!/^[a-zA-Z_][\w.:-]*$/.test(id) || ids.has(id)) {
+          throw new Error(`Wireframe has an invalid or duplicate component ID: ${id}`);
+        }
+        ids.add(id);
       }
       if (/\\|\/\*/.test(item[0])) {
         throw new Error("Wireframe attributes must not use CSS escapes or comments");
       }
     }
-    if (attributes.replace(attribute, "").trim()) {
+    if (attributes.replace(SVG_ATTRIBUTE, "").trim()) {
       throw new Error("Wireframe attributes must be quoted and supported");
     }
   }
@@ -107,7 +185,7 @@ export async function prepareVisualReferences(campRoot: string, plan: string, re
   if (!(await lstat(pagesDir)).isDirectory()) {
     throw new Error("referencesDir must contain a real pages directory");
   }
-  const pageNames = await readdir(pagesDir);
+  const pageNames = (await readdir(pagesDir)).sort();
   if (pageNames.length === 0 || pageNames.length > MAX_PAGES) {
     throw new Error(`Visual plan must have between 1 and ${MAX_PAGES} pages`);
   }
@@ -130,7 +208,8 @@ export async function prepareVisualReferences(campRoot: string, plan: string, re
     if (!spec.trim()) {
       throw new Error(`Page ${page} has an empty specification`);
     }
-    checkSvg(svg);
+    validateWireframe(svg);
+    checkPageSpec(spec, svg);
     files.push({ path: `pages/${page}/PAGE.md`, content: spec });
     files.push({ path: `pages/${page}/wireframe.svg`, content: svg });
   }
@@ -169,14 +248,22 @@ export async function referencesForTask(festivalDir: string, doc: string): Promi
   const pages = linkedPages(doc);
   const references: PageReference[] = [];
   for (const page of pages) {
+    const root = join(festivalDir, "references");
+    for (const directory of [root, join(root, "pages"), join(root, "pages", page)]) {
+      if (!(await lstat(directory)).isDirectory()) {
+        throw new Error(`Visual reference directory must not be a symlink: ${directory}`);
+      }
+    }
     const spec = join(festivalDir, "references", "pages", page, "PAGE.md");
     const wireframe = join(festivalDir, "references", "pages", page, "wireframe.svg");
     const content = await regularFile(spec);
     if (!content.trim()) {
       throw new Error(`Page ${page} has an empty specification`);
     }
-    checkSvg(await regularFile(wireframe));
-    references.push({ page, spec, wireframe, content });
+    const svg = await regularFile(wireframe);
+    validateWireframe(svg);
+    checkPageSpec(content, svg);
+    references.push({ page, spec, wireframe, content, checks: pageChecks(content) });
   }
   return references;
 }
@@ -193,7 +280,14 @@ export async function validateVisualReferences(festivalDir: string, detect: Camp
   })));
   const linked = new Set(taskDocs.flatMap((task) => linkedPages(task.doc)));
   const issues: string[] = [];
+  const coverage = taskDocs.flatMap((task) => taskChecks(task.doc).map((check) => ({ ...check, task: task.path })));
   for (const task of taskDocs) {
+    const acceptance = taskChecks(task.doc);
+    const lines = task.doc.split("\n").filter((line) => /^\s*-.*Acceptance:/i.test(line));
+    if ((linkedPages(task.doc).length || pageInfo) &&
+      (lines.length !== acceptance.length || new Set(acceptance.map((check) => `${check.page}/${check.id}`)).size !== acceptance.length)) {
+      issues.push(`Invalid or duplicate acceptance marker in ${task.path}`);
+    }
     for (const match of task.doc.matchAll(REFERENCE_LINE)) {
       if (!REFERENCE_PATH.test(match[1] ?? "")) {
         issues.push(`Invalid visual reference in ${task.path}: ${match[1]}`);
@@ -227,7 +321,17 @@ export async function validateVisualReferences(festivalDir: string, detect: Camp
         if ((await readdir(join(directory, page))).sort().join(",") !== "PAGE.md,wireframe.svg") {
           throw new Error("page needs exactly PAGE.md and wireframe.svg");
         }
-        await referencesForTask(festivalDir, `Visual reference: references/pages/${page}/PAGE.md`);
+        const [reference] = await referencesForTask(festivalDir, `Visual reference: references/pages/${page}/PAGE.md`);
+        const expected = new Set(reference?.checks.map((check) => check.id));
+        for (const check of reference?.checks ?? []) {
+          if (!coverage.some((entry) => entry.page === page && entry.id === check.id &&
+            taskDocs.some((task) => task.path === entry.task && linkedPages(task.doc).includes(page)))) {
+            issues.push(`Page ${page}/${check.id} has no linked task Done-When`);
+          }
+        }
+        for (const entry of coverage.filter((item) => item.page === page && !expected.has(item.id))) {
+          issues.push(`Unknown acceptance check ${page}/${entry.id} in ${entry.task}`);
+        }
       } catch (error) {
         issues.push(`Page ${page}: ${String(error)}`);
       }
@@ -241,5 +345,35 @@ export async function validateVisualReferences(festivalDir: string, detect: Camp
       issues.push(`Task links missing visual reference: references/pages/${page}/PAGE.md`);
     }
   }
+  for (const entry of coverage) {
+    const task = taskDocs.find((item) => item.path === entry.task);
+    if (task && !linkedPages(task.doc).includes(entry.page)) {
+      issues.push(`Acceptance check ${entry.page}/${entry.id} in ${entry.task} needs a visual reference link`);
+    }
+  }
   return { pages: pages.map((page) => relative(festivalDir, join(root, "pages", page, "PAGE.md"))), issues };
+}
+
+export async function withVisualReferenceLock<T>(festivalDir: string, action: () => Promise<T>): Promise<T> {
+  const root = join(festivalDir, "references");
+  if (!(await lstat(root)).isDirectory()) {
+    throw new Error("Visual references must be a real directory");
+  }
+  const lock = join(root, ".ompfest-visual.lock");
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await mkdir(lock);
+      break;
+    } catch (error) {
+      if (attempt >= 50 || !(typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST")) {
+        throw new Error("Visual references are locked by another writer; retry or inspect the stale .ompfest-visual.lock directory", { cause: error });
+      }
+      await setTimeout(20);
+    }
+  }
+  try {
+    return await action();
+  } finally {
+    await rmdir(lock);
+  }
 }

@@ -54,8 +54,8 @@ function mockPi(cwd: string) {
     zod: {
       object: (shape: Record<string, unknown>) => ({ shape }),
       string: () => zodNode("string"),
-      enum: (values: string[]) => ({ kind: "enum", values }),
-      array: (item: unknown) => ({ kind: "array", item, describe: () => ({ kind: "array", item }), optional: () => ({ kind: "array", item }) }),
+      enum: (values: string[]) => ({ ...zodNode("enum"), values }),
+      array: (item: unknown) => ({ ...zodNode("array"), item }),
       boolean: () => zodNode("boolean"),
       number: () => zodNode("number"),
     },
