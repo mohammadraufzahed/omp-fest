@@ -14,15 +14,15 @@ export class CampCliAdapter implements CampCli {
   }
 
   async projects(campRoot: string): Promise<CampProject[]> {
-    const result = await this.exec.run("camp", ["project", "list"], campRoot);
-    const projects: CampProject[] = [];
-    for (const line of result.stdout.split("\n")) {
-      const match = /^\s*(?:[•*-]\s*)?(\S+)\s+(.+)$/.exec(line);
-      if (match && !/^name/i.test(line)) {
-        projects.push({ name: match[1] ?? "", path: (match[2] ?? "").trim() });
-      }
+    const result = await this.exec.run("camp", ["project", "list", "--json"], campRoot);
+    try {
+      const parsed = JSON.parse(result.stdout) as { Name?: string; Path?: string }[];
+      return parsed
+        .filter((row) => typeof row.Name === "string" && typeof row.Path === "string")
+        .map((row) => ({ name: row.Name ?? "", path: row.Path ?? "" }));
+    } catch {
+      return [];
     }
-    return projects;
   }
 
   async raw(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {

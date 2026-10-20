@@ -8,11 +8,13 @@
  * coding-agent package installed).
  */
 import { basename } from "node:path";
+import { readdir, rm } from "node:fs/promises";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
+import { resolveWorkingDir, stampWorkingDir } from "../../application/sequence-goals.js";
 import type { NextUnit } from "../../domain/types.js";
 import type { ZodLike } from "./zod-types.js";
 
@@ -334,14 +336,17 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     label: "Fest Plan (Scaffold From Plan)",
     description:
       "Generate a festival from a STRUCTURE.md plan doc the model wrote after interviewing the human. " +
-      "Runs `fest scaffold from-plan --dest planning`. Returns the new festival path and unfilled marker " +
-      "count. Follow with marker fills, fest_validate, human approval, then fest_promote x2.",
+      "Runs `fest scaffold from-plan --dest planning`, stamps fest_working_dir into every sequence " +
+      "(the scaffold omits it and fest_next refuses without it), and applies quality gates. Pass " +
+      "workingDir (camp-relative project path) — ask the human during the interview when the camp " +
+      "has multiple projects. Fails loudly when the plan doc scaffolded zero sequences.",
     parameters: z.object({
       name: z.string().describe("Festival name/slug, e.g. 'prenatal-form-groups'"),
       plan: z.string().describe("Absolute path to the STRUCTURE.md plan document"),
+      workingDir: z.string().optional().describe("Camp-relative project dir the festival targets, e.g. 'projects/api' — required when the camp has multiple projects"),
       dryRun: z.boolean().optional().describe("Preview without creating files"),
     }),
-    async execute(_id: string, params: { name: string; plan: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { name: string; plan: string; workingDir?: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -365,21 +370,67 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         });
       }
       const festId = parsed?.festival_dir ? basename(parsed.festival_dir) : params.name;
+      const festivalDir = parsed?.festival_dir;
+      if (festivalDir && params.dryRun !== true) {
+        const sequences = await readdir(festivalDir).catch(() => [] as string[]);
+        const hasWork = sequences.some((phase) => /^\d{3}_/.test(phase));
+        if (!hasWork) {
+          // The doc didn't match the STRUCTURE.md grammar — fest scaffolds an
+          // empty festival but still reports ok. Remove the stub so retries
+          // don't leave ghost festivals behind.
+          await rm(festivalDir, { recursive: true, force: true });
+          deps.detect.bustCache?.();
+          return textResult({
+            kind: "plan_failed",
+            error: `scaffold produced an empty festival at ${festivalDir} — the STRUCTURE.md parsed but yielded no phases/sequences`,
+            hint:
+              "Rewrite the doc to the exact shape — '# Festival Structure' / " +
+              "'## Festival Goal' / '## Hierarchy' headers, then list items: '- **Festival:** name', " +
+              "'  - **Phase 1:** name (type)', '    - Sequence 1: name', '      - Task 1: title' — then call fest_plan again. The empty stub was deleted.",
+          });
+        }
+      }
+      const { dir: workingDir, candidates: projectCandidates } = await resolveWorkingDir(
+        root,
+        deps.camp,
+        params.workingDir,
+      );
+      let stamped = 0;
       let gates: { created: number; output: string } | undefined;
-      if (parsed?.festival_dir && params.dryRun !== true) {
+      if (festivalDir && params.dryRun !== true) {
+        if (workingDir) {
+          stamped = await stampWorkingDir(festivalDir, workingDir);
+        }
         gates = await deps.fest
-          .gatesApply(root, parsed.festival_dir)
+          .gatesApply(root, festivalDir)
           .catch((err: unknown) => ({ created: 0, output: `gates apply failed: ${String(err)}` }));
       }
+      const skipped = gates?.output.match(/Skipping sequence "[^"]+"/g) ?? [];
+      const needsWorkingDir = festivalDir !== undefined && !workingDir;
       return textResult({
         kind: "plan_scaffolded",
         dryRun: params.dryRun === true,
         output,
-        ...(parsed?.festival_dir ? { festivalDir: parsed.festival_dir } : {}),
+        ...(festivalDir ? { festivalDir } : {}),
+        ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
         ...(gates ? { qualityGates: gates } : {}),
+        ...(skipped.length > 0
+          ? {
+              gateSkippedSequences: skipped,
+              gateSkippedHint:
+                "fest excludes sequences named *_planning/*_research/*_requirements/*_docs from quality gates. If these sequences do real implementation work, rename the sequence dirs (and their fest_id/fest_name frontmatter) — otherwise the skip is intentional.",
+            }
+          : {}),
+        ...(needsWorkingDir
+          ? {
+              needsWorkingDir: true,
+              projects: projectCandidates,
+              hint: "Multiple projects in this camp — no workingDir given, so sequences have NO fest_working_dir and fest_next will fail validation. Ask the human which project this festival targets, then run fest_raw {args:['scaffold'], festival:<id>} — or write fest_working_dir: \"projects/<name>\" into each sequence's SEQUENCE_GOAL.md frontmatter.",
+            }
+          : {}),
         nextSteps: [
           `Fill unfilled markers: fest_markers {list:true, festival:"${festId}"}`,
-          `Run fest_validate {festival:"${festId}"}`,
+          `Run fest_validate {festival:"${festId}"} — it should report only unfilled markers, no missing fest_working_dir`,
           "Present the plan to the human and wait for approval",
           `fest_promote {festival:"${festId}"} twice: planning -> ready -> active`,
         ],
