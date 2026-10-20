@@ -56,6 +56,12 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `festivals/planning/<name>` via real `fest scaffold from-plan`, fills
   markers, validates — then *you* approve and it `fest_promote`s to active.
   your brain → festival, no TUI wrangling 🧠
+- 🖼️ **visual planning in the same interview** — attach a screenshot with
+  `/fest plan <goal>`. The agent drafts a labeled SVG wireframe and `PAGE.md`
+  beside the structure plan, asks about behavior the image cannot show, and
+  presents both for the same approval. No new command or approval lifecycle.
+  This requires the selected model to support images; otherwise the agent
+  should tell you it cannot see the screenshot rather than guessing.
 - 🛠️ **15 tools + ONE guided command** — `/fest <sub>` is the whole
   cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
   `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
@@ -66,6 +72,36 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   idea claim/sync, ...) at the right dir, auto-inject `--yes` on task
   mutations, and return `{code, stdout, stderr}` typed. nothing the real
   CLIs can do is out of reach. `/fest cmd` + `/fest camp` for you too 💪
+
+### Plan a page from a screenshot
+
+Attach a screenshot to `/fest plan build this page`. The interview uses the
+image as reference data, not as instructions. The agent should omit personal
+data from the draft, ask only about behavior the picture cannot establish,
+and review the wireframe, states, acceptance checks and structure plan with
+you before scaffolding. Text-only `/fest plan` still works as before.
+
+```text
+<camp>/.ompfest/plans/feature.STRUCTURE.md
+<camp>/.ompfest/plans/feature.references/pages/results/PAGE.md
+<camp>/.ompfest/plans/feature.references/pages/results/wireframe.svg
+```
+
+The plan uses the unchanged `STRUCTURE.md` syntax. Once approved, the agent
+calls `fest_plan` with `referencesDir` pointing to the matching `.references`
+directory (omit it for text-only plans). The extension copies only the two
+reviewed files per page into `<festival>/references/pages/<slug>/`, rejecting
+symlinks, raw screenshots and active/external SVG content. The agent then adds
+`Visual reference: references/pages/results/PAGE.md` to each relevant task's
+document, with component-specific Done-When checks. Agreed visual constraints
+such as RTL order go in the existing `rules` argument, so the existing
+`FESTIVAL_RULES.md` and gate checklist carry them forward.
+
+`fest_next` returns linked page paths, notes and wireframe paths with the task;
+`fest_parallel` includes the relevant pages for each lane. `fest_validate`
+checks referenced files and unlinked pages; promotion and gate submission are
+blocked while visual references are broken. SVGs are intentionally simple
+wireframes, not pixel-perfect screenshot reconstructions or generated UI code.
 
 ## 🫵 what YOU get (the supervisor seat)
 
@@ -98,7 +134,7 @@ so drop it on PATH and boom 💥 `fest omp status` / `fest omp next` work
 ## 🏗️ under the hood
 
 hexagonal (ports & adapters), zero runtime deps, strict TypeScript,
-`strictTypeChecked` ESLint, 29 vitest cases. clean enough to read for fun:
+`strictTypeChecked` ESLint, Vitest coverage. clean enough to read for fun:
 
 ```
 index.ts            🧠 composition root — wires everything onto omp
@@ -115,7 +151,8 @@ tests/              ✅ vitest, one file per module
 
 ```bash
 npm install
-npm test           # 29 tests, all green ✅
+npm install -g @obedience-corp/festival  # needed by the session-start smoke test
+npm test           # automated tests ✅
 npm run typecheck  # strict tsc 🧊
 npm run lint       # strictTypeChecked eslint 🧹
 ```

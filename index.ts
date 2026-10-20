@@ -12,7 +12,7 @@
  * against upstream: before_agent_start.message, tool_call/tool_result
  * additionalContext, before_subagent_spawn {note, block, reason, model}.
  */
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve, sep } from "node:path";
 
 import { CachedDetect } from "./src/application/detect-cache.js";
 import { watchCampTransitions } from "./src/application/camp-watcher.js";
@@ -31,6 +31,7 @@ import { notifyGate, OmpNotifier } from "./src/adapters/omp/notify.js";
 import { registerTools, type PiLike } from "./src/adapters/omp/tools.js";
 import { loadConfig } from "./src/domain/config.js";
 import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
+import { planInterviewKickoff } from "./src/domain/orientation.js";
 
 interface ExtensionContextLike {
   cwd: string;
@@ -58,6 +59,12 @@ interface ToolCallEvent {
   input?: Record<string, unknown>;
 }
 
+interface InputEventShape {
+  text: string;
+  images?: unknown[];
+  source?: string;
+}
+
 interface ToolResultEventShape extends ToolCallEvent {
   isError?: boolean;
 }
@@ -76,6 +83,7 @@ interface SubagentSpawnResult {
 }
 
 interface FestEventMap {
+  input: InputEventShape;
   session_start: unknown;
   session_branch: unknown;
   session_tree: unknown;
@@ -90,6 +98,7 @@ type HandlerResult =
   | BeforeAgentStartResult
   | ToolCallResult
   | SubagentSpawnResult
+  | { text: string; images?: unknown[]; handled?: boolean }
   | undefined;
 
 interface ExtensionApiLike {
@@ -143,6 +152,17 @@ export default function ompFest(pi: ExtensionApiLike): void {
 
   registerTools(pi as unknown as PiLike, deps);
   registerCommands(pi, deps);
+
+  pi.on("input", (event) => {
+    if (!event.images?.length || event.source === "extension") {
+      return undefined;
+    }
+    const match = /^\/fest\s+plan(?:\s+([\s\S]*))?$/.exec(event.text.trim());
+    if (!match) {
+      return undefined;
+    }
+    return { text: planInterviewKickoff(match[1] ?? "") };
+  });
 
   const configFor = async () => loadConfig(cwd);
   const silentContext = (content: string): void => {
@@ -314,8 +334,10 @@ export default function ompFest(pi: ExtensionApiLike): void {
     if (!festivalDir) {
       return undefined;
     }
+    const plansDir = location.campRoot ? resolve(location.campRoot, ".ompfest", "plans") : undefined;
     const targets = targetPaths(event.input, ctx.cwd).filter(
-      (p) => !p.startsWith(`${festivalDir}/`) && !p.includes("/festivals/"),
+      (p) => !p.startsWith(`${festivalDir}${sep}`) && !p.includes(`${sep}festivals${sep}`) &&
+        !(plansDir && p.startsWith(`${plansDir}${sep}`)),
     );
     if (targets.length === 0) {
       return undefined;

@@ -7,8 +7,8 @@
  * runtime hands us (kept loose-typed here so the module compiles without the
  * coding-agent package installed).
  */
-import { basename } from "node:path";
-import { readdir, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { readFile, readdir, rm } from "node:fs/promises";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
@@ -16,6 +16,7 @@ import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { resolveWorkingDir, stampWorkingDir } from "../../application/sequence-goals.js";
 import { festivalConstraints, seedFestivalRules, stampGateRules } from "../../application/festival-rules.js";
+import { installVisualReferences, prepareVisualReferences, referencesForTask, validateVisualReferences } from "../../application/visual-references.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import type { ZodLike } from "./zod-types.js";
@@ -173,7 +174,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_next",
     label: "Fest Next",
     description:
-      "Get the next unit of work in the current festival (task, workflow step, gate step, blocked, or complete). This is the engine of the festival loop — call it, do what it returns, then call it again.",
+      "Get the next unit of work in the current festival (task, workflow step, gate step, blocked, or complete), including linked visual reference notes and wireframe paths for page tasks. This is the engine of the festival loop — call it, do what it returns, then call it again.",
     parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
     async execute(_id: string, params: { festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const r = await dirOrResult(pi, deps, ctx, params.festival);
@@ -183,15 +184,22 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const dir = r.dir;
       const unit: NextUnit = await deps.fest.next(dir);
       if (unit.kind === "task") {
+        const visual = await validateVisualReferences(dir, deps.detect);
+        if (visual.issues.length > 0) {
+          return textResult({ kind: "blocked", errors: visual.issues, hint: "Fix the visual references and task links, then call fest_next again." });
+        }
+        const visualReferences = await referencesForTask(dir, unit.doc);
         const sid = sessionIdOf(ctx);
         const stale = deps.tracker.unfinishedFor(sid) ? deps.tracker.openTaskPathFor(sid) : undefined;
         deps.tracker.taskOpened(sid, unit.path);
         if (stale) {
           return textResult({
             ...unit,
+            ...(visualReferences.length > 0 ? { visualReferences } : {}),
             warning: `Previous unit ${stale} was opened but never completed+committed — the work record is stale. Finish its fest_task_complete/fest_commit before starting this one.`,
           });
         }
+        return textResult({ ...unit, ...(visualReferences.length > 0 ? { visualReferences } : {}) });
       }
       return textResult(unit);
     },
@@ -282,7 +290,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   pi.registerTool({
     name: "fest_validate",
     label: "Validate Festival",
-    description: "Validate festival structure; returns the /100 score plus issues to fix.",
+    description: "Validate festival structure and visual references; returns the CLI /100 score plus visual-reference issues to fix. kind:validation_failed means reference checks failed regardless of the CLI score.",
     parameters: z.object({
       fix: z.boolean().optional().describe("Auto-fix common structure issues"),
       festival: z.string().optional().describe("Festival name/id override"),
@@ -292,7 +300,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if ("result" in r) {
         return r.result;
       }
-      return textResult(await deps.fest.validate(r.dir, params.fix));
+      const structure = await deps.fest.validate(r.dir, params.fix);
+      const visual = await validateVisualReferences(r.dir, deps.detect);
+      return textResult({ ...structure, visualReferences: visual, ...(visual.issues.length > 0 ? { kind: "validation_failed" } : {}) });
     },
   });
 
@@ -344,6 +354,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return r.result;
       }
       const dir = r.dir;
+      const visual = await validateVisualReferences(dir, deps.detect);
+      if (visual.issues.length > 0) {
+        return textResult({ kind: "gate_blocked", issues: visual.issues, hint: "Repair visual references before submitting this gate." });
+      }
       const constraints = await festivalConstraints(dir);
       const ui = ctx.ui;
       if (!config.pauseAtGates || ui === undefined || typeof ui.confirm !== "function") {
@@ -407,6 +421,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "Runs `fest scaffold from-plan --dest planning`, stamps fest_working_dir into every sequence " +
       "(the scaffold omits it and fest_next refuses without it), seeds FESTIVAL_RULES.md from the " +
       "camp template plus any constraints the human stated (pass rules:), and applies quality gates. " +
+      "Optional referencesDir installs the matching .references directory beside the STRUCTURE.md as festival references. " +
       "Pass workingDir (camp-relative project path) — ask the human during the interview when the " +
       "camp has multiple projects. Fails loudly when the plan doc scaffolded zero sequences.",
     parameters: z.object({
@@ -414,12 +429,21 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       plan: z.string().describe("Absolute path to the STRUCTURE.md plan document"),
       workingDir: z.string().optional().describe("Camp-relative project dir the festival targets, e.g. 'projects/api' — required when the camp has multiple projects"),
       rules: z.string().optional().describe("Constraints/rules the human agreed to during planning, as bullet lines — written verbatim into FESTIVAL_RULES.md so fest rules shows them"),
+      referencesDir: z.string().optional().describe("Absolute <camp>/.ompfest/plans/<name>.references directory containing pages/<slug>/PAGE.md and wireframe.svg"),
       dryRun: z.boolean().optional().describe("Preview without creating files"),
     }),
-    async execute(_id: string, params: { name: string; plan: string; workingDir?: string; rules?: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { name: string; plan: string; workingDir?: string; rules?: string; referencesDir?: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
+      }
+      let bundle;
+      if (params.referencesDir) {
+        try {
+          bundle = await prepareVisualReferences(root, params.plan, params.referencesDir);
+        } catch (error) {
+          return textResult({ kind: "plan_failed", error: String(error), hint: "Fix the visual bundle before scaffolding." });
+        }
       }
       const output = await deps.fest.scaffoldFromPlan(root, params);
       deps.detect.bustCache?.();
@@ -441,6 +465,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       const festId = parsed?.festival_dir ? basename(parsed.festival_dir) : params.name;
       const festivalDir = parsed?.festival_dir;
+      if (bundle && !festivalDir && params.dryRun !== true) {
+        return textResult({ kind: "plan_failed", error: "Scaffold did not report a festival directory; visual references were not installed", output });
+      }
       if (festivalDir && params.dryRun !== true) {
         const sequences = await readdir(festivalDir).catch(() => [] as string[]);
         const hasWork = sequences.some((phase) => /^\d{3}_/.test(phase));
@@ -470,6 +497,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       let gates: { created: number; output: string } | undefined;
       let gateRules = 0;
       if (festivalDir && params.dryRun !== true) {
+        if (bundle) {
+          try {
+            await installVisualReferences(festivalDir, bundle);
+          } catch (error) {
+            return textResult({ kind: "plan_failed", festivalDir, error: String(error), hint: "The festival was scaffolded but references were not installed. Repair its references before validation or promotion." });
+          }
+        }
         if (workingDir) {
           stamped = await stampWorkingDir(festivalDir, workingDir);
         }
@@ -492,6 +526,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         dryRun: params.dryRun === true,
         output,
         ...(festivalDir ? { festivalDir } : {}),
+        ...(bundle ? { visualReferences: bundle.pages.map((page) => `references/pages/${page}/PAGE.md`) } : {}),
         ...(rulesSeed ? { rules: { ...rulesSeed, gateFilesStamped: gateRules } } : {}),
         ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
         ...(gates ? { qualityGates: gates } : {}),
@@ -510,6 +545,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             }
           : {}),
         nextSteps: [
+          ...(bundle ? ["Link each relevant task doc with 'Visual reference: references/pages/<page>/PAGE.md' and component-level Done-When checks; fest_validate will reject unlinked pages."] : []),
           `Fill unfilled markers: fest_markers {list:true, festival:"${festId}"}`,
           `Run fest_validate {festival:"${festId}"} — it should report only unfilled markers, no missing fest_working_dir`,
           "Present the plan to the human and wait for approval",
@@ -535,6 +571,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         if (!location.campRoot) {
           return await idleResult(deps, ctx);
         }
+        const candidate = matchFestival(await deps.detect.listFestivals(location.campRoot), params.festival);
+        if (candidate.kind === "match") {
+          const visual = await validateVisualReferences(candidate.festival.path, deps.detect);
+          if (visual.issues.length > 0) {
+            return textResult({ kind: "promotion_blocked", issues: visual.issues });
+          }
+        }
         const output = await deps.fest.promote(location.campRoot, params.festival);
         deps.detect.bustCache?.();
         // An explicit promote claims that festival for this session.
@@ -552,6 +595,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
       if (!dir) {
         return await idleResult(deps, ctx);
+      }
+      const visual = await validateVisualReferences(dir, deps.detect);
+      if (visual.issues.length > 0) {
+        return textResult({ kind: "promotion_blocked", issues: visual.issues });
       }
       const promotedId = basename(dir);
       const output = await deps.fest.promote(dir);
@@ -613,16 +660,27 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return r.result;
       }
       const tasks = await deps.detect.pendingTasks(r.dir);
+      const visual = await validateVisualReferences(r.dir, deps.detect);
+      if (visual.issues.length > 0) {
+        return textResult({ kind: "parallel_blocked", issues: visual.issues });
+      }
       const pending = tasks.filter((t) => !t.done);
       const groups = new Map<string, string[]>();
+      const laneReferences = new Map<string, Awaited<ReturnType<typeof referencesForTask>>>();
       for (const task of pending) {
         const list = groups.get(task.sequence) ?? [];
         list.push(task.path);
         groups.set(task.sequence, list);
+        const doc = await readFile(join(r.dir, task.path), "utf8");
+        const refs = await referencesForTask(r.dir, doc);
+        const existing = laneReferences.get(task.sequence) ?? [];
+        laneReferences.set(task.sequence, [...existing, ...refs.filter((ref) => !existing.some((item) => item.page === ref.page))]);
       }
       return textResult({
         hint: "Each sequence is an independent lane — spawn one subagent per sequence to work tasks in parallel; same-sequence tasks stay ordered.",
-        lanes: [...groups.entries()].map(([sequence, files]) => ({ sequence, tasks: files })),
+        lanes: [...groups.entries()].map(([sequence, files]) => ({
+          sequence, tasks: files, visualReferences: laneReferences.get(sequence) ?? [],
+        })),
         pendingCount: pending.length,
         totalCount: tasks.length,
       });
