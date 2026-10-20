@@ -8,6 +8,7 @@
  * openTaskPath or warn-set would leak one agent's unit into another's
  * digest and discipline rules.
  */
+import { basename } from "node:path";
 export interface LoopState {
   /** Task currently being executed (festival-relative path). */
   openTask?: string;
@@ -20,7 +21,7 @@ const EMPTY: LoopState = { taskCompleted: false, commitDone: false };
 export class LoopTracker {
   private readonly states = new Map<string, LoopState>();
   private readonly warned = new Map<string, Set<string>>();
-  private readonly festivals = new Map<string, string>();
+  private readonly festivals = new Map<string, { id: string; dir?: string }>();
 
   private stateOf(sessionId: string): LoopState {
     return this.states.get(sessionId) ?? EMPTY;
@@ -37,13 +38,54 @@ export class LoopTracker {
     return true;
   }
 
-  /** Record which festival this session is working — digest/tracking then follow it instead of the camp-wide active pick. */
-  claimFestival(sessionId: string, festivalDir: string): void {
-    this.festivals.set(sessionId, festivalDir);
+  /**
+   * Record which festival this session is working — digest/tracking then
+   * follow it instead of the camp-wide active pick. The id is stored beside
+   * the dir because `fest promote` renames festivals/<status>/<id>, leaving
+   * the dir stale while the id survives. Returns true when the claim changed.
+   */
+  claimFestival(sessionId: string, festivalDir: string): boolean {
+    const id = basename(festivalDir);
+    const prev = this.festivals.get(sessionId);
+    const changed = prev?.id !== id || prev.dir !== festivalDir;
+    if (changed) {
+      this.festivals.set(sessionId, { id, dir: festivalDir });
+    }
+    return changed;
+  }
+
+  /** Update the stored dir after the festival moved (e.g. promote). */
+  moveClaimedFestival(sessionId: string, id: string, dir: string): void {
+    if (this.festivals.get(sessionId)?.id === id) {
+      this.festivals.set(sessionId, { id, dir });
+    }
+  }
+
+  clearFestival(sessionId: string): void {
+    this.festivals.delete(sessionId);
   }
 
   festivalFor(sessionId: string): string | undefined {
-    return this.festivals.get(sessionId);
+    return this.festivals.get(sessionId)?.dir;
+  }
+
+  claimedFestivalIdFor(sessionId: string): string | undefined {
+    return this.festivals.get(sessionId)?.id;
+  }
+
+  /**
+   * Restore a claim persisted in the session transcript. The stored dir may
+   * be stale or absent (festival moved status dirs) — claimedFestivalDir
+   * re-resolves by id at use time. Returns the claimed id, or undefined when
+   * the persisted data carried neither id nor dir.
+   */
+  restoreClaim(sessionId: string, festivalId?: string, festivalDir?: string): string | undefined {
+    const id = festivalId ?? (festivalDir ? basename(festivalDir) : undefined);
+    if (!id) {
+      return undefined;
+    }
+    this.festivals.set(sessionId, { id, ...(festivalDir ? { dir: festivalDir } : {}) });
+    return id;
   }
 
   taskOpened(sessionId: string, path: string): void {

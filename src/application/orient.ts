@@ -18,13 +18,14 @@ export interface Orientation {
 export async function orientSession(
   cwd: string,
   detect: CampDetect,
+  claimedDir?: string,
 ): Promise<Orientation> {
   const location = await detect.locate(cwd);
   if (location.kind === "outside" || !location.campRoot) {
     return { location, note: "", statusLine: "" };
   }
   const festivalDir =
-    location.festivalDir ?? (await detect.activeFestival(location.campRoot));
+    location.festivalDir ?? claimedDir ?? (await detect.activeFestival(location.campRoot));
   if (!festivalDir) {
     const statusLine = `🏕 ${location.campName ?? "camp"}`;
     return {
@@ -38,7 +39,7 @@ export async function orientSession(
   const progress = summarizeProgress(events);
   const statusLine = statusLineText({
     campName: location.campName,
-    festivalId: location.festivalId,
+    festivalId: resolved.festivalId,
     progress,
   });
   const note = buildOrientationNote({ location: resolved, progress });

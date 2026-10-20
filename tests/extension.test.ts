@@ -240,6 +240,34 @@ describe("ompFest extension", () => {
     expect(sent.at(-1)?.message.content).toContain("Camp:");
     expect(sent.at(-1)?.message.content).toContain("No festivals yet");
   });
+
+  it("restores the session's claimed festival on session_start — status line follows it", async () => {
+    const root = await makeCamp();
+    for (const id of ["fest-a", "fest-b"]) {
+      const dir = join(root, "festivals", "active", id);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "fest.yaml"), `id: ${id}\n`);
+    }
+    const { pi, handlers, ctx, statuses } = mockPi(root);
+    ompFest(pi as never);
+    const sessionCtx = {
+      ...ctx,
+      sessionManager: {
+        getSessionId: () => "sess-1",
+        getBranch: () => [
+          {
+            type: "custom",
+            customType: "com.github.mohammadraufzahed.omp-fest.festival",
+            data: { festivalId: "fest-b", festivalDir: "/stale/path/fest-b" },
+          },
+        ],
+      },
+    };
+    const start = handlers.get("session_start") as (e: unknown, c: unknown) => Promise<void>;
+    await start({}, sessionCtx);
+    // fest-b was claimed even though fest-a wins the camp-wide alphabetical pick.
+    expect(statuses["omp-fest"]).toContain("fest-b");
+  });
 });
 
 it("registers no session_compact handler — the per-turn digest covers it", async () => {

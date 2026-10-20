@@ -7,6 +7,7 @@ import { basename } from "node:path";
 
 import { summarizeProgress } from "../domain/progress.js";
 import type { CampDetect } from "../ports.js";
+import { claimedFestivalDir } from "./fest-resolve.js";
 import type { LoopTracker } from "./loop-tracker.js";
 
 export interface DigestDeps {
@@ -26,10 +27,9 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
   // Resolution: cwd inside a festival > the festival this session claimed via
   // fest_* tools > the camp-wide active pick. Without the middle step two
   // agents on different festivals both see whichever festival sorts first.
-  const claimed = deps.tracker.festivalFor(sessionId);
   const festivalDir =
     location.festivalDir ??
-    (claimed?.startsWith(`${location.campRoot}/`) ? claimed : undefined) ??
+    (await claimedFestivalDir(deps.tracker, deps.detect, sessionId, location.campRoot)) ??
     (await deps.detect.activeFestival(location.campRoot));
   if (!festivalDir) {
     const festivals = await deps.detect.listFestivals(location.campRoot);

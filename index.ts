@@ -18,6 +18,8 @@ import { CachedDetect } from "./src/application/detect-cache.js";
 import { watchCampTransitions } from "./src/application/camp-watcher.js";
 import { LoopTracker } from "./src/application/loop-tracker.js";
 import { orientSession } from "./src/application/orient.js";
+import { restoreClaimFromBranch } from "./src/application/session-claim.js";
+import { claimedFestivalDir } from "./src/application/fest-resolve.js";
 import { buildStateDigest } from "./src/application/state-digest.js";
 import { sessionIdOf } from "./src/application/session-id.js";
 import { CampCliAdapter } from "./src/adapters/cli/camp-cli.js";
@@ -32,7 +34,7 @@ import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 
 interface ExtensionContextLike {
   cwd: string;
-  sessionManager?: { getSessionId?(): string };
+  sessionManager?: { getSessionId?(): string; getBranch?(): unknown[] };
   ui: {
     notify(message: string, type?: "info" | "warning" | "error"): void;
     setStatus(key: string, text: string | undefined): void;
@@ -75,6 +77,8 @@ interface SubagentSpawnResult {
 
 interface FestEventMap {
   session_start: unknown;
+  session_branch: unknown;
+  session_tree: unknown;
   before_agent_start: unknown;
   tool_call: ToolCallEvent;
   tool_result: ToolResultEventShape;
@@ -99,6 +103,8 @@ interface ExtensionApiLike {
   registerCommand(name: string, options: Record<string, unknown>): void;
   sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>): void;
   setLabel(label: string): void;
+  /** Persists a custom entry into the session transcript (durable per-session state). */
+  appendEntry?(customType: string, data: unknown): void;
 }
 
 const WRITE_TOOLS = new Set(["edit", "write", "multi_edit", "notebook_edit", "apply_patch"]);
@@ -146,14 +152,30 @@ export default function ompFest(pi: ExtensionApiLike): void {
     );
   };
 
+  // Restore this session's claimed festival from its transcript — persisted
+  // claims survive resume/branch/tree. Runs before orientation so the status
+  // line and progress watcher land on the claimed festival, not whichever
+  // active festival the camp-wide pick returns first.
+  const restoreClaim = async (ctx: ExtensionContextLike): Promise<string | undefined> => {
+    const branch = ctx.sessionManager?.getBranch?.();
+    const sid = sessionIdOf(ctx);
+    if (branch && branch.length > 0) {
+      restoreClaimFromBranch(tracker, sid, branch);
+    }
+    const location = await detect.locate(ctx.cwd);
+    return location.campRoot
+      ? claimedFestivalDir(tracker, detect, sid, location.campRoot)
+      : undefined;
+  };
   pi.on("session_start", async (_event, ctx) => {
     const config = await configFor();
     const notifier = new OmpNotifier(ctx.ui);
+    const claimedDir = await restoreClaim(ctx);
     if (!(await fest.available())) {
       notifier.warn("fest CLI not found — npm i -g @obedience-corp/festival");
       return;
     }
-    const orientation = await orientSession(ctx.cwd, detect);
+    const orientation = await orientSession(ctx.cwd, detect, claimedDir);
     if (orientation.statusLine && config.statusLine) {
       ctx.ui.setStatus("omp-fest", orientation.statusLine);
     }
@@ -193,6 +215,17 @@ export default function ompFest(pi: ExtensionApiLike): void {
         );
       });
     }
+  });
+
+  // Branch/tree rebuild a session's branch — the persisted claim must be
+  // re-restored so the new leaf's picks stay on the claimed festival.
+  pi.on("session_branch", async (_event, ctx) => {
+    await restoreClaim(ctx);
+    return undefined;
+  });
+  pi.on("session_tree", async (_event, ctx) => {
+    await restoreClaim(ctx);
+    return undefined;
   });
 
   // Live state + rules injected into EVERY turn — survives compaction and
@@ -273,10 +306,10 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return undefined;
     }
     const location = await detect.locate(ctx.cwd);
-    const claimed = tracker.festivalFor(sessionIdOf(ctx));
+    const sid = sessionIdOf(ctx);
     const festivalDir =
       location.festivalDir ??
-      (location.campRoot && claimed?.startsWith(`${location.campRoot}/`) ? claimed : undefined) ??
+      (location.campRoot ? await claimedFestivalDir(tracker, detect, sid, location.campRoot) : undefined) ??
       (location.campRoot ? await detect.activeFestival(location.campRoot) : undefined);
     if (!festivalDir) {
       return undefined;
@@ -294,7 +327,6 @@ export default function ompFest(pi: ExtensionApiLike): void {
     if (pending.length === 0) {
       return undefined;
     }
-    const sid = sessionIdOf(ctx);
     const fresh = targets.filter((p) => tracker.markWarned(sid, p));
     if (fresh.length === 0) {
       return undefined;
