@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveWorkingDir, stampWorkingDir } from "../src/application/sequence-goals.js";
+import { seedFestivalRules } from "../src/application/festival-rules.js";
 import type { CampCli } from "../src/ports.js";
 
 const NO_PROJECTS = {
@@ -98,5 +99,41 @@ describe("resolveWorkingDir", () => {
     } as unknown as CampCli;
     const r = await resolveWorkingDir(root, camp);
     expect(r.dir).toBe("projects/lib");
+  });
+});
+
+describe("seedFestivalRules", () => {
+  it("seeds the camp template and appends the human's constraints verbatim", async () => {
+    const camp = await mkdtemp(join(tmpdir(), "rules-camp-"));
+    const templateDir = join(camp, "festivals", ".festival", "templates", "festival");
+    await mkdir(templateDir, { recursive: true });
+    await writeFile(join(templateDir, "RULES.md"), "# Festival Rules\n\n## Engineering Excellence\n");
+    const fest = await mkdtemp(join(tmpdir(), "rules-fest-"));
+
+    const r = await seedFestivalRules(camp, fest, "- no new deps\n- tests mandatory");
+    expect(r).toEqual({ file: "FESTIVAL_RULES.md", seeded: true, constraints: true });
+    const text = await readFile(join(fest, "FESTIVAL_RULES.md"), "utf8");
+    expect(text).toContain("## Engineering Excellence");
+    expect(text).toContain("## Constraints & Rules (agreed during planning)");
+    expect(text).toContain("- no new deps\n- tests mandatory");
+  });
+
+  it("uses the fallback skeleton when the camp has no template", async () => {
+    const camp = await mkdtemp(join(tmpdir(), "rules-camp-"));
+    const fest = await mkdtemp(join(tmpdir(), "rules-fest-"));
+    const r = await seedFestivalRules(camp, fest);
+    expect(r.seeded).toBe(true);
+    expect(r.constraints).toBe(false);
+    expect(await readFile(join(fest, "FESTIVAL_RULES.md"), "utf8")).toContain("# Festival Rules");
+  });
+
+  it("is idempotent — never duplicates the constraints section", async () => {
+    const camp = await mkdtemp(join(tmpdir(), "rules-camp-"));
+    const fest = await mkdtemp(join(tmpdir(), "rules-fest-"));
+    await seedFestivalRules(camp, fest, "- rule one");
+    const again = await seedFestivalRules(camp, fest, "- rule one");
+    const text = await readFile(join(fest, "FESTIVAL_RULES.md"), "utf8");
+    expect(text.match(/Constraints & Rules/g)).toHaveLength(1);
+    expect(again.seeded).toBe(false);
   });
 });

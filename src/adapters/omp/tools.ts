@@ -15,6 +15,7 @@ import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { resolveWorkingDir, stampWorkingDir } from "../../application/sequence-goals.js";
+import { seedFestivalRules } from "../../application/festival-rules.js";
 import type { NextUnit } from "../../domain/types.js";
 import type { ZodLike } from "./zod-types.js";
 
@@ -337,16 +338,18 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description:
       "Generate a festival from a STRUCTURE.md plan doc the model wrote after interviewing the human. " +
       "Runs `fest scaffold from-plan --dest planning`, stamps fest_working_dir into every sequence " +
-      "(the scaffold omits it and fest_next refuses without it), and applies quality gates. Pass " +
-      "workingDir (camp-relative project path) — ask the human during the interview when the camp " +
-      "has multiple projects. Fails loudly when the plan doc scaffolded zero sequences.",
+      "(the scaffold omits it and fest_next refuses without it), seeds FESTIVAL_RULES.md from the " +
+      "camp template plus any constraints the human stated (pass rules:), and applies quality gates. " +
+      "Pass workingDir (camp-relative project path) — ask the human during the interview when the " +
+      "camp has multiple projects. Fails loudly when the plan doc scaffolded zero sequences.",
     parameters: z.object({
       name: z.string().describe("Festival name/slug, e.g. 'prenatal-form-groups'"),
       plan: z.string().describe("Absolute path to the STRUCTURE.md plan document"),
       workingDir: z.string().optional().describe("Camp-relative project dir the festival targets, e.g. 'projects/api' — required when the camp has multiple projects"),
+      rules: z.string().optional().describe("Constraints/rules the human agreed to during planning, as bullet lines — written verbatim into FESTIVAL_RULES.md so fest rules shows them"),
       dryRun: z.boolean().optional().describe("Preview without creating files"),
     }),
-    async execute(_id: string, params: { name: string; plan: string; workingDir?: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { name: string; plan: string; workingDir?: string; rules?: string; dryRun?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -396,11 +399,15 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         params.workingDir,
       );
       let stamped = 0;
+      let rulesSeed: { file: string; seeded: boolean; constraints: boolean } | undefined;
       let gates: { created: number; output: string } | undefined;
       if (festivalDir && params.dryRun !== true) {
         if (workingDir) {
           stamped = await stampWorkingDir(festivalDir, workingDir);
         }
+        // FESTIVAL_RULES.md: `fest rules` reads it, validate recommends it,
+        // and scaffold never writes it — the human's constraints live here.
+        rulesSeed = await seedFestivalRules(root, festivalDir, params.rules);
         gates = await deps.fest
           .gatesApply(root, festivalDir)
           .catch((err: unknown) => ({ created: 0, output: `gates apply failed: ${String(err)}` }));
@@ -412,6 +419,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         dryRun: params.dryRun === true,
         output,
         ...(festivalDir ? { festivalDir } : {}),
+        ...(rulesSeed ? { rules: rulesSeed } : {}),
         ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
         ...(gates ? { qualityGates: gates } : {}),
         ...(skipped.length > 0
