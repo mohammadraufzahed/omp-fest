@@ -57,7 +57,7 @@ export const RECOVERY_PLAYBOOK = [
   "- NEVER track festival work with ad hoc todo lists — the festival plan IS the task list; fest_next is the only source of what to do next",
   "- kind 'idle': at camp root with no festival — call camp_status to list festivals; for NEW work, start the plan workflow instead of writing your own todo list",
   "- kind 'blocked': fix the listed files/markers, then call fest_next again",
-  "- kind 'gate_step': present evidence and STOP — do not approve; wait for the human",
+  "- kind 'gate_step': gather evidence and call fest_gate_submit — it asks the human directly; never approve",
   "- kind 'task': work in the returned working_dir, then fest_task_complete + fest_commit",
   "- never run bare `git commit` in a linked project — use fest_commit",
 ].join("\n");

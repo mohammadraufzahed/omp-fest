@@ -15,8 +15,9 @@ import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { resolveWorkingDir, stampWorkingDir } from "../../application/sequence-goals.js";
-import { seedFestivalRules } from "../../application/festival-rules.js";
-import type { NextUnit } from "../../domain/types.js";
+import { festivalConstraints, seedFestivalRules, stampGateRules } from "../../application/festival-rules.js";
+import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
+import { showCard, type OverlayUiLike } from "./overlay.js";
 import type { ZodLike } from "./zod-types.js";
 
 export interface ToolDeps {
@@ -24,6 +25,8 @@ export interface ToolDeps {
   camp: CampCli;
   detect: CampDetect;
   tracker: LoopTracker;
+  /** Per-project .ompfest.json — gate behavior honors pauseAtGates/evidenceRequiredOnGates. */
+  config?: () => Promise<OmpFestConfig>;
 }
 
 export interface PiLike {
@@ -36,6 +39,12 @@ export interface PiLike {
 interface ToolContextLike {
   cwd: string;
   sessionManager?: { getSessionId?(): string };
+  ui?: OverlayUiLike & {
+    notify?(message: string, type?: string): void;
+    select?(title: string, options: (string | { label: string; description?: string })[], opts?: Record<string, unknown>): Promise<string | undefined>;
+    confirm?(title: string, message: string, opts?: Record<string, unknown>): Promise<boolean>;
+    input?(title: string, placeholder?: string, opts?: Record<string, unknown>): Promise<string | undefined>;
+  };
 }
 
 interface ToolResult {
@@ -313,22 +322,80 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_gate_submit",
     label: "Submit Fest Gate",
     description:
-      "Present a gate/checkpoint for human review with evidence. Returns awaiting_human — you must STOP and wait for the operator. There is no self-approval path.",
+      "Submit a gate/checkpoint for human review. In the TUI it OPENS AN APPROVAL DIALOG — the " +
+      "human sees your evidence plus the festival's recorded constraints and picks approve/reject " +
+      "inside the same call; a reject prompts for the reason and runs the real attestation. " +
+      "Headless hosts (or pauseAtGates=false) get status:awaiting_human instead — STOP and wait " +
+      "for /fest approve|reject. The model can never approve itself.",
     parameters: z.object({
-      evidence: z.string().describe("Validate score, tasks done, test results, files changed"),
+      evidence: z.string().describe("Validate score, tasks done, test results, files changed — cite a check per recorded constraint"),
       festival: z.string().optional().describe("Festival name/id override"),
     }),
-    async execute(_id: string, params: { evidence: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { evidence: string; festival?: string }, signal: { aborted?: boolean } | undefined, _u: unknown, ctx: ToolContextLike) {
+      const config = deps.config ? await deps.config() : DEFAULT_CONFIG;
+      if (config.evidenceRequiredOnGates && params.evidence.trim().length === 0) {
+        return textResult({
+          kind: "gate_evidence_required",
+          hint: "This camp requires evidence on gates (evidenceRequiredOnGates). Re-call with evidence: validate score, tasks done, tests run, files changed — one line per recorded constraint.",
+        });
+      }
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
       }
-      await deps.fest.workflowAdvance(r.dir);
-      return textResult({
-        status: "awaiting_human",
-        evidence: params.evidence,
-        instruction: "Present this evidence to the user and wait. Do not approve the checkpoint yourself.",
+      const dir = r.dir;
+      const constraints = await festivalConstraints(dir);
+      const ui = ctx.ui;
+      if (!config.pauseAtGates || ui === undefined || typeof ui.confirm !== "function") {
+        await deps.fest.workflowAdvance(dir);
+        return textResult({
+          status: "awaiting_human",
+          evidence: params.evidence,
+          ...(constraints ? { rulesEvidence: constraints } : {}),
+          instruction: "Present this evidence to the user and wait. Do not approve the checkpoint yourself.",
+        });
+      }
+
+      // Mark the checkpoint pending before asking — `fest workflow approve`
+      // attests a submitted gate, and pending is what the digest/watch reads.
+      await deps.fest.workflowAdvance(dir);
+      // Evidence first: floating card when the host supports overlays, else
+      // fold it into the confirm prompt itself.
+      const lines = [
+        `Festival: ${basename(dir)}`,
+        "",
+        "Evidence:",
+        ...params.evidence.split("\n"),
+        ...(constraints ? ["", "Constraints agreed at plan time (a violated rule fails the gate):", ...constraints.split("\n")] : []),
+      ];
+      const floated = await showCard(ui, {
+        title: "⛔ Gate review",
+        lines,
+        footer: "esc/q to close — then answer approve or reject",
       });
+      const approved = await ui.confirm(
+        "⛔ Gate review",
+        floated
+          ? `Approve this gate for ${basename(dir)}?`
+          : `${lines.join("\n")}\n\nApprove this gate?`,
+      );
+      if (signal?.aborted === true) {
+        return textResult({ status: "cancelled", hint: "Gate dialog aborted — the gate stays pending." });
+      }
+      if (approved) {
+        const output = await deps.fest.workflowApprove(dir);
+        return textResult({ status: "approved", output });
+      }
+      const reason =
+        typeof ui.input === "function"
+          ? (await ui.input("Reject gate", "Why is this gate rejected?")) ?? "no reason given"
+          : "no reason given";
+      const abortedNow = Boolean(signal?.aborted);
+      if (abortedNow) {
+        return textResult({ status: "cancelled", hint: "Gate dialog aborted — the gate stays pending." });
+      }
+      const output = await deps.fest.workflowReject(dir, reason.trim() || "no reason given");
+      return textResult({ status: "rejected", reason, output });
     },
   });
 
@@ -401,6 +468,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       let stamped = 0;
       let rulesSeed: { file: string; seeded: boolean; constraints: boolean } | undefined;
       let gates: { created: number; output: string } | undefined;
+      let gateRules = 0;
       if (festivalDir && params.dryRun !== true) {
         if (workingDir) {
           stamped = await stampWorkingDir(festivalDir, workingDir);
@@ -411,6 +479,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         gates = await deps.fest
           .gatesApply(root, festivalDir)
           .catch((err: unknown) => ({ created: 0, output: `gates apply failed: ${String(err)}` }));
+        // Stamp the human's constraints into every generated gate task so the
+        // checklists enforce plan-time rules, not just template boilerplate.
+        if (rulesSeed.constraints) {
+          gateRules = await stampGateRules(festivalDir);
+        }
       }
       const skipped = gates?.output.match(/Skipping sequence "[^"]+"/g) ?? [];
       const needsWorkingDir = festivalDir !== undefined && !workingDir;
@@ -419,7 +492,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         dryRun: params.dryRun === true,
         output,
         ...(festivalDir ? { festivalDir } : {}),
-        ...(rulesSeed ? { rules: rulesSeed } : {}),
+        ...(rulesSeed ? { rules: { ...rulesSeed, gateFilesStamped: gateRules } } : {}),
         ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
         ...(gates ? { qualityGates: gates } : {}),
         ...(skipped.length > 0

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveWorkingDir, stampWorkingDir } from "../src/application/sequence-goals.js";
-import { seedFestivalRules } from "../src/application/festival-rules.js";
+import { festivalConstraints, seedFestivalRules, stampGateRules } from "../src/application/festival-rules.js";
 import type { CampCli } from "../src/ports.js";
 
 const NO_PROJECTS = {
@@ -135,5 +135,70 @@ describe("seedFestivalRules", () => {
     const text = await readFile(join(fest, "FESTIVAL_RULES.md"), "utf8");
     expect(text.match(/Constraints & Rules/g)).toHaveLength(1);
     expect(again.seeded).toBe(false);
+  });
+});
+
+describe("stampGateRules", () => {
+  const GATE_DOC = [
+    "---",
+    "fest_type: gate",
+    "fest_gate_id: testing",
+    "fest_status: pending",
+    "---",
+    "",
+    "# Gate: Testing and Verification",
+    "",
+    "- [ ] All unit tests pass",
+  ].join("\n");
+
+  it("stamps constraints into every gate task, skipping plain tasks", async () => {
+    const camp = await mkdtemp(join(tmpdir(), "gr-camp-"));
+    const fest = await mkdtemp(join(tmpdir(), "gr-fest-"));
+    const seq = join(fest, "001_BUILD", "01_core");
+    await mkdir(seq, { recursive: true });
+    await writeFile(join(seq, "03_testing.md"), GATE_DOC);
+    await writeFile(join(seq, "04_review.md"), GATE_DOC.replace("testing", "review"));
+    await writeFile(join(seq, "01_impl.md"), "---\nfest_type: task\n---\n\n# Task\n");
+    await seedFestivalRules(camp, fest, "- no new deps\n- tests mandatory");
+
+    expect(await stampGateRules(fest)).toBe(2);
+    const gate = await readFile(join(seq, "03_testing.md"), "utf8");
+    expect(gate).toContain("## Constraints & Rules (agreed during planning)");
+    expect(gate).toContain("- no new deps");
+    expect(gate).toContain("a violated constraint fails this gate");
+    const task = await readFile(join(seq, "01_impl.md"), "utf8");
+    expect(task).not.toContain("Constraints & Rules");
+  });
+
+  it("is idempotent and returns 0 without recorded constraints", async () => {
+    const camp = await mkdtemp(join(tmpdir(), "gr-camp-"));
+    const fest = await mkdtemp(join(tmpdir(), "gr-fest-"));
+    const seq = join(fest, "001_BUILD", "01_core");
+    await mkdir(seq, { recursive: true });
+    await writeFile(join(seq, "03_testing.md"), GATE_DOC);
+    // no rules file at all → nothing to enforce
+    expect(await stampGateRules(fest)).toBe(0);
+    await seedFestivalRules(camp, fest, "- rule");
+    await stampGateRules(fest);
+    expect(await stampGateRules(fest)).toBe(0);
+  });
+});
+
+describe("festivalConstraints", () => {
+  it("returns only the recorded constraints section, not template boilerplate", async () => {
+    const camp = await mkdtemp(join(tmpdir(), "gr-camp-"));
+    const templateDir = join(camp, "festivals", ".festival", "templates", "festival");
+    await mkdir(templateDir, { recursive: true });
+    await writeFile(join(templateDir, "RULES.md"), "# Festival Rules\n\n## Boilerplate Section\n\n- generic\n");
+    const fest = await mkdtemp(join(tmpdir(), "gr-fest-"));
+    await seedFestivalRules(camp, fest, "- human rule");
+    const c = await festivalConstraints(fest);
+    expect(c).toContain("- human rule");
+    expect(c).not.toContain("Boilerplate");
+  });
+
+  it("returns undefined when the festival has no constraints", async () => {
+    const fest = await mkdtemp(join(tmpdir(), "gr-fest-"));
+    expect(await festivalConstraints(fest)).toBeUndefined();
   });
 });

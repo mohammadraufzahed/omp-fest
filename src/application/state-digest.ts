@@ -52,7 +52,7 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
   ];
   if (progress.gatePending) {
     lines.push(
-      "GATE PENDING — gather the evidence it asks for and STOP for human approval; never approve or skip it yourself.",
+      "GATE PENDING — gather the evidence it asks for and call fest_gate_submit; it asks the human directly (approve/reject dialog). Never approve or skip it yourself.",
     );
   }
   lines.push(RULES);

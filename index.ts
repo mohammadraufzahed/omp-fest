@@ -139,7 +139,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const tracker = new LoopTracker();
 
   const cwd = process.cwd();
-  const deps = { fest, camp, detect, tracker };
+  const deps = { fest, camp, detect, tracker, config: () => loadConfig(cwd) };
 
   registerTools(pi as unknown as PiLike, deps);
   registerCommands(pi, deps);
