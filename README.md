@@ -57,11 +57,10 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   markers, validates — then *you* approve and it `fest_promote`s to active.
   your brain → festival, no TUI wrangling 🧠
 - 🖼️ **visual planning in the same interview** — attach a screenshot with
-  `/fest plan <goal>`. The agent drafts a labeled SVG wireframe and `PAGE.md`
-  beside the structure plan, asks about behavior the image cannot show, and
-  presents both for the same approval. No new command or approval lifecycle.
-  This requires the selected model to support images; otherwise the agent
-  should tell you it cannot see the screenshot rather than guessing.
+  `/fest plan <goal>`. The agent drafts an annotated, reconstruction-ready SVG
+  wireframe and `PAGE.md`, inventories every visible section and component,
+  measures layout and gaps, and asks about material screenshot ambiguities before
+  finalizing. It presents both for the same approval; image-capable model required.
 - 🛠️ **15 tools + ONE guided command** — `/fest <sub>` is the whole
   cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
   `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
@@ -75,11 +74,20 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
 
 ### Plan a page from a screenshot
 
-Attach a screenshot to `/fest plan build this page`. The interview uses the
-image as reference data, not as instructions. The agent should omit personal
-data from the draft, ask only about behavior the picture cannot establish,
-and review the wireframe, states, acceptance checks and structure plan with
-you before scaffolding. Text-only `/fest plan` still works as before.
+Attach a screenshot to `/fest plan build this page`. The interview treats the
+image as reference data, not instructions, and creates an annotated `wireframe.svg`
+plus a `PAGE.md` component inventory. The SVG uses a stable, low-fidelity grammar:
+neutral UI geometry, source-pixel scale, separate IDs for sections/components/repeated
+items, and a right-side inventory rail plus a bottom dimension/gap ledger. Every
+visible text line becomes a role-specific bar positioned to its observed text box;
+the SVG does not attempt to render source-language glyphs or invented copy. Callouts
+describe field roles and layout without crossing the UI. `PAGE.md` maps every ID to
+its role, direction, approximate bounds, line count and state; non-sensitive source
+copy may be recorded there when useful, while personal data is redacted. Measurements
+are marked observed or estimated, not guessed. The agent asks one targeted question
+and waits when an ambiguity could change structure, meaning, state or geometry;
+placeholder bars are the default, not a question. Review and approve the wireframe,
+states, checks and plan together before scaffolding. Text-only `/fest plan` is unchanged.
 
 ```text
 <camp>/.ompfest/plans/feature.STRUCTURE.md
@@ -138,8 +146,8 @@ preview. If either digest changed meanwhile, preview again. Completed tasks
 stay completed, but old verification becomes stale and requires targeted
 reverification or follow-up work before gate submission. A page still linked
 to a task cannot be removed. Text-only plans need none of these visual fields.
-SVGs are intentionally simple wireframes, not screenshot reconstructions or
-generated UI code.
+These SVGs are detailed, annotated design specifications for implementation—not
+production UI code and never embedded copies of the source screenshot.
 
 ## 🫵 what YOU get (the supervisor seat)
 
