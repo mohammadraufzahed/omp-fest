@@ -185,6 +185,7 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
     if (!ID.test(variant) || ids.has(variant)) throw new Error(`invalid or duplicate state specimen id: ${variant}`);
     ids.add(variant);
   }
+  const missingAuditPaths: string[] = [];
   const audited = new Set<string>();
   for (const entry of spec.componentAudit) {
     if (!entry.component.trim() || entry.component.length > MAX_TEXT || audited.has(entry.component)) {
@@ -202,8 +203,12 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
         throw new Error(`component audit path escapes the project: ${sourcePath}`);
       }
       const info = await lstat(resolved).catch(() => undefined);
-      if (!info || info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) {
-        throw new Error(`component audit path must exist as a regular file or directory: ${sourcePath}`);
+      if (!info) {
+        missingAuditPaths.push(`${entry.component}: ${sourcePath}`);
+        continue;
+      }
+      if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) {
+        throw new Error(`component audit path must be a regular file or directory: ${sourcePath}`);
       }
       const actual = await realpath(resolved);
       const actualRelative = relative(resolve(workingDirectory), actual);
@@ -211,6 +216,11 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
         throw new Error(`component audit path resolves outside the project: ${sourcePath}`);
       }
     }
+  }
+  if (missingAuditPaths.length) {
+    throw new Error(
+      `component audit paths do not exist in this project: ${missingAuditPaths.join("; ")}. Inspect the actual project tree and use only paths that exist; for no match, cite existing files/directories you inspected and set status to "no_match". Do not guess component paths.`,
+    );
   }
   for (const component of spec.components) if (component.parent && !ids.has(component.parent)) throw new Error(`missing parent ${component.parent} for ${component.id}`);
   for (const state of spec.states) {

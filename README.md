@@ -95,6 +95,10 @@ validates IDs, bounds, colors, measurement references and project paths, redacts
 copy and sensitive values, and leaves unseen states explicitly unknown. Repeated
 calls with the same structured input produce the same files.
 
+Reuse audits may cite only existing relative paths confirmed in the target project. For
+no match, cite existing files/directories actually inspected and mark `no_match`; never
+provide a guessed candidate path as evidence.
+
 SVG.js and svgdom are runtime dependencies for this headless renderer. The tool does
 not perform image recognition itself: the calling model extracts the screenshot and
 inspects the target project, then passes those findings through the stable schema.

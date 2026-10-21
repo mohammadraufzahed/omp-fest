@@ -115,5 +115,20 @@ describe("fest_wireframe_create", () => {
     }, undefined, undefined, { cwd: root })).content[0]!.text) as { kind: string; error: string };
     expect(escaped.kind).toBe("wireframe_failed");
     expect(escaped.error).toContain("outputDirectory");
+    const missingAudit = JSON.parse((await call("test", {
+      outputDirectory: ".wireframe",
+      spec: {
+        title: "Audit path", slug: "audit-path", direction: "ltr",
+        source: { width: 100, height: 100, displayWidth: 100, displayHeight: 100 },
+        components: [{ id: "inside", role: "in-bounds", kind: "surface", x: 0, y: 0, width: 20, height: 20 }],
+        componentAudit: [{ component: "dialog", status: "no_match", sourcePaths: ["src/missing-dialog.tsx", "src/missing-button.tsx"], notes: "No matching component found." }],
+        measurements: [], states: [], openQuestions: [],
+      },
+    }, undefined, undefined, { cwd: root })).content[0]!.text) as { kind: string; error: string };
+    expect(missingAudit.kind).toBe("wireframe_failed");
+    expect(missingAudit.error).toContain("paths do not exist in this project");
+    expect(missingAudit.error).toContain("src/missing-button.tsx");
+    expect(missingAudit.error).toContain("no_match");
+    expect(missingAudit.error).toContain("Do not guess component paths.");
   });
 });

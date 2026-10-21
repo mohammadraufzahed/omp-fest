@@ -665,7 +665,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "Inspect reusable project UI and styles first; include source paths and matched/no-match evidence, all node bounds and repeated instances, confidence-tagged styles, states, measurements, and unresolved questions. " +
       "The overview stays compact while PAGE.md contains the full categorized hierarchy and implementation evidence; source copy and sensitive values are not reproduced.",
     parameters: z.object({
-      outputDirectory: z.string().describe("Output directory relative to the current project, e.g. .ompfest/plans/page.references/pages/results"),
+      outputDirectory: z.string().describe("Path inside the current project working directory; do not use ../ traversal, e.g. .ompfest/plans/page.references/pages/results"),
       spec: z.object({
         title: z.string().describe("Short page or screen title"),
         slug: z.string().describe("Lowercase kebab-case page slug"),
@@ -701,9 +701,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         componentAudit: z.array(z.object({
           component: z.string().describe("Semantic component name/role inspected in the target project"),
           status: z.enum(["matched", "no_match"]),
-          sourcePaths: z.array(z.string()).describe("Existing relative project paths inspected; matched entries cite implementation files"),
-          notes: z.string().describe("What was found or what project paths/patterns were checked"),
-        })).describe("Project component discovery results; paths must exist inside the current project"),
+          sourcePaths: z.array(z.string()).describe("Existing relative project paths actually inspected; matched entries cite implementation sources, no_match entries cite only existing files/directories searched"),
+          notes: z.string().describe("What was found or what existing project paths were checked"),
+        })).describe("Project component discovery results; never invent candidate paths. Missing paths fail with instructions to search the project and retry using existing inspected paths"),
         measurements: z.array(z.object({
           label: z.string().describe("Measured gap or dimension name"),
           from: z.string().describe("First stable component ID"),
