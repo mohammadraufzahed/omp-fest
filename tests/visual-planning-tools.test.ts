@@ -103,7 +103,7 @@ async function setup() {
     await handler?.(args, { cwd: root, ui: { notify: vi.fn() } });
     return sent.at(-1) ?? "";
   }
-  return { root, referencesDir, festival, plan, spec, taskPath, scaffoldFromPlan, promote, taskComplete, workflowAdvance, workflowApprove, call, command, scaffold };
+  return { root, referencesDir, festival, plan, spec, taskPath, scaffoldFromPlan, promote, taskComplete, workflowAdvance, workflowApprove, call, command, scaffold, fest };
 }
 
 describe("visual planning tool handoff", () => {
@@ -193,6 +193,21 @@ describe("visual planning tool handoff", () => {
     expect((await call("fest_gate_submit", { evidence: "done" })).kind).toBe("gate_blocked");
     expect(await command("promote")).toContain("Promotion blocked");
     expect(promote).not.toHaveBeenCalled();
+  });
+
+  it("completes a task using the exact absolute path returned by fest_next", async () => {
+    const { referencesDir, festival, plan, taskPath, taskComplete, call, scaffold, fest } = await setup();
+    await scaffold({ name: "feature", plan, referencesDir });
+    fest.next = () => Promise.resolve({ kind: "task", path: join(festival, taskPath), doc: TASK, goals: [] });
+    const next = await call("fest_next");
+    expect(next.path).toBe(join(festival, taskPath));
+    const result = await call("fest_task_complete", {
+      task: next.path,
+      evidence: "Reviewed task acceptance and verified automated checks.",
+      visualEvidence: [{ page: "results", check: "AC-01", status: "untested", proof: "Browser validation not yet performed." }],
+    });
+    expect(result.status).toBe("completed");
+    expect(taskComplete).toHaveBeenCalledWith(festival, taskPath, "Reviewed task acceptance and verified automated checks.");
   });
 
   it("requires honest task evidence and blocks the gate for missing, failed or stale checks", async () => {

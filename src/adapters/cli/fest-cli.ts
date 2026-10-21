@@ -1,13 +1,14 @@
 /**
- * FestCli adapter — every call resolves the festival dir, prefers --json,
- * and always passes --yes on mutations (fest v0.9.7 refuses headless
- * confirmations otherwise). Output is returned parsed or verbatim per port.
+ * FestCli adapter — calls fest in the resolved directory and enables
+ * headless confirmation only for task actions that support it.
  */
 import { cp, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { classifyNextOutput } from "../../domain/next-unit.js";
 import type { FestivalSummary, NextUnit } from "../../domain/types.js";
 import type { ExecRunner, FestCli } from "../../ports.js";
+
+const CONFIRMING_TASK_ACTIONS = new Set(["completed", "blocked", "defer", "reset"]);
 
 function str(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -211,8 +212,9 @@ export class FestCliAdapter implements FestCli {
   }
 
   async raw(cwd: string, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
-    const TASK_MUTATIONS = new Set(["completed", "blocked", "defer", "unblock", "reset", "update", "progress"]);
-    if (args[0] === "task" && args[1] && TASK_MUTATIONS.has(args[1]) && !args.includes("--yes")) {
+    const action = args[0] === "task" ? args[1] : undefined;
+    const isReadOnlyBlockerList = action === "blocked" && args.includes("--list");
+    if (action && CONFIRMING_TASK_ACTIONS.has(action) && !isReadOnlyBlockerList && !args.includes("--yes")) {
       args = [...args, "--yes"];
     }
     return await this.exec.run("fest", args, cwd);

@@ -7,7 +7,7 @@
  * runtime hands us (kept loose-typed here so the module compiles without the
  * coding-agent package installed).
  */
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
@@ -190,6 +190,16 @@ async function idleResult(deps: ToolDeps, ctx: ToolContextLike) {
   });
 }
 
+function festivalRelativeTaskPath(festivalDir: string, taskPath: string): string | undefined {
+  const root = resolve(festivalDir);
+  const target = resolve(root, taskPath);
+  const normalized = relative(root, target);
+  if (!normalized || normalized === ".." || normalized.startsWith(`..${sep}`) || isAbsolute(normalized)) {
+    return undefined;
+  }
+  return normalized.split(sep).join("/");
+}
+
 export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const z = pi.zod;
 
@@ -255,31 +265,41 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return textResult({ kind: "completion_blocked", issues: visual.issues });
       }
       const current = !params.task && !opened && visual.pages.length ? await deps.fest.next(dir) : undefined;
-      const taskPath = params.task ?? opened ?? (current?.kind === "task" ? current.path : undefined);
-      const task = taskPath ? (await deps.detect.pendingTasks(dir)).find((item) => item.path === taskPath) : undefined;
-      if (visual.pages.length && !task) {
-        return textResult({ kind: "completion_blocked", hint: "Use the exact festival-relative task path returned by fest_next so its visual checks can be verified." });
+      const requestedTaskPath = params.task ?? opened ?? (current?.kind === "task" ? current.path : undefined);
+      const taskPath = requestedTaskPath ? festivalRelativeTaskPath(dir, requestedTaskPath) : undefined;
+      if (requestedTaskPath && !taskPath) {
+        return textResult({ kind: "completion_blocked", task: requestedTaskPath, hint: "Task path must resolve inside the selected festival." });
       }
-      if (task) {
-        const doc = await readFile(join(dir, task.path), "utf8");
-        const checks = taskChecks(doc);
+      const task = taskPath
+        ? (await deps.detect.pendingTasks(dir)).find((item) => festivalRelativeTaskPath(dir, item.path) === taskPath)
+        : undefined;
+      const completionPath = task?.path ?? taskPath;
+      let taskDoc: string | undefined;
+      if (completionPath) {
+        taskDoc = await readFile(join(dir, completionPath), "utf8").catch(() => undefined);
+      }
+      if (visual.pages.length && !taskDoc) {
+        return textResult({ kind: "completion_blocked", hint: "Use a valid task path returned by fest_next so its visual checks can be verified." });
+      }
+      if (taskDoc && completionPath) {
+        const checks = taskChecks(taskDoc);
         if (checks.length > 0) {
           try {
             const proposed = params.visualEvidence ?? [];
             if (proposed.some((entry) => entry.status === "failed")) {
               return textResult({ kind: "completion_blocked", hint: "Fix failed visual checks before marking the task completed." });
             }
-            await recordVisualEvidence(dir, task.path, doc, proposed);
+            await recordVisualEvidence(dir, completionPath, taskDoc, proposed);
           } catch (error) {
             return textResult({ kind: "completion_blocked", error: String(error), hint: "Provide evidence for each task acceptance check, or mark it untested for human review." });
           }
         }
       }
-      const completion = await deps.fest.taskComplete(dir, task?.path ?? params.task ?? "", params.evidence);
+      const completion = await deps.fest.taskComplete(dir, task?.path ?? taskPath ?? "", params.evidence);
       if (!completion.ok) {
         return textResult({
           status: "completion_blocked",
-          task: params.task,
+          task: task?.path ?? taskPath ?? params.task,
           output: completion.output,
           hint: "fest refused the completion — quality gates run first. Read the output, fix what it demands, then retry.",
         });
@@ -287,7 +307,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       deps.tracker.taskCompleted(sid);
       return textResult({
         status: "completed",
-        task: params.task,
+        task: task?.path ?? taskPath ?? params.task,
         ...(opened
           ? {}
           : {

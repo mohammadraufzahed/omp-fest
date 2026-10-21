@@ -24,6 +24,17 @@ describe("FestCliAdapter", () => {
     expect(call.cwd).toBe("/f");
   });
 
+  it("injects --yes only for task mutations that confirm", async () => {
+    const exec = fakeExec({});
+    const fest = new FestCliAdapter(exec);
+    await fest.raw("/f", ["task", "update", "01_task.md", "50%"]);
+    expect(exec.calls[0]?.args).not.toContain("--yes");
+    await fest.raw("/f", ["task", "blocked", "--list"]);
+    expect(exec.calls[1]?.args).not.toContain("--yes");
+    await fest.raw("/f", ["task", "completed", "01_task.md"]);
+    expect(exec.calls[2]?.args).toContain("--yes");
+  });
+
   it("extracts commit hash", async () => {
     const exec = fakeExec({ stdout: "COMMIT\nHash 0f973a9\n" });
     const fest = new FestCliAdapter(exec);
