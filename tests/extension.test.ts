@@ -52,7 +52,7 @@ function mockPi(cwd: string) {
   };
   const pi = {
     zod: {
-      object: (shape: Record<string, unknown>) => ({ shape }),
+      object: (shape: Record<string, unknown>) => ({ ...zodNode("object"), shape }),
       string: () => zodNode("string"),
       enum: (values: string[]) => ({ ...zodNode("enum"), values }),
       array: (item: unknown) => ({ ...zodNode("array"), item }),

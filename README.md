@@ -49,13 +49,13 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `git commit` like a peasant.
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
-- 🗺️ **interactive planning interview** — `/fest plan <goal>` makes the
-  agent interview YOU in chat (one question per turn, like `/guided-goal`),
-  then it builds the festival itself:
-  the agent interviews you, writes `STRUCTURE.md`, `fest_plan` scaffolds
-  `festivals/planning/<name>` via real `fest scaffold from-plan`, fills
-  markers, validates — then *you* approve and it `fest_promote`s to active.
-  your brain → festival, no TUI wrangling 🧠
+- 🗺️ **repository-grounded planning** — `/fest plan <goal>` inspects the
+  target project first and asks only material unanswered questions, one at a time.
+  A simple change can use one phase and one sequence; complex work gets explicit
+  boundaries and dependencies, not forced parallelism. `fest_plan` generates
+  deterministic `STRUCTURE.md` from a structured contract, presents one concise
+  approval preview, then scaffolds the exact approved revision. Empty or
+  mismatching scaffolds never qualify for activation.
 - 🖼️ **visual planning in the same interview** — attach a screenshot with
   `/fest plan <goal>`. After inspecting reusable project components, the agent calls
   `fest_wireframe_create` with typed pixel bounds, component/style evidence, audit paths,
@@ -73,11 +73,93 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   mutations, and return `{code, stdout, stderr}` typed. nothing the real
   CLIs can do is out of reach. `/fest cmd` + `/fest camp` for you too 💪
 
+### Plan from an inspected repository
+
+`/fest plan <goal>` starts by reading the target project's relevant implementation,
+configuration, reusable components and test conventions without editing project code.
+The agent records inspected paths and asks only about material choices that the
+request and repository cannot answer. It does not ask you to restate known facts,
+invent a questionnaire, or require you to design the phase hierarchy.
+
+The plan is proportional: one phase, one sequence and an executable task are enough
+for a simple change. Larger work uses real milestones and dependency-ordered tasks;
+parallel lanes are optional and must be genuinely independent. Screenshots add the
+visual extraction flow below; text-only plans do not need image artifacts.
+
+The `StructuredPlan` contract is:
+
+| Field | Contents |
+| --- | --- |
+| `goal` | The intended outcome. |
+| `scope[]`, `exclusions[]` | Included work and explicit boundaries; preserve the human's constraints. |
+| `acceptance[]` | `{id, description}` with observable behavior/output, not vague quality claims. |
+| `questions[]` | `{question, blocking}`; resolve blocking questions before preview. |
+| `inspection[]` | `{path, reason}` recording existing project-relative paths actually inspected. |
+| `phases[]` | `{id, name, type, sequences}` for real milestones. |
+| `sequences[]` | `{id, name, tasks}` for coherent work lanes within a phase. |
+| `tasks[]` | `{id, title, description, dependsOn, implements, verifies, files, verification}`. |
+| Task `dependsOn[]` | IDs of earlier tasks in phase/sequence/task order; no missing, forward or cyclic dependencies. |
+| Task `implements[]`, `verifies[]` | Acceptance IDs covered by implementation and verification respectively. |
+| Task `files[]` | `{path, status: "existing" \| "proposed"}`; existing files must be confirmed, proposed files must not already exist. |
+| Task `verification[]` | `{command, cwd, evidencePath, expected}` specifying a runnable check, existing command evidence and observable expected result. |
+
+IDs are unique across acceptance criteria, phases, sequences and tasks. Every
+acceptance criterion needs both implementation and verification coverage; a task
+may provide both. Verification tasks need concrete verification entries. Paths are
+project-relative; verification `cwd` may be `"."`. `evidencePath` must already exist
+and substantiate the command, such as `package.json` for a package script; it is not
+a future result log or proof that verification passed. Package-script commands must
+refer to scripts declared in the package at that cwd. Actual result evidence is
+captured during execution, not invented during planning. The contract needs nonempty
+scope, inspection, acceptance and executable hierarchy; empty exclusions/questions
+are valid. Phase names are normalized to parser-safe uppercase tokens, and naming
+collisions are rejected. Sequence names must not end in `_planning`, `_research`,
+`_requirements` or `_docs`, which the CLI excludes from quality gates.
+
+Generate the plan through the tool, rather than writing parser-sensitive Markdown:
+
+```ts
+fest_plan({
+  action: "preview",
+  name: "feature",
+  plan: "<absolute camp>/.ompfest/plans/feature.STRUCTURE.md",
+  workingDir: "projects/<target>",
+  spec, // StructuredPlan described above
+  rules: "<agreed constraints>",
+  // referencesDir: "<absolute camp>/.ompfest/plans/feature.references",
+});
+```
+
+Preview validates the contract, writes deterministic `STRUCTURE.md`, persists the
+structured spec and returns a `planRevision` digest. The human sees one concise
+approval preview: goal, scope/exclusions, inspection evidence, observable acceptance,
+task/dependency outline, verification plan, nonblocking unknowns and any visual links.
+The generated Markdown is an output, not a document to hand-patch.
+
+After the human approves, call `fest_plan` with `action: "scaffold"`, the same `name`,
+`plan`, `workingDir`, `rules` and optional `referencesDir`, and
+`approvedRevision: "<approved planRevision>"`. Scaffold uses the persisted spec and
+rejects changes to the approved plan. If it changed, preview and obtain approval
+again; do not bypass the digest check.
+
+Compare the scaffold's phases, sequences, tasks, dependencies, acceptance coverage
+and verification with the approved contract. Empty or mismatching output is a
+failure: preserve the evidence and fix the cause, never silently shrink the plan or
+autoactivate it. Fill remaining markers from known context, run `fest_validate`, and
+promote only a matching, valid festival with human authorization to activate.
+Authorization to activate does not approve later execution gates.
+
+Implementation then follows `fest_next` → the returned unit →
+`fest_task_complete` with evidence → `fest_commit`. A planned verification command
+is not a passing result: report only exercised checks, retain evidence, and make
+failed or untested checks explicit. `fest_gate_submit` always stops for the human;
+the agent never approves its own gate.
+
 ### Plan a page from a screenshot
 
-Attach a screenshot to `/fest plan build this page`. The agent extracts the visible
-layout into structured source-pixel coordinates, then inspects the target project's
-component and style sources before generating anything. It calls the model-callable
+Attach a screenshot to `/fest plan build this page`. The agent first inspects the
+target project's component and style sources, then extracts the visible layout into
+structured source-pixel coordinates before generating artifacts. It calls the model-callable
 `fest_wireframe_create` tool with that typed extraction; it does not hand-assemble SVG.
 The tool uses SVG.js with svgdom for headless Node generation and writes exactly
 `wireframe.svg` and `PAGE.md` under the requested project-relative output directory.
@@ -111,7 +193,7 @@ verified path as `unverified` in PAGE.md and the SVG.
 SVG.js and svgdom are runtime dependencies for this headless renderer. The tool does
 not perform image recognition itself: the calling model extracts the screenshot and
 inspects the target project, then passes those findings through the stable schema.
-Text-only `/fest plan` is unchanged. The approved [scheduling-dialog SVG](scheduling-dialog-wireframe.svg)
+Text-only `/fest plan` uses the structured flow above without visual fields. The approved [scheduling-dialog SVG](scheduling-dialog-wireframe.svg)
 shows the expected detail; its screen content is an example, not a template to copy.
 
 ```text
@@ -120,14 +202,12 @@ shows the expected detail; its screen content is an example, not a template to c
 <camp>/.ompfest/plans/feature.references/pages/results/wireframe.svg
 ```
 
-The plan uses the unchanged `STRUCTURE.md` syntax.
+`STRUCTURE.md` is generated from the same structured contract used for text-only
+plans; the agent does not hand-assemble its hierarchy. Preview reports the planned
+hierarchy, and scaffolding must match the approved contract.
 
-Before writing files, `fest_plan` dry-runs the parser and reports phase, sequence,
-and task counts. Use the exact hierarchy markers: `- **Phase 1:** IMPLEMENTATION
-(implementation)`, `- Sequence 1: ...`, and `- Task 1: ...`. Phase names are
-single tokens (letters, digits, underscores; no spaces or hyphens). A zero-phase
-preview fails without creating or deleting festival files.
-After approval, the agent calls `fest_plan` with `referencesDir` pointing to the matching `.references`
+After approval, the agent calls `fest_plan` with `action: "scaffold"`,
+`approvedRevision` and `referencesDir` pointing to the reviewed `.references`
 directory (omit it for text-only plans). The extension copies only the two
 reviewed files per page into `<festival>/references/pages/<slug>/`, rejecting
 symlinks, raw screenshots and active/external SVG content. The agent then adds
