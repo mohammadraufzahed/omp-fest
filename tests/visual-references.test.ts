@@ -22,6 +22,19 @@ describe("visual planning references", () => {
     await writeFile(join(pageDir, "wireframe.svg"), svg);
     await expect(prepareVisualReferences(root, plan, referencesDir)).rejects.toThrow(reason);
   });
+  it("accepts large page collections without imposing a small category or page-count ceiling", async () => {
+    const { root, referencesDir, plan } = await fixture();
+    const pagesDir = join(referencesDir, "pages");
+    for (let index = 1; index <= 40; index++) {
+      const slug = `section-${String(index).padStart(2, "0")}`;
+      const pageDir = join(pagesDir, slug);
+      await mkdir(pageDir);
+      await writeFile(join(pageDir, "PAGE.md"), PAGE);
+      await writeFile(join(pageDir, "wireframe.svg"), SVG);
+    }
+    const bundle = await prepareVisualReferences(root, plan, referencesDir);
+    expect(bundle.pages).toHaveLength(41);
+  });
 
   it("requires task coverage for each AC and rejects unknown or malformed Done-When IDs", async () => {
     const { root, referencesDir, plan, festival, task } = await fixture();

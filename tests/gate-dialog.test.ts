@@ -39,6 +39,7 @@ function makePi() {
     zod: {
       object: schema,
       string: schema,
+      number: schema,
       boolean: schema,
       enum: schema,
       array: schema,

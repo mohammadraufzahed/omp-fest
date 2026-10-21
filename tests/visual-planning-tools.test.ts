@@ -50,7 +50,7 @@ async function setup() {
   } as unknown as FestCli;
   const tools = new Map<string, Execute>();
   registerTools({
-    zod: { object: schema, string: schema, boolean: schema, enum: schema, array: schema } as never,
+    zod: { object: schema, string: schema, number: schema, boolean: schema, enum: schema, array: schema } as never,
     registerTool: (tool) => tools.set(tool.name as string, tool.execute as Execute),
   } satisfies PiLike, {
     fest,

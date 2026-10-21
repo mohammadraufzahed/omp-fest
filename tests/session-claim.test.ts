@@ -44,6 +44,7 @@ function makePi() {
       object: schema,
       string: schema,
       boolean: schema,
+      number: schema,
       enum: schema,
       array: schema,
     } as never,

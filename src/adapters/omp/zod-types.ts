@@ -11,6 +11,7 @@ export interface ZodSchema {
 export interface ZodLike {
   object(shape: Record<string, ZodSchema>): ZodSchema;
   string(): ZodSchema;
+  number(): ZodSchema;
   boolean(): ZodSchema;
   enum(values: readonly string[]): ZodSchema;
   array(item: ZodSchema): ZodSchema;

@@ -90,7 +90,7 @@ describe("ompFest extension", () => {
     ompFest(pi as never);
     expect(tools.map((t) => t.name)).toContain("fest_next");
     expect(tools.map((t) => t.name)).toContain("fest_parallel");
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(16);
     expect([...commands.keys()].sort()).toEqual(["fest"]);
   });
 

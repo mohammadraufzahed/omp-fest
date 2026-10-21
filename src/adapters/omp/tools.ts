@@ -19,6 +19,7 @@ import { festivalConstraints, seedFestivalRules, stampGateRules } from "../../ap
 import { recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
 import { applyReferenceRevision, findReuseCandidates, inspectReferenceRevision, renderPlanPreview } from "../../application/visual-plan-review.js";
 import { installVisualReferences, prepareVisualReferences, referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
+import { createWireframe, type WireframeSpec } from "../../application/visual-wireframe.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import type { ZodLike } from "./zod-types.js";
@@ -655,6 +656,80 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       });
     },
   });
+  pi.registerTool({
+    name: "fest_wireframe_create",
+    label: "Create Screenshot Wireframe",
+    description:
+      "Deterministically create a categorized wireframe.svg and AI-ready PAGE.md for one page from structured screenshot observations. " +
+      "Call once per page into a unique page-slug directory; components use open-ended semantic kinds and categories, with renderAs reserved for safe SVG primitives. " +
+      "Inspect reusable project UI and styles first; include source paths and matched/no-match evidence, all node bounds and repeated instances, confidence-tagged styles, states, measurements, and unresolved questions. " +
+      "The overview stays compact while PAGE.md contains the full categorized hierarchy and implementation evidence; source copy and sensitive values are not reproduced.",
+    parameters: z.object({
+      outputDirectory: z.string().describe("Output directory relative to the current project, e.g. .ompfest/plans/page.references/pages/results"),
+      spec: z.object({
+        title: z.string().describe("Short page or screen title"),
+        slug: z.string().describe("Lowercase kebab-case page slug"),
+        direction: z.enum(["ltr", "rtl"]).describe("Reading direction observed in the reference"),
+        source: z.object({
+          width: z.number().describe("Intrinsic source image width in pixels"),
+          height: z.number().describe("Intrinsic source image height in pixels"),
+          displayWidth: z.number().describe("Displayed screenshot width in pixels"),
+          displayHeight: z.number().describe("Displayed screenshot height in pixels"),
+        }),
+        components: z.array(z.object({
+          id: z.string().describe("Stable lowercase ID, max 80 characters; independent of text/copy"),
+          parent: z.string().optional().describe("Parent component ID; omit for direct screen children"),
+          role: z.string().describe("Semantic role, never source copy or personal data"),
+          category: z.string().optional().describe("Open-ended semantic section/category, e.g. header, billing filters, results table, or chart legend"),
+          kind: z.string().describe("Open-ended semantic component kind; do not constrain this to a fixed component list"),
+          renderAs: z.enum(["rectangle", "text-bar", "line", "circle", "ellipse", "chevron", "checkbox"]).optional().describe("Canonical SVG drawing primitive for this node; omit to infer common legacy primitives or default to rectangle"),
+          x: z.number().describe("Left coordinate in source-image pixels"),
+          y: z.number().describe("Top coordinate in source-image pixels"),
+          width: z.number().describe("Width in source-image pixels"),
+          height: z.number().describe("Height in source-image pixels"),
+          radius: z.number().optional().describe("Observed/estimated corner radius in source pixels"),
+          fill: z.string().optional().describe("Hex color only"),
+          stroke: z.string().optional().describe("Hex color only"),
+          strokeWidth: z.number().optional().describe("Border/icon stroke width in source pixels"),
+          state: z.string().optional().describe("Observed state, e.g. checked or unchecked"),
+          styles: z.array(z.object({
+            property: z.string(),
+            value: z.string(),
+            status: z.enum(["observed", "estimated", "unknown", "agreed", "n/a"]),
+          })).optional().describe("Component-level style evidence and confidence"),
+        })).describe("All visible primitives in screen order, including every text bar and repeated instance"),
+        componentAudit: z.array(z.object({
+          component: z.string().describe("Semantic component name/role inspected in the target project"),
+          status: z.enum(["matched", "no_match"]),
+          sourcePaths: z.array(z.string()).describe("Existing relative project paths inspected; matched entries cite implementation files"),
+          notes: z.string().describe("What was found or what project paths/patterns were checked"),
+        })).describe("Project component discovery results; paths must exist inside the current project"),
+        measurements: z.array(z.object({
+          label: z.string().describe("Measured gap or dimension name"),
+          from: z.string().describe("First stable component ID"),
+          to: z.string().describe("Second stable component ID"),
+          value: z.number().describe("Source-pixel distance or dimension"),
+          status: z.enum(["observed", "estimated", "unknown", "agreed", "n/a"]),
+        })).describe("Explicit component sizes and gaps, with measurement confidence"),
+        states: z.array(z.object({
+          viewport: z.string(),
+          state: z.string(),
+          status: z.enum(["observed", "unknown", "agreed", "n/a"]),
+          expected: z.string(),
+        })).describe("Observed states and explicit unknown coverage; do not invent unseen states"),
+        openQuestions: z.array(z.string()).describe("Focused unresolved questions that could change structure or styling; empty when none"),
+      }),
+    }),
+    async execute(_id: string, params: { outputDirectory: string; spec: WireframeSpec }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      try {
+        const result = await createWireframe(params.outputDirectory, ctx.cwd, params.spec);
+        return textResult({ kind: "wireframe_created", ...result });
+      } catch (error) {
+        return textResult({ kind: "wireframe_failed", error: String(error) });
+      }
+    },
+  });
+
 
   pi.registerTool({
     name: "fest_promote",

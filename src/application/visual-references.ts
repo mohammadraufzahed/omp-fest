@@ -7,10 +7,11 @@ const REFERENCE_LINE = /^\s*Visual reference:\s*(\S.*?)\s*$/gim;
 const REFERENCE_PATH = /^references\/pages\/([a-z0-9]+(?:-[a-z0-9]+)*)\/PAGE\.md$/;
 const PAGE_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_FILE_BYTES = 1024 * 1024;
-export const MAX_PAGES = 40;
+export const MAX_PAGES = 250;
+const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 const SVG_ELEMENTS = new Set(["svg", "g", "rect", "circle", "ellipse", "line", "polyline", "polygon", "path", "text", "tspan", "title", "desc"]);
 const SVG_ATTRIBUTES = new Set([
-  "xmlns", "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry",
+  "xmlns", "xmlns:xlink", "version", "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry",
   "points", "d", "transform", "id", "fill", "fill-opacity", "stroke", "stroke-width", "stroke-dasharray",
   "stroke-linecap", "stroke-linejoin", "font-family", "font-size", "font-weight", "text-anchor", "direction",
   "opacity", "dx", "dy", "dominant-baseline", "unicode-bidi", "font-style", "letter-spacing",
@@ -194,6 +195,7 @@ export async function prepareVisualReferences(campRoot: string, plan: string, re
     throw new Error("Only the pages directory belongs in the visual reference bundle");
   }
   const files: ReferenceBundle["files"] = [];
+  let bundleBytes = 0;
   for (const page of pageNames) {
     if (!PAGE_SLUG_RE.test(page) || !(await lstat(join(pagesDir, page))).isDirectory()) {
       throw new Error(`Invalid page directory: ${page}`);
@@ -205,6 +207,10 @@ export async function prepareVisualReferences(campRoot: string, plan: string, re
     }
     const spec = await regularFile(join(path, "PAGE.md"));
     const svg = await regularFile(join(path, "wireframe.svg"));
+    bundleBytes += Buffer.byteLength(spec, "utf8") + Buffer.byteLength(svg, "utf8");
+    if (bundleBytes > MAX_BUNDLE_BYTES) {
+      throw new Error(`Visual reference bundle exceeds ${MAX_BUNDLE_BYTES} bytes`);
+    }
     if (!spec.trim()) {
       throw new Error(`Page ${page} has an empty specification`);
     }

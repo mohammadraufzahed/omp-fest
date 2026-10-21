@@ -11,7 +11,7 @@
   "keywords": [],
   "author": "",
   "license": "MIT",
-  "description": "oh-my-pi extension for fest.build (Festival) \u2014 camp detection, fest next loop, gates, supervisor cards",
+  "description": "oh-my-pi extension for fest.build (Festival) — camp detection, fest next loop, gates, supervisor cards",
   "type": "module",
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -25,5 +25,9 @@
     "extensions": [
       "./index.ts"
     ]
+  },
+  "dependencies": {
+    "@svgdotjs/svg.js": "^3.2.8",
+    "svgdom": "^0.1.29"
   }
 }

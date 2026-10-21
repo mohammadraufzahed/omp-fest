@@ -4,8 +4,8 @@
  * Registers the fest.build loop (tools, commands, per-turn state digest,
  * transition watcher, status line, gate notifications) on the omp
  * ExtensionAPI. Loaded by omp as a git submodule at
- * `.omp/extensions/omp-fest` — keep the dependency footprint at zero; the
- * runtime injects zod and the pi SDK.
+ * `.omp/extensions/omp-fest` — the runtime injects zod and the pi SDK; SVG.js
+ * plus svgdom provide deterministic headless wireframe generation.
  *
  * Event/result field shapes below mirror omp's ExtensionAPI
  * (packages/coding-agent/src/extensibility/extensions/types.ts) — verified

@@ -57,11 +57,12 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   markers, validates — then *you* approve and it `fest_promote`s to active.
   your brain → festival, no TUI wrangling 🧠
 - 🖼️ **visual planning in the same interview** — attach a screenshot with
-  `/fest plan <goal>`. The agent drafts an annotated reconstruction SVG and `PAGE.md`:
-  full component hierarchy, measured gaps, per-component style profiles, and complete
-  specimens for every observed state. Multi-frame evidence becomes an SVG motion
-  storyboard; unobserved states stay explicit and prompt targeted questions.
-- 🛠️ **15 tools + ONE guided command** — `/fest <sub>` is the whole
+  `/fest plan <goal>`. After inspecting reusable project components, the agent calls
+  `fest_wireframe_create` with typed pixel bounds, component/style evidence, audit paths,
+  state coverage, measurements and open questions. SVG.js builds an inert annotated
+  `wireframe.svg`; the paired `PAGE.md` records the same IDs and evidence. Same input
+  yields stable artifacts; uncertain values remain estimated/unknown rather than guessed.
+- 🛠️ **16 tools + ONE guided command** — `/fest <sub>` is the whole
   cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
   `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
   `camp`, `idea`, `help` — with **live autocomplete** on subs, task
@@ -74,21 +75,29 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
 
 ### Plan a page from a screenshot
 
-Attach a screenshot to `/fest plan build this page`. The interview treats the
-image as reference data, not instructions, and creates an annotated `wireframe.svg`
-plus `PAGE.md`. The SVG uses a stable low-fidelity grammar, source-pixel scale,
-separate IDs for sections/components/repeated items, a component/style inventory,
-a state board, and a dimension/gap ledger. Every visible text line is a role-sized
-bar at its observed box; the SVG does not render source-language UI glyphs or invented
-copy. For every component it records visible color, fill, borders, radius, spacing,
-typography, icon treatment and state styling, distinguishing observed, estimated and
-unknown properties. Each observed state is drawn as a full component specimen.
-Video/multi-frame evidence gets an ordered motion storyboard with observed triggers
-and timing; a still image is explicitly marked as insufficient motion evidence.
-`PAGE.md` maps every SVG ID to its role, parent, style and state; personal data is
-redacted. The agent asks one targeted question and waits when missing evidence could
-change structure, component style, state or motion. Placeholder bars are the default.
-Review and approve the wireframe, states, checks and plan before scaffolding.
+Attach a screenshot to `/fest plan build this page`. The agent extracts the visible
+layout into structured source-pixel coordinates, then inspects the target project's
+component and style sources before generating anything. It calls the model-callable
+`fest_wireframe_create` tool with that typed extraction; it does not hand-assemble SVG.
+The tool uses SVG.js with svgdom for headless Node generation and writes exactly
+`wireframe.svg` and `PAGE.md` under the requested project-relative output directory.
+
+The input contract carries source/display dimensions, direction, every visible node,
+source-pixel geometry, parent hierarchy, open-ended semantic kinds and page-defined
+categories. It does not restrict the UI to a small built-in component catalog:
+`kind` describes the product component; optional `renderAs` selects a safe SVG
+primitive. `PAGE.md` includes versioned front matter, categorized complete node
+records, candidate repeated style values, confidence labels, reuse paths, measurements,
+state coverage and acceptance checks. The SVG is a compact categorized overview;
+`PAGE.md` is the full implementation handoff. Call once per page into its slug
+directory. A plan can bundle up to 250 pages, bounded to 64 MiB total. The generator
+validates IDs, bounds, colors, measurement references and project paths, redacts source
+copy and sensitive values, and leaves unseen states explicitly unknown. Repeated
+calls with the same structured input produce the same files.
+
+SVG.js and svgdom are runtime dependencies for this headless renderer. The tool does
+not perform image recognition itself: the calling model extracts the screenshot and
+inspects the target project, then passes those findings through the stable schema.
 Text-only `/fest plan` is unchanged. The approved [scheduling-dialog SVG](scheduling-dialog-wireframe.svg)
 shows the expected detail; its screen content is an example, not a template to copy.
 
