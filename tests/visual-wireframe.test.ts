@@ -124,11 +124,18 @@ describe("fest_wireframe_create", () => {
         componentAudit: [{ component: "dialog", status: "no_match", sourcePaths: ["src/missing-dialog.tsx", "src/missing-button.tsx"], notes: "No matching component found." }],
         measurements: [], states: [], openQuestions: [],
       },
-    }, undefined, undefined, { cwd: root })).content[0]!.text) as { kind: string; error: string };
-    expect(missingAudit.kind).toBe("wireframe_failed");
-    expect(missingAudit.error).toContain("paths do not exist in this project");
-    expect(missingAudit.error).toContain("src/missing-button.tsx");
-    expect(missingAudit.error).toContain("no_match");
-    expect(missingAudit.error).toContain("Do not guess component paths.");
+    }, undefined, undefined, { cwd: root })).content[0]!.text) as {
+      kind: string; pagePath: string; svgPath: string; auditWarnings: { component: string; missingPaths: string[] }[];
+    };
+    expect(missingAudit.kind).toBe("wireframe_created");
+    expect(missingAudit.auditWarnings).toEqual([{
+      component: "dialog",
+      missingPaths: ["src/missing-dialog.tsx", "src/missing-button.tsx"],
+    }]);
+    const auditPage = await readFile(missingAudit.pagePath, "utf8");
+    const auditSvg = await readFile(missingAudit.svgPath, "utf8");
+    expect(auditPage).toContain("unverified; inspected paths: none verified");
+    expect(auditPage).toContain("paths not found and not counted as evidence");
+    expect(auditSvg).toContain("inside");
   });
 });

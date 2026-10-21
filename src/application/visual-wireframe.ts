@@ -60,6 +60,11 @@ export interface WireframeComponentAudit {
   notes: string;
 }
 
+export interface WireframeAuditWarning {
+  component: string;
+  missingPaths: string[];
+}
+
 export interface WireframeMeasurement {
   label: string;
   from: string;
@@ -139,7 +144,7 @@ function finite(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
-async function validate(spec: WireframeSpec, workingDirectory: string): Promise<void> {
+async function validate(spec: WireframeSpec, workingDirectory: string): Promise<WireframeAuditWarning[]> {
   if (!spec.title.trim() || spec.title.length > MAX_TEXT) {
     throw new Error("title must be a non-empty string up to 300 characters");
   }
@@ -185,7 +190,7 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
     if (!ID.test(variant) || ids.has(variant)) throw new Error(`invalid or duplicate state specimen id: ${variant}`);
     ids.add(variant);
   }
-  const missingAuditPaths: string[] = [];
+  const missingAuditPaths = new Map<string, string[]>();
   const audited = new Set<string>();
   for (const entry of spec.componentAudit) {
     if (!entry.component.trim() || entry.component.length > MAX_TEXT || audited.has(entry.component)) {
@@ -204,7 +209,9 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
       }
       const info = await lstat(resolved).catch(() => undefined);
       if (!info) {
-        missingAuditPaths.push(`${entry.component}: ${sourcePath}`);
+        const missing = missingAuditPaths.get(entry.component) ?? [];
+        missing.push(sourcePath);
+        missingAuditPaths.set(entry.component, missing);
         continue;
       }
       if (info.isSymbolicLink() || (!info.isFile() && !info.isDirectory())) {
@@ -217,11 +224,7 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
       }
     }
   }
-  if (missingAuditPaths.length) {
-    throw new Error(
-      `component audit paths do not exist in this project: ${missingAuditPaths.join("; ")}. Inspect the actual project tree and use only paths that exist; for no match, cite existing files/directories you inspected and set status to "no_match". Do not guess component paths.`,
-    );
-  }
+  const auditWarnings = [...missingAuditPaths].map(([component, missingPaths]) => ({ component, missingPaths }));
   for (const component of spec.components) if (component.parent && !ids.has(component.parent)) throw new Error(`missing parent ${component.parent} for ${component.id}`);
   for (const state of spec.states) {
     if (!state.viewport.trim() || !state.state.trim() || !state.expected.trim() ||
@@ -235,8 +238,8 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
     }
   }
   for (const question of spec.openQuestions) if (typeof question !== "string" || !question.trim() || question.length > MAX_TEXT) throw new Error("open questions must be non-empty strings up to 300 characters");
+  return auditWarnings;
 }
-
 function coveredStates(spec: WireframeSpec): WireframeState[] {
   const states = [...spec.states];
   const required: [string, string][] = [["desktop", "initial"], ["mobile", "initial"], ["desktop", "loading"], ["desktop", "empty"], ["desktop", "error"]];
@@ -262,7 +265,7 @@ function variantId(component: WireframeComponent): string {
   return `variant.${component.id}.state`;
 }
 
-function renderSvg(spec: WireframeSpec): string {
+function renderSvg(spec: WireframeSpec, auditWarnings: WireframeAuditWarning[]): string {
   const { width, height, displayWidth, displayHeight } = spec.source;
   const railX = width + 64;
   const railWidth = 620;
@@ -378,9 +381,13 @@ function renderSvg(spec: WireframeSpec): string {
     card(railX, auditY, railWidth, auditHeight, "PROJECT REUSE AUDIT", `${spec.componentAudit.length} searches`);
     spec.componentAudit.slice(0, 3).forEach((entry, index) => {
       const y = auditY + 31 + index * 33;
-      addText(railX + 14, y, `${entry.status === "matched" ? "MATCH" : "NO MATCH"} · ${short(entry.component, 34)}`, 10,
-        entry.status === "matched" ? "#247653" : "#68748a", 700);
-      addText(railX + 14, y + 13, short(`${entry.sourcePaths.join(", ")} · ${entry.notes}`, 92), 9, "#778196");
+      const warning = auditWarnings.find((item) => item.component === entry.component);
+      const verifiedPaths = entry.sourcePaths.filter((path) => !warning?.missingPaths.includes(path));
+      const unverified = Boolean(warning && verifiedPaths.length === 0);
+      const status = unverified ? "UNVERIFIED" : entry.status === "matched" ? "MATCH" : "NO MATCH";
+      addText(railX + 14, y, `${status} · ${short(entry.component, 34)}`, 10,
+        unverified ? "#8a6b32" : entry.status === "matched" ? "#247653" : "#68748a", 700);
+      addText(railX + 14, y + 13, short(`${verifiedPaths.join(", ") || "no verified paths"} · ${warning ? `${warning.missingPaths.length} missing path(s)` : entry.notes}`, 92), 9, "#778196");
     });
     if (spec.componentAudit.length > 3) addText(railX + 14, auditY + auditHeight - 14, `+ ${spec.componentAudit.length - 3} more searches documented in PAGE.md`, 9, "#778196");
 
@@ -417,7 +424,8 @@ function renderSvg(spec: WireframeSpec): string {
   });
 }
 
-function renderPage(spec: WireframeSpec): string {
+function renderPage(spec: WireframeSpec, auditWarnings: WireframeAuditWarning[]): string {
+  const warningByComponent = new Map(auditWarnings.map((warning) => [warning.component, warning]));
   const { width, height, displayWidth, displayHeight } = spec.source;
   const variants = observedStateSamples(spec);
   const groups = componentGroups(spec);
@@ -515,7 +523,14 @@ ${tokens ? `| Property | Value | Confidence | Referenced nodes |\n| --- | --- | 
 
 ## Component reuse audit
 
-${spec.componentAudit.map((entry) => `- **${md(entry.component)}** — ${entry.status}; inspected paths: ${entry.sourcePaths.map((path) => `\`${md(path)}\``).join(", ")}; result: ${md(entry.notes)}`).join("\n")}
+${spec.componentAudit.map((entry) => {
+  const warning = warningByComponent.get(entry.component);
+  const verifiedPaths = entry.sourcePaths.filter((path) => !warning?.missingPaths.includes(path));
+  const status = warning && verifiedPaths.length === 0 ? "unverified" : entry.status;
+  const inspected = verifiedPaths.length ? verifiedPaths.map((path) => `\`${md(path)}\``).join(", ") : "none verified";
+  const missing = warning ? `; paths not found and not counted as evidence: ${warning.missingPaths.map((path) => `\`${md(path)}\``).join(", ")}` : "";
+  return `- **${md(entry.component)}** — ${status}; inspected paths: ${inspected}${missing}; result: ${md(entry.notes)}`;
+}).join("\n")}
 
 ## Measured geometry
 
@@ -550,8 +565,8 @@ ${questions}
 `;
 }
 
-export async function createWireframe(outputDirectory: string, workingDirectory: string, spec: WireframeSpec): Promise<{ svgPath: string; pagePath: string; componentCount: number; openQuestions: string[] }> {
-  await validate(spec, workingDirectory);
+export async function createWireframe(outputDirectory: string, workingDirectory: string, spec: WireframeSpec): Promise<{ svgPath: string; pagePath: string; componentCount: number; openQuestions: string[]; auditWarnings: WireframeAuditWarning[] }> {
+  const auditWarnings = await validate(spec, workingDirectory);
   if (isAbsolute(outputDirectory)) throw new Error("outputDirectory must be relative to the project working directory");
   const output = resolve(workingDirectory, outputDirectory);
   const rel = relative(resolve(workingDirectory), output);
@@ -569,7 +584,7 @@ export async function createWireframe(outputDirectory: string, workingDirectory:
     const info = await lstat(file).catch(() => undefined);
     if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error(`generated output must be a regular file, not a link or directory: ${file}`);
   }
-  await writeFile(svgPath, renderSvg(spec), "utf8");
-  await writeFile(pagePath, renderPage(spec), "utf8");
-  return { svgPath, pagePath, componentCount: spec.components.length, openQuestions: spec.openQuestions };
+  await writeFile(svgPath, renderSvg(spec, auditWarnings), "utf8");
+  await writeFile(pagePath, renderPage(spec, auditWarnings), "utf8");
+  return { svgPath, pagePath, componentCount: spec.components.length, openQuestions: spec.openQuestions, auditWarnings };
 }

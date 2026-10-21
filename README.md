@@ -98,6 +98,9 @@ calls with the same structured input produce the same files.
 Reuse audits may cite only existing relative paths confirmed in the target project. For
 no match, cite existing files/directories actually inspected and mark `no_match`; never
 provide a guessed candidate path as evidence.
+Missing audit paths do not block wireframe output: the tool returns them as
+`auditWarnings`, excludes them from verified evidence, and marks entries without any
+verified path as `unverified` in PAGE.md and the SVG.
 
 SVG.js and svgdom are runtime dependencies for this headless renderer. The tool does
 not perform image recognition itself: the calling model extracts the screenshot and

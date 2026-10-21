@@ -662,8 +662,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description:
       "Deterministically create a categorized wireframe.svg and AI-ready PAGE.md for one page from structured screenshot observations. " +
       "Call once per page into a unique page-slug directory; components use open-ended semantic kinds and categories, with renderAs reserved for safe SVG primitives. " +
-      "Inspect reusable project UI and styles first; include source paths and matched/no-match evidence, all node bounds and repeated instances, confidence-tagged styles, states, measurements, and unresolved questions. " +
-      "The overview stays compact while PAGE.md contains the full categorized hierarchy and implementation evidence; source copy and sensitive values are not reproduced.",
+      "Inspect reusable project UI and styles first; include only existing source paths in audit evidence, all node bounds and repeated instances, confidence-tagged styles, states, measurements, and unresolved questions. " +
+      "The overview stays compact while PAGE.md contains the full categorized hierarchy and implementation evidence; missing audit paths are returned as warnings and marked unverified rather than blocking wireframe creation.",
     parameters: z.object({
       outputDirectory: z.string().describe("Path inside the current project working directory; do not use ../ traversal, e.g. .ompfest/plans/page.references/pages/results"),
       spec: z.object({
@@ -703,7 +703,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           status: z.enum(["matched", "no_match"]),
           sourcePaths: z.array(z.string()).describe("Existing relative project paths actually inspected; matched entries cite implementation sources, no_match entries cite only existing files/directories searched"),
           notes: z.string().describe("What was found or what existing project paths were checked"),
-        })).describe("Project component discovery results; never invent candidate paths. Missing paths fail with instructions to search the project and retry using existing inspected paths"),
+        })).describe("Project component discovery results; never invent candidate paths. Missing source paths are reported in auditWarnings, excluded from verified evidence, and marked unverified in PAGE.md"),
         measurements: z.array(z.object({
           label: z.string().describe("Measured gap or dimension name"),
           from: z.string().describe("First stable component ID"),
