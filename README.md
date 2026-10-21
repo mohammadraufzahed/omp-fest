@@ -98,6 +98,9 @@ calls with the same structured input produce the same files.
 For `text-bar`, geometry remains the measured text box in PAGE.md; the SVG keeps its width
 but draws a thin, vertically centered bar at 20% of the box height, not a solid text-sized block.
 
+Only source UI text is replaced by placeholder bars. The categorized annotation rail uses
+readable SVG text for headings, labels, statuses and measurements.
+
 Reuse audits may cite only existing relative paths confirmed in the target project. For
 no match, cite existing files/directories actually inspected and mark `no_match`; never
 provide a guessed candidate path as evidence.

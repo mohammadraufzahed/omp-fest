@@ -62,6 +62,8 @@ describe("fest_wireframe_create", () => {
     const svg = await readFile(result.svgPath, "utf8");
     const page = await readFile(result.pagePath, "utf8");
     validateWireframe(svg);
+    expect(svg).toContain("PAGE SNAPSHOT");
+    expect(svg).toContain("PROJECT REUSE AUDIT");
     const nameBar = /<rect\b(?=[^>]*\bid="staff\.name")[^>]*>/.exec(svg)?.[0];
     const nameBarHeight = Number(/\bheight="([^"]+)"/.exec(nameBar ?? "")?.[1]);
     expect(nameBarHeight).toBeGreaterThan(0);

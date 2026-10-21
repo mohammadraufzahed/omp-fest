@@ -294,10 +294,11 @@ function renderSvg(spec: WireframeSpec, auditWarnings: WireframeAuditWarning[]):
     drawing.rect(viewWidth, bottom).move(0, 0).fill("#f7f8fb");
 
     const addText = (x: number, y: number, value: string, size: number, color: string, weight = 400, anchor?: string) => {
-      const barWidth = Math.min(580, Math.max(4, value.length * size * 0.52));
-      const barHeight = Math.max(2, size * (weight >= 600 ? 0.38 : 0.3));
-      const left = anchor === "end" ? x - barWidth : anchor === "middle" ? x - barWidth / 2 : x;
-      drawing.rect(barWidth, barHeight).move(left, y + size * 0.48).radius(barHeight / 2).fill(color);
+      const text = drawing.plain(value)
+        .font({ family: "Arial, sans-serif", size, weight })
+        .fill(color)
+        .attr({ x, y: y + size });
+      if (anchor) text.attr({ "text-anchor": anchor });
     };
     const short = (value: string, limit: number) => value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
     const card = (x: number, y: number, w: number, h: number, title: string, detail?: string) => {
