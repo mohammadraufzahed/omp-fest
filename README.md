@@ -120,8 +120,14 @@ shows the expected detail; its screen content is an example, not a template to c
 <camp>/.ompfest/plans/feature.references/pages/results/wireframe.svg
 ```
 
-The plan uses the unchanged `STRUCTURE.md` syntax. Once approved, the agent
-calls `fest_plan` with `referencesDir` pointing to the matching `.references`
+The plan uses the unchanged `STRUCTURE.md` syntax.
+
+Before writing files, `fest_plan` dry-runs the parser and reports phase, sequence,
+and task counts. Use the exact hierarchy markers: `- **Phase 1:** IMPLEMENTATION
+(implementation)`, `- Sequence 1: ...`, and `- Task 1: ...`. Phase names are
+single tokens (letters, digits, underscores; no spaces or hyphens). A zero-phase
+preview fails without creating or deleting festival files.
+After approval, the agent calls `fest_plan` with `referencesDir` pointing to the matching `.references`
 directory (omit it for text-only plans). The extension copies only the two
 reviewed files per page into `<festival>/references/pages/<slug>/`, rejecting
 symlinks, raw screenshots and active/external SVG content. The agent then adds

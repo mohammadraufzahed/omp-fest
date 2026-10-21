@@ -27,12 +27,21 @@ async function setup() {
   await writeFile(plan, "# Festival Structure");
   await writeFile(join(page, "PAGE.md"), PAGE);
   await writeFile(join(page, "wireframe.svg"), SVG);
-  const scaffoldFromPlan = vi.fn(async () => {
-      await mkdir(sequence, { recursive: true });
-      await writeFile(join(festival, "fest.yaml"), "id: feature\n");
-      await writeFile(join(sequence, "01_results.md"), TASK);
-      await writeFile(join(sequence, "SEQUENCE_GOAL.md"), "---\nfest_tracking: true\n---\n");
-      return JSON.stringify({ ok: true, festival_dir: festival });
+  const scaffoldFromPlan = vi.fn(async (_campRoot: string, options: { name: string; plan: string; dest?: string; dryRun?: boolean }) => {
+    const result = {
+      ok: true,
+      festival_dir: festival,
+      phases_created: 1,
+      sequences_created: 1,
+      tasks_created: 1,
+      dry_run: options.dryRun === true,
+    };
+    if (options.dryRun) return JSON.stringify(result);
+    await mkdir(sequence, { recursive: true });
+    await writeFile(join(festival, "fest.yaml"), "id: feature\n");
+    await writeFile(join(sequence, "01_results.md"), TASK);
+    await writeFile(join(sequence, "SEQUENCE_GOAL.md"), "---\nfest_tracking: true\n---\n");
+    return JSON.stringify(result);
   });
   const promote = vi.fn(() => Promise.resolve("ok"));
   const taskComplete = vi.fn(() => Promise.resolve({ ok: true, output: "done" }));
@@ -95,7 +104,29 @@ describe("visual planning tool handoff", () => {
       baseRevision: impact.baseRevision, proposalRevision: impact.proposalRevision });
     expect(revised.kind).toBe("references_revised");
     expect(await readFile(join(festival, "references", "pages", "results", "wireframe.svg"), "utf8")).toContain("Find</text>");
+    expect(scaffoldFromPlan).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not create or delete a festival when dry-run finds no phases", async () => {
+    const { festival, plan, scaffoldFromPlan, call } = await setup();
+    await mkdir(festival, { recursive: true });
+    const existingFile = join(festival, "FESTIVAL_GOAL.md");
+    await writeFile(existingFile, "Keep existing plan data");
+    scaffoldFromPlan.mockImplementationOnce(() => Promise.resolve(JSON.stringify({
+      ok: true,
+      festival_dir: festival,
+      phases_created: 0,
+      sequences_created: 0,
+      tasks_created: 0,
+      dry_run: true,
+    })));
+
+    const result = await call("fest_plan", { name: "feature", plan });
+    expect(result.kind).toBe("plan_failed");
+    expect(result.counts).toEqual({ phases: 0, sequences: 0, tasks: 0 });
     expect(scaffoldFromPlan).toHaveBeenCalledTimes(1);
+    expect(scaffoldFromPlan.mock.calls[0]?.[1].dryRun).toBe(true);
+    expect(await readFile(existingFile, "utf8")).toBe("Keep existing plan data");
   });
 
   it("scaffolds references, validates task links and supplies page notes to next and parallel", async () => {

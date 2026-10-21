@@ -8,7 +8,7 @@
  * coding-agent package installed).
  */
 import { basename, join } from "node:path";
-import { readFile, readdir, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
@@ -53,6 +53,24 @@ interface ToolContextLike {
 
 interface ToolResult {
   content: { type: string; text: string }[];
+}
+
+interface ScaffoldPlanResult {
+  ok?: boolean;
+  error?: string;
+  festival_dir?: string;
+  phases_created?: number;
+  sequences_created?: number;
+  tasks_created?: number;
+  dry_run?: boolean;
+}
+
+function parseScaffoldPlanResult(output: string): ScaffoldPlanResult | undefined {
+  try {
+    return JSON.parse(output) as ScaffoldPlanResult;
+  } catch {
+    return undefined;
+  }
 }
 
 function textResult(payload: unknown): ToolResult {
@@ -485,12 +503,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     label: "Fest Plan (Scaffold From Plan)",
     description:
       "Generate a festival from a STRUCTURE.md plan doc the model wrote after interviewing the human. " +
-      "Runs `fest scaffold from-plan --dest planning`, stamps fest_working_dir into every sequence " +
-      "(the scaffold omits it and fest_next refuses without it), seeds FESTIVAL_RULES.md from the " +
-      "camp template plus any constraints the human stated (pass rules:), and applies quality gates. " +
-      "Optional referencesDir installs the matching .references directory beside the STRUCTURE.md as festival references. " +
-      "Pass workingDir (camp-relative project path) — ask the human during the interview when the " +
-      "camp has multiple projects. Fails loudly when the plan doc scaffolded zero sequences.",
+      "Preflights with `fest scaffold from-plan --dry-run`, creates nothing if that parser finds zero phases, " +
+      "and never deletes existing files on failure. On success, scaffolds under `planning`, stamps " +
+      "fest_working_dir into every sequence, seeds FESTIVAL_RULES.md, and applies quality gates. " +
+      "Optional referencesDir installs the matching .references directory beside STRUCTURE.md. " +
+      "Pass workingDir (camp-relative project path) when the camp has multiple projects. " +
+      "Reports parser phase/sequence/task counts.",
     parameters: z.object({
       name: z.string().describe("Festival name/slug, e.g. 'prenatal-form-groups'"),
       plan: z.string().describe("Absolute path to the STRUCTURE.md plan document"),
@@ -547,47 +565,75 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           return textResult({ kind: "plan_failed", error: String(error) });
         }
       }
-      const output = await deps.fest.scaffoldFromPlan(root, params);
-      deps.detect.bustCache?.();
-      let parsed: { ok?: boolean; error?: string; festival_dir?: string } | undefined;
-      try {
-        parsed = JSON.parse(output) as typeof parsed;
-      } catch {
-        parsed = undefined;
-      }
-      if (parsed?.ok === false) {
+      const shapeHint =
+        "Use '# Festival Structure', '## Festival Goal', and '## Hierarchy', then exact list syntax: " +
+        "'- **Festival:** name', '  - **Phase 1:** IMPLEMENTATION (implementation)', " +
+        "'    - Sequence 1: name', '      - Task 1: title'. Phase names must be one word; no spaces or hyphens.";
+      const previewOutput = await deps.fest.scaffoldFromPlan(root, { ...params, dryRun: true });
+      let output = previewOutput;
+      let parsed = parseScaffoldPlanResult(previewOutput);
+      const hasCounts = (
+        result: ScaffoldPlanResult | undefined,
+      ): result is ScaffoldPlanResult & {
+        phases_created: number;
+        sequences_created: number;
+        tasks_created: number;
+      } =>
+        result !== undefined &&
+        Number.isSafeInteger(result.phases_created) &&
+        Number.isSafeInteger(result.sequences_created) &&
+        Number.isSafeInteger(result.tasks_created);
+      if (parsed?.ok !== true || !hasCounts(parsed)) {
         return textResult({
           kind: "plan_failed",
-          error: parsed.error ?? output,
-          hint:
-            "The STRUCTURE.md didn't parse. Rewrite it to the exact shape — '# Festival Structure' / " +
-            "'## Festival Goal' / '## Hierarchy' headers, then list items: '- **Festival:** name', " +
-            "'  - **Phase 1:** name (type)', '    - Sequence 1: name', '      - Task 1: title' — then call fest_plan again.",
+          error: parsed?.error ?? "Plan dry-run returned no valid scaffold counts; no festival was created.",
+          output: previewOutput,
+          hint: shapeHint,
         });
       }
-      const festId = parsed?.festival_dir ? basename(parsed.festival_dir) : params.name;
-      const festivalDir = parsed?.festival_dir;
-      if (bundle && !festivalDir && params.dryRun !== true) {
-        return textResult({ kind: "plan_failed", error: "Scaffold did not report a festival directory; visual references were not installed", output });
+      if (parsed.phases_created === 0) {
+        return textResult({
+          kind: "plan_failed",
+          error: "Plan dry-run found zero phases, sequences, and tasks; no festival was created.",
+          counts: {
+            phases: parsed.phases_created,
+            sequences: parsed.sequences_created,
+            tasks: parsed.tasks_created,
+          },
+          output: previewOutput,
+          hint: shapeHint,
+        });
       }
-      if (festivalDir && params.dryRun !== true) {
-        const sequences = await readdir(festivalDir).catch(() => [] as string[]);
-        const hasWork = sequences.some((phase) => /^\d{3}_/.test(phase));
-        if (!hasWork) {
-          // The doc didn't match the STRUCTURE.md grammar — fest scaffolds an
-          // empty festival but still reports ok. Remove the stub so retries
-          // don't leave ghost festivals behind.
-          await rm(festivalDir, { recursive: true, force: true });
-          deps.detect.bustCache?.();
+      if (params.dryRun !== true) {
+        output = await deps.fest.scaffoldFromPlan(root, params);
+        deps.detect.bustCache?.();
+        parsed = parseScaffoldPlanResult(output);
+        if (parsed?.ok !== true || !hasCounts(parsed)) {
           return textResult({
             kind: "plan_failed",
-            error: `scaffold produced an empty festival at ${festivalDir} — the STRUCTURE.md parsed but yielded no phases/sequences`,
-            hint:
-              "Rewrite the doc to the exact shape — '# Festival Structure' / " +
-              "'## Festival Goal' / '## Hierarchy' headers, then list items: '- **Festival:** name', " +
-              "'  - **Phase 1:** name (type)', '    - Sequence 1: name', '      - Task 1: title' — then call fest_plan again. The empty stub was deleted.",
+            error: parsed?.error ?? "Scaffold returned no valid counts; existing files were left untouched.",
+            output,
+            hint: shapeHint,
           });
         }
+        if (parsed.phases_created === 0) {
+          return textResult({
+            kind: "plan_failed",
+            error: "Scaffold returned zero phases; any existing files were left untouched.",
+            counts: {
+              phases: parsed.phases_created,
+              sequences: parsed.sequences_created,
+              tasks: parsed.tasks_created,
+            },
+            output,
+            hint: shapeHint,
+          });
+        }
+      }
+      const festId = parsed.festival_dir ? basename(parsed.festival_dir) : params.name;
+      const festivalDir = parsed.festival_dir;
+      if (bundle && !festivalDir && params.dryRun !== true) {
+        return textResult({ kind: "plan_failed", error: "Scaffold did not report a festival directory; visual references were not installed", output });
       }
       const { dir: workingDir, candidates: projectCandidates } = await resolveWorkingDir(
         root,
@@ -626,7 +672,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       return textResult({
         kind: "plan_scaffolded",
         dryRun: params.dryRun === true,
-        output,
+        counts: {
+          phases: parsed.phases_created,
+          sequences: parsed.sequences_created,
+          tasks: parsed.tasks_created,
+        },
         ...(festivalDir ? { festivalDir } : {}),
         ...(bundle ? { visualReferences: bundle.pages.map((page) => `references/pages/${page}/PAGE.md`) } : {}),
         ...(rulesSeed ? { rules: { ...rulesSeed, gateFilesStamped: gateRules } } : {}),
