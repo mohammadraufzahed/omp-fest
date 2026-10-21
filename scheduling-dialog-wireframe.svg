@@ -1,0 +1,271 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2192 1680">
+  <title>Scheduling dialog - component, style, and state wireframe</title>
+  <desc>Low-fidelity annotated reconstruction of the supplied scheduling modal. The UI uses role-sized bars instead of Persian glyphs. The SVG includes the observed selected-row variants, component style tokens, layout measurements, and explicit unknown motion states. Source image: 1722 by 1376 pixels, displayed at 1568 by 1253 pixels.</desc>
+  <rect id="sheet.background" x="0" y="0" width="2192" height="1680" fill="#FFFFFF"/>
+  <g id="sheet.header" font-family="monospace" fill="#34445E">
+    <text x="24" y="21" font-size="16" font-weight="bold">SCHEDULING MODAL - COMPONENT / STYLE / STATE WIREFRAME</text>
+    <text x="2168" y="21" text-anchor="end" font-size="13">SOURCE 1722 x 1376 px | displayed 1568 x 1253 px at 0.91x | measurements approximate</text>
+    <line x1="24" y1="40" x2="2168" y2="40" stroke="#D9DEEA" stroke-width="1.2"/>
+  </g>
+
+  <g id="screen.frame">
+    <rect id="screen.backdrop" x="24" y="32" width="1722" height="1376" fill="#E5E7EC" stroke="#AEB6C3" stroke-width="1.5"/>
+    <rect id="dialog.root" x="64" y="64" width="1646" height="1296" rx="32" fill="#FFFFFF" stroke="#B9C6D8" stroke-width="1.8"/>
+
+    <g id="dialog.header">
+      <g id="dialog.close" fill="none" stroke="#B6B8BB" stroke-width="3.5" stroke-linecap="round">
+        <path d="M96 106l22 22M118 106l-22 22"/>
+      </g>
+      <rect id="dialog.title.text-placeholder" x="1366" y="101" width="246" height="34" rx="5" fill="#36479A"/>
+      <circle id="dialog.title.status-mark" cx="1652" cy="119" r="15" fill="#36479A"/>
+    </g>
+
+    <g id="warning.banner">
+      <rect id="warning.surface" x="116" y="177" width="1554" height="140" rx="12" fill="#FFF9F2"/>
+      <rect id="warning.icon.background" x="1565" y="202" width="30" height="30" rx="5" fill="#C96A18"/>
+      <path id="warning.icon.mark" d="M1573 211h14M1573 218h10" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round"/>
+      <rect id="warning.title.text-placeholder" x="1459" y="210" width="88" height="20" rx="4" fill="#C96A18"/>
+      <rect id="warning.detail.text-placeholder" x="1003" y="264" width="584" height="24" rx="4" fill="#C96A18"/>
+    </g>
+
+    <g id="recipients.section">
+      <rect id="recipients.container" x="123" y="349" width="1545" height="520" rx="8" fill="#FFFFFF" stroke="#B9C6D8" stroke-width="1.8"/>
+      <path id="recipients.header.surface" d="M131 350h1529v84H131z" fill="#F3F4FA"/>
+      <line id="recipients.header.divider" x1="123" y1="434" x2="1668" y2="434" stroke="#D7DCE6" stroke-width="1.3"/>
+      <rect id="recipients.header.text-placeholder" x="1307" y="374" width="325" height="24" rx="4" fill="#85888D"/>
+      <rect id="recipients.scrollbar" x="141" y="455" width="14" height="226" rx="7" fill="#D3D8E4"/>
+
+      <g id="recipients.row-01">
+        <rect id="recipients.row-01.card" x="202" y="471" width="1390" height="93" rx="13" fill="#F4F5FB" stroke="#DFE3EB" stroke-width="1.5"/>
+        <g id="recipients.row-01.phone">
+          <rect id="recipients.row-01.phone.value-placeholder" x="491" y="507" width="176" height="21" rx="4" fill="#444444"/>
+          <rect id="recipients.row-01.phone.label-placeholder" x="688" y="508" width="110" height="18" rx="4" fill="#85888D"/>
+        </g>
+        <g id="recipients.row-01.name">
+          <rect id="recipients.row-01.name.value-placeholder" x="1175" y="504" width="160" height="26" rx="4" fill="#444444"/>
+          <rect id="recipients.row-01.name.label-placeholder" x="1352" y="508" width="67" height="18" rx="4" fill="#85888D"/>
+        </g>
+        <g id="recipients.row-01.avatar">
+          <circle id="recipients.row-01.avatar.background" cx="1444" cy="517" r="25" fill="#D7DFEF"/>
+          <circle id="recipients.row-01.avatar.head" cx="1444" cy="511" r="8" fill="#FFFFFF"/>
+          <path id="recipients.row-01.avatar.shoulders" d="M1429 535c1-9 7-14 15-14s14 5 15 14v3h-30z" fill="#FFFFFF"/>
+        </g>
+        <g id="recipients.row-01.checkbox">
+          <rect id="recipients.row-01.checkbox.box" x="1555" y="499" width="36" height="36" rx="3" fill="#36479A"/>
+          <path id="recipients.row-01.checkbox.check" d="M1564 517l7 7 14-16" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+      </g>
+
+      <g id="recipients.row-02">
+        <rect id="recipients.row-02.card" x="202" y="603" width="1390" height="93" rx="13" fill="#F4F5FB" stroke="#DFE3EB" stroke-width="1.5"/>
+        <g id="recipients.row-02.phone">
+          <rect id="recipients.row-02.phone.value-placeholder" x="491" y="639" width="176" height="21" rx="4" fill="#444444"/>
+          <rect id="recipients.row-02.phone.label-placeholder" x="688" y="640" width="110" height="18" rx="4" fill="#85888D"/>
+        </g>
+        <g id="recipients.row-02.name">
+          <rect id="recipients.row-02.name.value-placeholder" x="1197" y="636" width="138" height="26" rx="4" fill="#444444"/>
+          <rect id="recipients.row-02.name.label-placeholder" x="1352" y="640" width="67" height="18" rx="4" fill="#85888D"/>
+        </g>
+        <g id="recipients.row-02.avatar">
+          <circle id="recipients.row-02.avatar.background" cx="1444" cy="649" r="25" fill="#D7DFEF"/>
+          <circle id="recipients.row-02.avatar.head" cx="1444" cy="643" r="8" fill="#FFFFFF"/>
+          <path id="recipients.row-02.avatar.shoulders" d="M1429 667c1-9 7-14 15-14s14 5 15 14v3h-30z" fill="#FFFFFF"/>
+        </g>
+        <g id="recipients.row-02.checkbox">
+          <rect id="recipients.row-02.checkbox.box" x="1555" y="631" width="36" height="36" rx="3" fill="#36479A"/>
+          <path id="recipients.row-02.checkbox.check" d="M1564 649l7 7 14-16" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+      </g>
+
+      <g id="recipients.row-03.warning-selected">
+        <rect id="recipients.row-03.card" x="202" y="723" width="1390" height="93" rx="13" fill="#FFFCF8" stroke="#C96A18" stroke-width="2.2"/>
+        <g id="recipients.row-03.phone">
+          <rect id="recipients.row-03.phone.value-placeholder" x="491" y="759" width="176" height="21" rx="4" fill="#444444"/>
+          <rect id="recipients.row-03.phone.label-placeholder" x="688" y="760" width="110" height="18" rx="4" fill="#85888D"/>
+        </g>
+        <g id="recipients.row-03.name">
+          <rect id="recipients.row-03.name.value-placeholder" x="1110" y="756" width="225" height="26" rx="4" fill="#444444"/>
+          <rect id="recipients.row-03.name.label-placeholder" x="1352" y="760" width="67" height="18" rx="4" fill="#85888D"/>
+        </g>
+        <g id="recipients.row-03.avatar">
+          <circle id="recipients.row-03.avatar.background" cx="1444" cy="769" r="25" fill="#D7DFEF"/>
+          <circle id="recipients.row-03.avatar.head" cx="1444" cy="763" r="8" fill="#FFFFFF"/>
+          <path id="recipients.row-03.avatar.shoulders" d="M1429 787c1-9 7-14 15-14s14 5 15 14v3h-30z" fill="#FFFFFF"/>
+        </g>
+        <g id="recipients.row-03.checkbox">
+          <rect id="recipients.row-03.checkbox.box" x="1555" y="751" width="36" height="36" rx="3" fill="#C96A18"/>
+          <path id="recipients.row-03.checkbox.check" d="M1564 769l7 7 14-16" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+        </g>
+      </g>
+    </g>
+
+    <g id="date-range.section">
+      <rect id="date-range.container" x="126" y="902" width="1546" height="314" rx="14" fill="#FBFBFC" stroke="#E3E6EB" stroke-width="2"/>
+      <rect id="date-range.to.label-placeholder" x="968" y="926" width="150" height="19" rx="4" fill="#85888D"/>
+      <rect id="date-range.from.label-placeholder" x="1478" y="926" width="145" height="19" rx="4" fill="#85888D"/>
+
+      <g id="date-range.to.input">
+        <rect id="date-range.to.field" x="671" y="987" width="470" height="83" rx="7" fill="#FFFFFF" stroke="#B9C8DA" stroke-width="2"/>
+        <rect id="date-range.to.value-placeholder" x="867" y="1018" width="220" height="22" rx="4" fill="#444444"/>
+        <g id="date-range.to.calendar-icon" fill="none" stroke="#36479A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="702" y="1013" width="26" height="25" rx="4"/>
+          <line x1="702" y1="1020" x2="728" y2="1020"/>
+          <line x1="709" y1="1009" x2="709" y2="1017"/>
+          <line x1="721" y1="1009" x2="721" y2="1017"/>
+          <path d="M709 1026h2m5 0h2m5 0h2m-16 6h2m5 0h2m5 0h2"/>
+        </g>
+      </g>
+
+      <g id="date-range.from.input">
+        <rect id="date-range.from.field" x="1166" y="987" width="467" height="83" rx="7" fill="#FFFFFF" stroke="#B9C8DA" stroke-width="2"/>
+        <rect id="date-range.from.value-placeholder" x="1390" y="1018" width="220" height="22" rx="4" fill="#444444"/>
+        <g id="date-range.from.calendar-icon" fill="none" stroke="#36479A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="1197" y="1013" width="26" height="25" rx="4"/>
+          <line x1="1197" y1="1020" x2="1223" y2="1020"/>
+          <line x1="1204" y1="1009" x2="1204" y2="1017"/>
+          <line x1="1216" y1="1009" x2="1216" y2="1017"/>
+          <path d="M1204 1026h2m5 0h2m5 0h2m-16 6h2m5 0h2m5 0h2"/>
+        </g>
+      </g>
+
+      <g id="date-range.helper">
+        <circle id="date-range.helper.info-ring" cx="1617" cy="1141" r="16" fill="none" stroke="#6C4DDB" stroke-width="2.5"/>
+        <path id="date-range.helper.info-mark" d="M1617 1136v1m0 5v6" fill="none" stroke="#6C4DDB" stroke-width="2.6" stroke-linecap="round"/>
+        <rect id="date-range.helper.text-placeholder" x="420" y="1130" width="1174" height="22" rx="4" fill="#6C4DDB"/>
+      </g>
+    </g>
+
+    <g id="dialog.actions">
+      <g id="dialog.action.primary">
+        <rect id="dialog.action.primary.button" x="125" y="1248" width="267" height="81" rx="14" fill="#39489A"/>
+        <rect id="dialog.action.primary.label-placeholder" x="211" y="1278" width="95" height="20" rx="4" fill="#FFFFFF"/>
+      </g>
+      <g id="dialog.action.secondary">
+        <rect id="dialog.action.secondary.button" x="400" y="1248" width="269" height="81" rx="14" fill="#FFFFFF" stroke="#39489A" stroke-width="2"/>
+        <rect id="dialog.action.secondary.label-placeholder" x="486" y="1278" width="96" height="20" rx="4" fill="#39489A"/>
+      </g>
+    </g>
+  </g>
+
+  <g id="annotation.rail" font-family="monospace" fill="#34445E">
+    <line x1="1762" y1="64" x2="1762" y2="1408" stroke="#D9DEEA" stroke-width="1.5"/>
+    <text x="1780" y="73" font-size="17" font-weight="bold" fill="#6C4DDB">COMPONENT / STYLE INVENTORY</text>
+    <text x="1780" y="96" font-size="12">One static image; source text represented by bars.</text>
+    <line x1="1780" y1="111" x2="2168" y2="111" stroke="#E2E6EE"/>
+
+    <text x="1780" y="138" font-size="15" fill="#6C4DDB">01  DIALOG CHROME</text>
+    <text x="1780" y="160" font-size="13">dialog.root: white, 1.8px cool-gray edge, r32</text>
+    <text x="1780" y="181" font-size="13">title: 246x34 blue bar + 30px status dot</text>
+    <text x="1780" y="202" font-size="13">close: 22px crossed strokes, muted gray</text>
+    <line x1="1780" y1="217" x2="2168" y2="217" stroke="#E2E6EE"/>
+
+    <text x="1780" y="243" font-size="15" fill="#6C4DDB">02  WARNING BANNER</text>
+    <text x="1780" y="265" font-size="13">1554x140; pale amber surface; 12px radius</text>
+    <text x="1780" y="286" font-size="13">30px amber icon; heading + one long text line</text>
+    <text x="1780" y="307" font-size="13">Warning reports 2 people in a named status.</text>
+    <line x1="1780" y1="322" x2="2168" y2="322" stroke="#E2E6EE"/>
+
+    <text x="1780" y="348" font-size="15" fill="#6C4DDB">03  RECIPIENT LIST</text>
+    <text x="1780" y="370" font-size="13">1545x520; pale 84px header; 10 selected total</text>
+    <text x="1780" y="391" font-size="13">3 rows visible; scrollbar at the left edge</text>
+    <text x="1780" y="412" font-size="13">Each: name + phone label/value, avatar, check</text>
+    <text x="1780" y="433" font-size="13">Row about 1390x93; visible gaps about 40/29px</text>
+    <text x="1780" y="454" font-size="13">Avatar 50px; checked control 36px; row radius 13</text>
+    <line x1="1780" y1="469" x2="2168" y2="469" stroke="#E2E6EE"/>
+
+    <text x="1780" y="495" font-size="15" fill="#6C4DDB">04  OBSERVED ROW STATES</text>
+    <g id="variant.recipient.standard-selected">
+      <rect x="1780" y="511" width="180" height="52" rx="8" fill="#F4F5FB" stroke="#DFE3EB" stroke-width="1.5"/>
+      <rect x="1792" y="532" width="56" height="7" rx="2" fill="#444444"/>
+      <rect x="1855" y="532" width="30" height="6" rx="2" fill="#85888D"/>
+      <circle cx="1912" cy="537" r="11" fill="#D7DFEF"/>
+      <path d="M1906 541c1-4 3-6 6-6s5 2 6 6" fill="#FFFFFF"/>
+      <rect x="1932" y="526" width="21" height="21" rx="2" fill="#36479A"/>
+      <path d="M1937 537l4 4 8-9" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="1780" y="582" font-size="12">standard selected</text>
+    </g>
+    <g id="variant.recipient.warning-selected">
+      <rect x="1981" y="511" width="187" height="52" rx="8" fill="#FFFCF8" stroke="#C96A18" stroke-width="2"/>
+      <rect x="1992" y="532" width="53" height="7" rx="2" fill="#444444"/>
+      <rect x="2051" y="532" width="28" height="6" rx="2" fill="#85888D"/>
+      <circle cx="2104" cy="537" r="11" fill="#D7DFEF"/>
+      <path d="M2098 541c1-4 3-6 6-6s5 2 6 6" fill="#FFFFFF"/>
+      <rect x="2125" y="526" width="21" height="21" rx="2" fill="#C96A18"/>
+      <path d="M2130 537l4 4 8-9" fill="none" stroke="#FFFFFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="1981" y="582" font-size="12">amber selected</text>
+    </g>
+    <text x="1780" y="605" font-size="12">Same row anatomy; only the caution styling changes.</text>
+    <line x1="1780" y1="620" x2="2168" y2="620" stroke="#E2E6EE"/>
+
+    <text x="1780" y="646" font-size="15" fill="#6C4DDB">05  DATE RANGE + ACTIONS</text>
+    <text x="1780" y="668" font-size="13">Date block 1546x314; two filled fields ~470x83</text>
+    <text x="1780" y="689" font-size="13">White fields; 2px blue-gray edge; 7px radius</text>
+    <text x="1780" y="710" font-size="13">Calendar icons 26px; values are dark text bars</text>
+    <text x="1780" y="731" font-size="13">Helper line violet; info ring 32px</text>
+    <text x="1780" y="752" font-size="13">Primary 267x81 filled; secondary 269x81 outlined</text>
+    <line x1="1780" y1="767" x2="2168" y2="767" stroke="#E2E6EE"/>
+
+    <text x="1780" y="793" font-size="15" fill="#6C4DDB">06  STATE / MOTION COVERAGE</text>
+    <text x="1780" y="815" font-size="13">Observed: checked rows, amber row, filled dates,</text>
+    <text x="1780" y="836" font-size="13">warning visible, primary and secondary enabled.</text>
+    <text x="1780" y="857" font-size="13">Not shown: hover, focus, pressed, picker-open,</text>
+    <text x="1780" y="878" font-size="13">loading, or any time-based transition.</text>
+    <g id="motion.evidence.track">
+      <rect x="1780" y="894" width="118" height="38" rx="5" fill="#F4F5FB" stroke="#B9C6D8" stroke-width="1.3"/>
+      <rect x="1792" y="909" width="54" height="8" rx="2" fill="#444444"/>
+      <text x="1854" y="918" font-size="11">frame A</text>
+      <line x1="1905" y1="913" x2="1940" y2="913" stroke="#6C4DDB" stroke-width="2"/>
+      <path d="M1940 913l-8-5v10z" fill="#6C4DDB"/>
+      <rect x="1950" y="894" width="218" height="38" rx="5" fill="#FFFFFF" stroke="#B9C6D8" stroke-width="1.3" stroke-dasharray="5 4"/>
+      <text x="1963" y="918" font-size="11" fill="#85888D">next frame not supplied</text>
+    </g>
+    <text x="1780" y="953" font-size="12">Timing/easing: unknown; no motion inferred from a still.</text>
+    <line x1="1780" y1="968" x2="2168" y2="968" stroke="#E2E6EE"/>
+
+    <text x="1780" y="994" font-size="15" fill="#6C4DDB">07  EXTRACTED STYLE TOKENS</text>
+    <rect x="1780" y="1008" width="18" height="14" fill="#FFFFFF" stroke="#B9C6D8"/>
+    <text x="1808" y="1020" font-size="12">dialog surface #FFFFFF</text>
+    <rect x="1780" y="1030" width="18" height="14" fill="#F4F5FB" stroke="#DFE3EB"/>
+    <text x="1808" y="1042" font-size="12">row surface #F4F5FB</text>
+    <rect x="1780" y="1052" width="18" height="14" fill="#B9C6D8"/>
+    <text x="1808" y="1064" font-size="12">container edge #B9C6D8</text>
+    <rect x="1780" y="1074" width="18" height="14" fill="#444444"/>
+    <text x="1808" y="1086" font-size="12">primary text bar #444444</text>
+    <rect x="1780" y="1096" width="18" height="14" fill="#85888D"/>
+    <text x="1808" y="1108" font-size="12">secondary label #85888D</text>
+    <rect x="1780" y="1118" width="18" height="14" fill="#36479A"/>
+    <text x="1808" y="1130" font-size="12">selected/action #36479A</text>
+    <rect x="1780" y="1140" width="18" height="14" fill="#C96A18"/>
+    <text x="1808" y="1152" font-size="12">warning/exception #C96A18</text>
+    <rect x="1780" y="1162" width="18" height="14" fill="#6C4DDB"/>
+    <text x="1808" y="1174" font-size="12">helper/callout #6C4DDB</text>
+    <line x1="1780" y1="1190" x2="2168" y2="1190" stroke="#E2E6EE"/>
+
+    <text x="1780" y="1216" font-size="15" fill="#6C4DDB">08  COMPONENT STYLE NOTES</text>
+    <text x="1780" y="1238" font-size="12">Rows: radius 13; 1.5px border; body bars #444.</text>
+    <text x="1780" y="1258" font-size="12">Labels #858; values darker/bolder by bar weight.</text>
+    <text x="1780" y="1278" font-size="12">Avatar: 50px circle, pale blue ground, white bust.</text>
+    <text x="1780" y="1298" font-size="12">Checks: 36px square, 3px radius, 4px white tick.</text>
+    <text x="1780" y="1318" font-size="12">Buttons: 14px radius; filled vs outlined hierarchy.</text>
+    <text x="1780" y="1338" font-size="12">All original-language UI copy is intentionally omitted.</text>
+    <text x="1780" y="1370" font-size="11" fill="#66738B">Colors and radii are visual estimates from the image.</text>
+  </g>
+
+  <g id="spacing-ledger" font-family="monospace" fill="#34445E">
+    <line x1="24" y1="1456" x2="2168" y2="1456" stroke="#BFC9D8" stroke-width="1.4"/>
+    <text x="30" y="1486" font-size="17" font-weight="bold" fill="#6C4DDB">SECTION GUTTERS - SOURCE PIXELS</text>
+    <text x="30" y="1515" font-size="14">Warning banner to recipients list</text><text x="535" y="1515" font-size="14">~32 px</text>
+    <text x="30" y="1541" font-size="14">Recipients list to date-range block</text><text x="535" y="1541" font-size="14">~33 px</text>
+    <text x="30" y="1567" font-size="14">Date-range block to footer actions</text><text x="535" y="1567" font-size="14">~32 px</text>
+    <text x="30" y="1593" font-size="14">Dialog inset from source frame</text><text x="535" y="1593" font-size="14">x~40 / y~32 px</text>
+    <text x="30" y="1619" font-size="14">Main dialog bounds (source)</text><text x="535" y="1619" font-size="14">~1646 x 1296 px</text>
+
+    <line x1="760" y1="1480" x2="760" y2="1636" stroke="#D9DEEA"/>
+    <text x="800" y="1486" font-size="17" font-weight="bold" fill="#6C4DDB">COMPONENT GEOMETRY - SOURCE PIXELS</text>
+    <text x="800" y="1515" font-size="14">Recipient panel ~1545 x 520; header ~84px high</text>
+    <text x="800" y="1541" font-size="14">Row card ~1390 x 93; row gaps ~40px and ~29px</text>
+    <text x="800" y="1567" font-size="14">Date block ~1546 x 314; each field ~470 x 83</text>
+    <text x="800" y="1593" font-size="14">Primary button ~267 x 81; secondary ~269 x 81</text>
+    <text x="800" y="1619" font-size="14">One still only: no hover, transition, duration or easing data.</text>
+  </g>
+</svg>

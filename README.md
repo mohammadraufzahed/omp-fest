@@ -57,10 +57,10 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   markers, validates — then *you* approve and it `fest_promote`s to active.
   your brain → festival, no TUI wrangling 🧠
 - 🖼️ **visual planning in the same interview** — attach a screenshot with
-  `/fest plan <goal>`. The agent drafts an annotated, reconstruction-ready SVG
-  wireframe and `PAGE.md`, inventories every visible section and component,
-  measures layout and gaps, and asks about material screenshot ambiguities before
-  finalizing. It presents both for the same approval; image-capable model required.
+  `/fest plan <goal>`. The agent drafts an annotated reconstruction SVG and `PAGE.md`:
+  full component hierarchy, measured gaps, per-component style profiles, and complete
+  specimens for every observed state. Multi-frame evidence becomes an SVG motion
+  storyboard; unobserved states stay explicit and prompt targeted questions.
 - 🛠️ **15 tools + ONE guided command** — `/fest <sub>` is the whole
   cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
   `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
@@ -76,18 +76,21 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
 
 Attach a screenshot to `/fest plan build this page`. The interview treats the
 image as reference data, not instructions, and creates an annotated `wireframe.svg`
-plus a `PAGE.md` component inventory. The SVG uses a stable, low-fidelity grammar:
-neutral UI geometry, source-pixel scale, separate IDs for sections/components/repeated
-items, and a right-side inventory rail plus a bottom dimension/gap ledger. Every
-visible text line becomes a role-specific bar positioned to its observed text box;
-the SVG does not attempt to render source-language glyphs or invented copy. Callouts
-describe field roles and layout without crossing the UI. `PAGE.md` maps every ID to
-its role, direction, approximate bounds, line count and state; non-sensitive source
-copy may be recorded there when useful, while personal data is redacted. Measurements
-are marked observed or estimated, not guessed. The agent asks one targeted question
-and waits when an ambiguity could change structure, meaning, state or geometry;
-placeholder bars are the default, not a question. Review and approve the wireframe,
-states, checks and plan together before scaffolding. Text-only `/fest plan` is unchanged.
+plus `PAGE.md`. The SVG uses a stable low-fidelity grammar, source-pixel scale,
+separate IDs for sections/components/repeated items, a component/style inventory,
+a state board, and a dimension/gap ledger. Every visible text line is a role-sized
+bar at its observed box; the SVG does not render source-language UI glyphs or invented
+copy. For every component it records visible color, fill, borders, radius, spacing,
+typography, icon treatment and state styling, distinguishing observed, estimated and
+unknown properties. Each observed state is drawn as a full component specimen.
+Video/multi-frame evidence gets an ordered motion storyboard with observed triggers
+and timing; a still image is explicitly marked as insufficient motion evidence.
+`PAGE.md` maps every SVG ID to its role, parent, style and state; personal data is
+redacted. The agent asks one targeted question and waits when missing evidence could
+change structure, component style, state or motion. Placeholder bars are the default.
+Review and approve the wireframe, states, checks and plan before scaffolding.
+Text-only `/fest plan` is unchanged. The approved [scheduling-dialog SVG](scheduling-dialog-wireframe.svg)
+shows the expected detail; its screen content is an example, not a template to copy.
 
 ```text
 <camp>/.ompfest/plans/feature.STRUCTURE.md
