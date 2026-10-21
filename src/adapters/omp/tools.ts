@@ -682,7 +682,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           role: z.string().describe("Semantic role, never source copy or personal data"),
           category: z.string().optional().describe("Open-ended semantic section/category, e.g. header, billing filters, results table, or chart legend"),
           kind: z.string().describe("Open-ended semantic component kind; do not constrain this to a fixed component list"),
-          renderAs: z.enum(["rectangle", "text-bar", "line", "circle", "ellipse", "chevron", "checkbox"]).optional().describe("Canonical SVG drawing primitive for this node; omit to infer common legacy primitives or default to rectangle"),
+          renderAs: z.enum(["rectangle", "text-bar", "line", "circle", "ellipse", "chevron", "checkbox"]).optional().describe("Canonical SVG primitive; text-bar preserves measured width and centers an ink bar at about 20% of the text-box height"),
           x: z.number().describe("Left coordinate in source-image pixels"),
           y: z.number().describe("Top coordinate in source-image pixels"),
           width: z.number().describe("Width in source-image pixels"),

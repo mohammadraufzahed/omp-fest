@@ -339,6 +339,11 @@ function renderSvg(spec: WireframeSpec, auditWarnings: WireframeAuditWarning[]):
         drawing.path(`M ${x} ${y} L ${x + component.width / 2} ${y + component.height} L ${x + component.width} ${y}`)
           .fill("none").stroke({ color: stroke, width: strokeWidth, linecap: "round", linejoin: "round" })
           .attr({ id: component.id });
+      } else if (shape === "text-bar") {
+        const inkHeight = Math.min(component.height, Math.max(2, component.height * 0.2));
+        drawing.rect(component.width, inkHeight).move(x, y + (component.height - inkHeight) / 2)
+          .radius(Math.min(radius, inkHeight / 2)).fill(fill)
+          .stroke({ color: stroke, width: strokeWidth }).attr({ id: component.id });
       } else {
         drawing.rect(component.width, component.height).move(x, y).radius(radius).fill(fill)
           .stroke({ color: stroke, width: strokeWidth }).attr({ id: component.id });

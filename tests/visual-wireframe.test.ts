@@ -62,6 +62,10 @@ describe("fest_wireframe_create", () => {
     const svg = await readFile(result.svgPath, "utf8");
     const page = await readFile(result.pagePath, "utf8");
     validateWireframe(svg);
+    const nameBar = /<rect\b(?=[^>]*\bid="staff\.name")[^>]*>/.exec(svg)?.[0];
+    const nameBarHeight = Number(/\bheight="([^"]+)"/.exec(nameBar ?? "")?.[1]);
+    expect(nameBarHeight).toBeGreaterThan(0);
+    expect(nameBarHeight).toBeLessThan(params.spec.components[1]!.height);
     expect(svg.indexOf('id="dialog.panel"')).toBeLessThan(svg.indexOf('id="staff.checkbox"'));
     expect(svg).toContain('id="staff.checkbox"');
     expect(svg).toContain('id="variant.staff.checkbox.state"');
