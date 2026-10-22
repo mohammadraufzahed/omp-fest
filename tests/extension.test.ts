@@ -161,6 +161,8 @@ describe("ompFest extension", () => {
     const result = hook(event, ctx);
     expect(result?.text).toContain("build this page");
     expect(result?.text).toContain("wireframe.svg");
+    expect(result?.text).toContain("original viewport");
+    expect(result?.text).toContain("same route at the original viewport");
     expect(event.images).toEqual([screenshot]);
     expect(userMessages).toEqual([]);
     expect(hook({ ...event, text: "/fest next" }, ctx)).toBeUndefined();

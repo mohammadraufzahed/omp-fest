@@ -202,6 +202,20 @@ not perform image recognition itself: the calling model extracts the screenshot 
 inspects the target project, then passes those findings through the stable schema.
 Text-only `/fest plan` uses the structured flow above without visual fields. The approved [scheduling-dialog SVG](scheduling-dialog-wireframe.svg)
 shows the expected detail; its screen content is an example, not a template to copy.
+For plans that implement the reference in the app, record the target route/component,
+source crop and original viewport, existing assets/fonts/components, requested controls
+and interactions, and any responsive sizes to support. The image defines the visible
+design: preserve its non-sensitive copy, hierarchy, wrapping, proportions and crops;
+do not redesign, invent unseen sections or backend behavior, or silently substitute
+missing assets. Placeholder bars in the generated wireframe are annotation/privacy
+conventions, not a direction to replace real interface text.
+
+Implementation verification requires a running capture at the same route and original
+viewport after fonts and assets load. Compare to the reference, fix layout/proportions
+before typography, spacing, color and asset differences, then render again. Check
+requested sizes and controls. Mark visual evidence `verified` only with actual rendered
+comparison proof; otherwise record `untested` and the limitation.
+
 
 ```text
 <camp>/.ompfest/plans/feature.STRUCTURE.md
