@@ -129,6 +129,11 @@ fest_plan({
   // referencesDir: "<absolute camp>/.ompfest/plans/feature.references",
 });
 ```
+`workingDir` may also be an absolute path to a linked checkout outside the camp.
+When the checkout is linked inside the camp, either its camp-relative link or its
+absolute checkout path works. Inspection and task paths remain relative to that
+working directory and must resolve inside the checkout.
+
 
 Preview validates the contract, writes deterministic `STRUCTURE.md`, persists the
 structured spec and returns a `planRevision` digest. The human sees one concise

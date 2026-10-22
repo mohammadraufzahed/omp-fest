@@ -535,7 +535,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       action: z.enum(["preview", "scaffold"]).optional().describe("preview validates and writes planning artifacts only; scaffold consumes an approved preview"),
       spec: structuredPlanSchema(z).optional().describe("Structured plan required for preview; omit during scaffold"),
       approvedRevision: z.string().optional().describe("planRevision from the preview the human approved; required for scaffold"),
-      workingDir: z.string().optional().describe("Camp-relative project dir the festival targets, e.g. 'projects/api' — required when the camp has multiple projects"),
+      workingDir: z.string().optional().describe("Camp-relative project dir or an absolute path to a linked checkout; required when the camp has multiple projects"),
       rules: z.string().optional().describe("Constraints/rules the human agreed to during planning, as bullet lines — written verbatim into FESTIVAL_RULES.md so fest rules shows them"),
       referencesDir: z.string().optional().describe("Absolute <camp>/.ompfest/plans/<name>.references directory containing pages/<slug>/PAGE.md and wireframe.svg"),
       referenceAction: z.enum(["preview", "revise"]).optional().describe("preview renders the approved wireframe/notes and revision impact without scaffolding; revise updates an existing festival's references only after human approval"),

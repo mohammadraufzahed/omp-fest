@@ -227,12 +227,29 @@ describe("project and command evidence boundaries", () => {
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("within project");
   });
 
+  it("accepts camp-relative links and absolute paths to external project checkouts", async () => {
+    const { root, spec } = await fixture();
+    const external = await mkdtemp(join(tmpdir(), "linked-project-"));
+    roots.push(external);
+    await mkdir(join(external, "src"), { recursive: true });
+    await writeFile(join(external, "src", "feature.ts"), "export const enabled = false;\n");
+    await writeFile(join(external, "package.json"), JSON.stringify({ scripts: { test: "npm test" } }));
+    await symlink(external, join(root, "projects", "linked"));
+
+    const linked = await prepareStructuredPlan(root, "projects/linked", "feature", spec);
+    const absolute = await prepareStructuredPlan(root, external, "feature", spec);
+
+    expect(linked.preview).toContain("Project: projects/linked");
+    expect(absolute.preview).toContain(`Project: ${external}`);
+    expect(linked.counts).toEqual(absolute.counts);
+  });
+
   it("rejects absolute paths and a working directory outside camp", async () => {
     const { root, project, workingDir, spec } = await fixture();
     spec.inspection[0]!.path = join(project, "src", "feature.ts");
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("project-relative");
     spec.inspection[0]!.path = "src/feature.ts";
-    await expect(prepareStructuredPlan(root, "..", "feature", spec)).rejects.toThrow("within project");
+    await expect(prepareStructuredPlan(root, "..", "feature", spec)).rejects.toThrow("within camp");
   });
 
   it.each(["inspection", "existing", "evidence", "cwd"])("rejects nonexistent %s paths", async (field) => {

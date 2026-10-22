@@ -189,6 +189,18 @@ function projectPath(root: string, path: string, label: string): string {
   return absolute;
 }
 
+async function resolveProjectRoot(camp: string, workingDir: string): Promise<string> {
+  const candidate = isAbsolute(workingDir) ? resolve(workingDir) : resolve(camp, workingDir);
+  if (!isAbsolute(workingDir) && !inside(camp, candidate)) {
+    throw new Error("workingDir must stay within camp unless it is an absolute linked checkout path");
+  }
+  let canonical: string;
+  try { canonical = await realpath(candidate); }
+  catch { throw new Error(`workingDir does not exist: ${workingDir}`); }
+  if (!(await stat(canonical)).isDirectory()) throw new Error(`workingDir must be a directory: ${workingDir}`);
+  return canonical;
+}
+
 async function existingPath(root: string, path: string, label: string, kind?: "file" | "directory"): Promise<string> {
   const absolute = projectPath(root, path, label);
   let canonical: string;
@@ -340,7 +352,7 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
   const festivalName = text(name, "Festival name");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(festivalName)) throw new Error("Festival name must be a lowercase slug");
   const camp = await realpath(root);
-  const project = await existingPath(camp, text(workingDir, "workingDir"), "workingDir", "directory");
+  const project = await resolveProjectRoot(camp, text(workingDir, "workingDir"));
   const tasks = plan.phases.flatMap((phase) => phase.sequences.flatMap((sequence) => sequence.tasks));
   const positions = new Map(tasks.map((task, index) => [task.id, index]));
   const acceptanceIds = new Set(plan.acceptance.map((item) => item.id));
