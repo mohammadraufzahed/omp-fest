@@ -322,8 +322,13 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return undefined;
     }
     const toolName = event.toolName ?? "";
+    if (toolName === "fest_commit") {
+      return {
+        additionalContext:
+          "omp-fest: The task commit is recorded, but the festival is not necessarily complete. Immediately call fest_next and continue the loop: complete and fest_commit each returned task, repeating until fest_next reports kind 'complete'. If it reports a gate, submit evidence and stop for human approval; if blocked, resolve the stated blocker before continuing. Do not end the session after one committed task.",
+      };
+    }
     if (!WRITE_TOOLS.has(toolName)) {
-      return undefined;
     }
     const location = await detect.locate(ctx.cwd);
     const sid = sessionIdOf(ctx);

@@ -293,6 +293,24 @@ it("registers no session_compact handler — the per-turn digest covers it", asy
   expect(handlers.get("session_compact")).toBeUndefined();
 });
 
+it("continues the festival after each successful task commit", async () => {
+  const root = await makeCamp();
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const hook = handlers.get("tool_result") as (
+    event: unknown,
+    ctx: unknown,
+  ) => Promise<{ additionalContext?: string } | undefined>;
+
+  const next = await hook({ toolName: "fest_commit", isError: false }, ctx);
+  const failed = await hook({ toolName: "fest_commit", isError: true }, ctx);
+
+  expect(next?.additionalContext?.toLowerCase()).toContain("immediately call fest_next");
+  expect(next?.additionalContext).toContain("kind 'complete'");
+  expect(next?.additionalContext).toContain("human approval");
+  expect(failed).toBeUndefined();
+});
+
 it("tool_result hook warns on untracked edits and dedupes per path", async () => {
   const root = await makeCamp();
   const festivalDir = join(root, "festivals", "active", "fest-A1");

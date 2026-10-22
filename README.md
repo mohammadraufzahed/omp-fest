@@ -154,11 +154,13 @@ autoactivate it. Fill remaining markers from known context, run `fest_validate`,
 promote only a matching, valid festival with human authorization to activate.
 Authorization to activate does not approve later execution gates.
 
-Implementation then follows `fest_next` → the returned unit →
-`fest_task_complete` with evidence → `fest_commit`. A planned verification command
-is not a passing result: report only exercised checks, retain evidence, and make
-failed or untested checks explicit. `fest_gate_submit` always stops for the human;
-the agent never approves its own gate.
+Implementation then runs continuously through the festival:
+`fest_next` → the returned unit → `fest_task_complete` with evidence →
+`fest_commit` → `fest_next` again. Keep going until `fest_next` returns
+`complete`; pause only for a human gate or a real blocker. A planned
+verification command is not a passing result: report only exercised checks,
+retain evidence, and make failed or untested checks explicit.
+`fest_gate_submit` always stops for the human; the agent never approves its own gate.
 
 ### Plan a page from a screenshot
 

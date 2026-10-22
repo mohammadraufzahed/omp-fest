@@ -343,7 +343,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_commit",
     label: "Fest Commit",
     description:
-      "Commit changes through fest (auto-tags the message with [camp:festival]). Use instead of git commit inside linked projects so the work record stays truthful.",
+      "Commit changes through fest (auto-tags the message with [camp:festival]). Use instead of git commit inside linked projects so the work record stays truthful. A task commit is not the end of the festival: immediately call fest_next and continue until kind 'complete', pausing only for human gates or real blockers.",
     parameters: z.object({
       message: z.string().describe("Commit message (task reference is added automatically)"),
       festival: z.string().optional().describe("Festival name/id override"),
