@@ -1055,7 +1055,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         if (match.kind === "match" && deps.tracker.claimFestival(sid, match.festival.path)) {
           persistClaim(pi, match.festival.path, location.campRoot);
         }
-        return textResult({ kind: "promoted", output });
+        return textResult({ kind: "promoted", output, nextSteps: SUPERVISOR_POLICY });
       }
       const dir =
         location.festivalDir ??
@@ -1084,7 +1084,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           persistClaim(pi, moved.path, location.campRoot);
         }
       }
-      return textResult({ kind: "promoted", output });
+      return textResult({ kind: "promoted", output, nextSteps: SUPERVISOR_POLICY });
     },
   });
 

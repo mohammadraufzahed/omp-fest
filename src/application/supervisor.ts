@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 export const SUPERVISOR_ENTRY = "com.github.mohammadraufzahed.omp-fest.supervisor";
 export const SUPERVISOR_POLICY = [
   "Festival supervisor mode: the main agent owns planning, decisions, integration, review, task completion and commits.",
-  "Use exposed omp subagent tools for substantial implementation; do small coordination fixes directly. Never invent worker launches or results.",
+  "After human-authorized activation reaches active, immediately continue with fest_next and supervisor dispatch; do not end the turn at activation or wait for a separate /fest dispatch command.",
+  "Activation itself is not a worker launch. The agent must invoke the exposed omp subagent tool; /fest dispatch is the manual start/resume control. If paused, preserve pause and report /fest dispatch as the resume action.",
+  "Continue assignment, worker results, independent review, integration, task completion and commits until complete, a human gate, an explicit pause or a real blocker. If no subagent tool is exposed, report the missing capability instead of claiming workers started.",
+  "Use omp's exposed native parallel/subagent tools for substantial implementation, not an external Orca runtime, shell-launched agents or a custom worker scheduler. Batch independent eligible assignments into one native parallel dispatch when supported; overlapping files/contracts remain sequential. Do small coordination fixes directly. Never invent worker launches or results.",
   "Before dispatch call fest_supervisor assign with the exact task path and worker name; pass its contract to that named subagent. Mark running only after the host accepts the dispatch.",
   "Workers implement only their assignment and return files, exercised verification, failures and blockers through their subagent result. They must not select/claim festivals, call fest_next, mutate festival tasks, commit, approve gates, change scope, cancel plans or transfer ownership.",
   "Submit returned results through fest_supervisor; completion is a submission, not acceptance. Review changes and independently exercise combined behavior before accepting with evidence, then fest_task_complete and fest_commit.",

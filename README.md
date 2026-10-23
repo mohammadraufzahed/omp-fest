@@ -67,6 +67,14 @@ substantial implementation through the host's exposed omp subagent capability;
 the extension does not start an external agent runtime or pretend a worker ran.
 Small coordination fixes can remain inline.
 
+After human-authorized activation reaches `active`, the agent prompt instructs the
+supervisor to continue immediately with `fest_next` and native omp worker dispatch,
+without waiting for another `/fest dispatch`. Activation is not itself a launch:
+the agent invokes omp's exposed subagent tools and batches independent eligible
+assignments into a native parallel call when supported. It never substitutes
+external agent runtimes or shell-launched workers. An explicit pause is preserved;
+missing native subagent capability is reported as a blocker, not fabricated success.
+
 | Command | Behavior |
 | --- | --- |
 | `/fest workers` | Show assignments, status, worker reports and review evidence. |

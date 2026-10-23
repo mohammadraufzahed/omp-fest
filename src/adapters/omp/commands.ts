@@ -375,7 +375,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           send(pi, "fest-status", `Promotion blocked by visual references:\n${visual.issues.join("\n")}`);
           return;
         }
-        send(pi, "fest-status", await deps.fest.promote(cwd, args[0]));
+        send(pi, "fest-status", `${await deps.fest.promote(cwd, args[0])}\n\n${SUPERVISOR_POLICY}`);
       },
     },
     validate: {
