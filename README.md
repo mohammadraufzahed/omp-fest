@@ -49,29 +49,13 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `git commit` like a peasant.
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
-- 🗺️ **repository-grounded planning** — `/fest plan <goal>` inspects the
-  target project first and asks only material unanswered questions, one at a time.
-  A simple change can use one phase and one sequence; complex work gets explicit
-  boundaries and dependencies, not forced parallelism. `fest_plan` generates
-  deterministic `STRUCTURE.md` from a structured contract, presents one concise
-  approval preview, then scaffolds the exact approved revision. Empty or
-  mismatching scaffolds never qualify for activation.
-- 🖼️ **visual planning in the same interview** — attach a screenshot with
-  `/fest plan <goal>`. After inspecting reusable project components, the agent calls
-  `fest_wireframe_create` with typed pixel bounds, component/style evidence, audit paths,
-  state coverage, measurements and open questions. SVG.js builds an inert annotated
-  `wireframe.svg`; the paired `PAGE.md` records the same IDs and evidence. Same input
-  yields stable artifacts; uncertain values remain estimated/unknown rather than guessed.
-- 🛠️ **16 tools + ONE guided command** — `/fest <sub>` is the whole
-  cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
-  `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
-  `camp`, `idea`, `help` — with **live autocomplete** on subs, task
-  actions, and festival ids. nothing hardcoded, everything discovered ✨
-- 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run
-  *any* subcommand (list, rules, chain, feedback, links, watch, jobs,
-  idea claim/sync, ...) at the right dir, auto-inject `--yes` on task
-  mutations, and return `{code, stdout, stderr}` typed. nothing the real
-  CLIs can do is out of reach. `/fest cmd` + `/fest camp` for you too 💪
+ - 🗺️ **repository-grounded planning** — `/fest plan <goal>` inspects the target project first and asks only material unanswered questions, one at a time. A simple change can use one phase and one sequence; complex work gets explicit boundaries and dependencies, not forced parallelism. `fest_plan` generates deterministic `STRUCTURE.md` from a structured contract, presents one concise approval preview, then opens an omp-native interactive proposal review when UI controls are available. Scaffolding remains revision-locked.
+ - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
+ - 🛠️ **16 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
+   `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
+   `camp`, `idea`, `help` — with live autocomplete on subs, task actions, and festival ids.
+   Nothing hardcoded, everything discovered.
+ - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
 
 ### Plan from an inspected repository
 

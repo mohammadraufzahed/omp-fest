@@ -408,9 +408,20 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           send(pi, "fest-gate", `${warning}\nGate remains pending. Human may explicitly waive these checks with /fest approve --allow-untested.`);
           return;
         }
+        const lines = [
+          `Festival: ${dir.split("/").filter(Boolean).at(-1) ?? "festival"}`,
+          "",
+          warning || "All recorded checks have evidence.",
+          ...(verification?.verified.map((entry) => `VERIFIED ${entry.page}/${entry.check}: ${entry.proof}`) ?? []),
+        ];
+        const floated = await showCard(ctx.ui, {
+          title: "⛔ Gate review",
+          lines,
+          footer: "esc/q close — then choose approve or cancel",
+        });
         const yes =
           typeof ctx.ui.confirm === "function"
-            ? await ctx.ui.confirm("Approve gate", `${warning}\nApprove the pending gate in ${dir.split("/").filter(Boolean).at(-1) ?? "festival"}?`)
+            ? await ctx.ui.confirm("Approve gate", floated ? `Approve the pending gate in ${dir.split("/").filter(Boolean).at(-1) ?? "festival"}?` : `${lines.join("\n")}\n\nApprove the pending gate?`)
             : true;
         if (!yes) {
           send(pi, "fest-gate", "Approval cancelled — the gate stays pending.");

@@ -127,6 +127,18 @@ describe("visual planning tool handoff", () => {
     expect(await readFile(join(festival, "references", "pages", "results", "wireframe.svg"), "utf8")).toContain("Find</text>");
     expect(scaffoldFromPlan).toHaveBeenCalledTimes(2);
   });
+  it("opens a native proposal review before allowing scaffolding", async () => {
+    const { plan, spec, call } = await setup();
+    const ui = {
+      custom: () => Promise.resolve("closed"),
+      confirm: () => Promise.resolve(true),
+    };
+    const preview = await call("fest_plan", { name: "feature", plan, spec, action: "preview" }, ui);
+    expect(preview.kind).toBe("plan_preview");
+    expect(preview.approval).toBe("approved");
+    expect(preview.nextSteps).toContain("action:'scaffold'");
+  });
+
 
   it("does not create or delete a festival when parser preflight disagrees with approval", async () => {
     const { festival, plan, scaffoldFromPlan, scaffold } = await setup();

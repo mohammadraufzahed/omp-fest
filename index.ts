@@ -32,6 +32,7 @@ import { registerTools, type PiLike } from "./src/adapters/omp/tools.js";
 import { loadConfig } from "./src/domain/config.js";
 import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 import { planInterviewKickoff } from "./src/domain/orientation.js";
+import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
 
 interface ExtensionContextLike {
   cwd: string;
@@ -116,7 +117,6 @@ interface ExtensionApiLike {
   appendEntry?(customType: string, data: unknown): void;
 }
 
-const WRITE_TOOLS = new Set(["edit", "write", "multi_edit", "notebook_edit", "apply_patch"]);
 
 /** Pull the target file path(s) out of a write/edit tool call input. */
 function targetPaths(input: Record<string, unknown> | undefined, cwd: string): string[] {
@@ -161,7 +161,11 @@ export default function ompFest(pi: ExtensionApiLike): void {
     if (!match) {
       return undefined;
     }
-    return { text: planInterviewKickoff(match[1] ?? "") };
+    const intent = classifyPlanningIntent(match[1] ?? "", true);
+    return {
+      text: planInterviewKickoff(match[1] ?? "", planningIntentGuidance(intent)),
+      images: event.images,
+    };
   });
 
   const configFor = async () => loadConfig(cwd);
@@ -327,8 +331,6 @@ export default function ompFest(pi: ExtensionApiLike): void {
         additionalContext:
           "omp-fest: The task commit is recorded, but the festival is not necessarily complete. Immediately call fest_next and continue the loop: complete and fest_commit each returned task, repeating until fest_next reports kind 'complete'. If it reports a gate, submit evidence and stop for human approval; if blocked, resolve the stated blocker before continuing. Do not end the session after one committed task.",
       };
-    }
-    if (!WRITE_TOOLS.has(toolName)) {
     }
     const location = await detect.locate(ctx.cwd);
     const sid = sessionIdOf(ctx);

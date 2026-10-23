@@ -83,6 +83,56 @@ function textResult(payload: unknown): ToolResult {
   };
 }
 
+async function interactivePlanReview(
+  ctx: ToolContextLike,
+  payload: Record<string, unknown>,
+): Promise<ToolResult> {
+  const ui = ctx.ui;
+  if (!ui || typeof ui.confirm !== "function") {
+    return textResult({
+      ...payload,
+      approval: "awaiting_human",
+      nextSteps: "Present this proposal to the human and wait for approval. Then call action:'scaffold' with approvedRevision; do not supply spec.",
+    });
+  }
+  const preview = typeof payload.preview === "string" ? payload.preview : JSON.stringify(payload.preview, null, 2);
+  const lines = [
+    "Review the proposed festival before any implementation begins.",
+    "",
+    ...preview.split("\n"),
+    "",
+    `Plan revision: ${typeof payload.planRevision === "string" ? payload.planRevision : "unknown"}`,
+    `Tasks: ${String((payload.counts as { tasks?: number } | undefined)?.tasks ?? "unknown")}`,
+    "",
+    "Approve creates an immutable revision for scaffolding. Reject keeps the repository unchanged.",
+  ];
+  const floated = await showCard(ui, {
+    title: "✦ Plan proposal review",
+    lines,
+    footer: "esc/q close — then choose approve or request revision",
+  });
+  const approved = await ui.confirm(
+    "✦ Approve plan proposal",
+    floated ? "Approve this proposal for scaffolding?" : lines.join("\n") + "\n\nApprove this proposal?",
+  );
+  if (approved) {
+    return textResult({
+      ...payload,
+      approval: "approved",
+      nextSteps: "Plan approved. Call action:'scaffold' with this planRevision and omit spec.",
+    });
+  }
+  const reason = typeof ui.input === "function"
+    ? (await ui.input("Request plan revision", "What should change?")) ?? "no reason given"
+    : "no reason given";
+  return textResult({
+    ...payload,
+    approval: "revision_requested",
+    reason: reason.trim() || "no reason given",
+    nextSteps: "Revise the proposal and call fest_plan action:'preview' again. Do not scaffold this revision.",
+  });
+}
+
 interface FestDirResolution {
   dir?: string;
   campRoot?: string;
@@ -537,13 +587,14 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       approvedRevision: z.string().optional().describe("planRevision from the preview the human approved; required for scaffold"),
       workingDir: z.string().optional().describe("Camp-relative project dir or an absolute path to a linked checkout; required when the camp has multiple projects"),
       rules: z.string().optional().describe("Constraints/rules the human agreed to during planning, as bullet lines — written verbatim into FESTIVAL_RULES.md so fest rules shows them"),
-      referencesDir: z.string().optional().describe("Absolute <camp>/.ompfest/plans/<name>.references directory containing pages/<slug>/PAGE.md and wireframe.svg"),
+      referencesDir: z.string().optional().describe("Absolute <camp>/.ompfest/plans/<name>.references directory containing pages/<slug>/PAGE.md and wireframe.svg; only for explicit UI-visual plans"),
+      visualIntent: z.enum(["ui_visual", "document_or_pdf", "backend_or_api", "bug_diagnostic", "mixed", "unknown"]).optional().describe("Classified request intent; wireframes are allowed only for ui_visual"),
       referenceAction: z.enum(["preview", "revise"]).optional().describe("preview renders the approved wireframe/notes and revision impact without scaffolding; revise updates an existing festival's references only after human approval"),
       festival: z.string().optional().describe("Existing festival selector for reference previews/revisions; omit for an initial plan preview"),
       baseRevision: z.string().optional().describe("Original reference digest from the approved revision preview"),
       proposalRevision: z.string().optional().describe("Proposed reference digest from the approved revision preview"),
     }),
-    async execute(_id: string, params: { name: string; plan: string; action?: "preview" | "scaffold"; spec?: StructuredPlan; approvedRevision?: string; workingDir?: string; rules?: string; referencesDir?: string; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { name: string; plan: string; action?: "preview" | "scaffold"; spec?: StructuredPlan; approvedRevision?: string; workingDir?: string; rules?: string; referencesDir?: string; visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown"; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -552,6 +603,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!params.action && !params.referenceAction) return textResult({ kind: "plan_failed", error: "Choose action:'preview' with a structured spec, then action:'scaffold' with the human-approved planRevision." });
       if (params.action === "preview" && !params.spec) return textResult({ kind: "plan_failed", error: "Plan preview requires a structured spec." });
       if (params.action === "scaffold" && (!params.approvedRevision || params.spec)) return textResult({ kind: "plan_failed", error: "Scaffolding requires the human-approved planRevision and must omit spec." });
+      if (params.referencesDir && params.visualIntent && params.visualIntent !== "ui_visual") {
+        return textResult({
+          kind: "plan_failed",
+          error: "Wireframes are allowed only for visualIntent:'ui_visual'. Keep PDF, document, backend, API and error images as evidence without referencesDir.",
+        });
+      }
       let approved: ApprovedPlan | undefined;
       let targetWorkingDir = params.workingDir;
       let agreedRules = params.rules;
@@ -575,11 +632,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           }, bundle?.files);
           const visual = bundle ? await renderPlanPreview(prepared.plan, bundle) : undefined;
           const reuseCandidates = bundle ? await findReuseCandidates(root, project.dir, bundle) : [];
-          return textResult({
+          return await interactivePlanReview(ctx, {
             kind: "plan_preview", plan: prepared.plan, preview: prepared.preview, previewFile: prepared.previewFile,
             counts: prepared.counts, planRevision: prepared.planRevision, reuseCandidates,
             ...(visual ? { visualPreview: visual } : {}),
-            nextSteps: "Present the concise approval preview for one human approval. Then call action:'scaffold' with approvedRevision; do not supply spec.",
           });
         } catch (error) {
           return textResult({ kind: "plan_failed", error: String(error) });

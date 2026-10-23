@@ -169,6 +169,20 @@ describe("ompFest extension", () => {
     expect(hook({ ...event, images: [] }, ctx)).toBeUndefined();
   });
 
+  it("does not turn PDF or diagnostic images into wireframe plans", async () => {
+    const root = await makeCamp();
+    const { pi, handlers, ctx } = mockPi(root);
+    ompFest(pi as never);
+    const hook = handlers.get("input") as (event: unknown, context: unknown) => { text: string } | undefined;
+    const pdfEvent = { type: "input", text: "/fest plan fix this PDF export", images: [{ type: "image", data: "opaque-image" }], source: "interactive" };
+    const pdfResult = hook(pdfEvent, ctx);
+    expect(pdfResult?.text).toContain("Classified image role: document_or_pdf");
+    expect(pdfResult?.text).toContain("Do not call fest_wireframe_create");
+    expect(pdfResult?.text).toContain("must not");
+    const errorEvent = { type: "input", text: "/fest plan investigate this error screenshot", images: [{ type: "image", data: "opaque-image" }], source: "interactive" };
+    expect(hook(errorEvent, ctx)?.text).toContain("Classified image role: bug_diagnostic");
+  });
+
   it("/fest idea without text interviews the user first", async () => {
     const root = await makeCamp();
     const { pi, commands, userMessages, ctx } = mockPi(root);
