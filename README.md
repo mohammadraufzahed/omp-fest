@@ -53,11 +53,50 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
  - 🧰 **repair-friendly plan inputs** — plan paths, project-relative inspection/verification paths, and common unstable IDs are normalized before validation. Failures return compact field-level diagnostics instead of dumping the fest CLI transcript.
  - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
  - 🎯 **session festival selection** — `/fest select [festival]` lists available festivals, claims one for the current omp session, persists the selection through resume/branch/tree, and requires explicit confirmation before transferring ownership from another session. Claims use an atomic ownership record.
- - 🛠️ **17 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `next`, `status`, `show`, `select`, `task`, `plan`, `promote`, `validate`,
+ - 🛠️ **18 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `workers`, `dispatch`, `pause`, `review`, `next`, `status`, `show`, `select`, `task`, `plan`, `promote`, `validate`,
    `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
    `camp`, `idea`, `help` — with live autocomplete on subs, task actions, and festival ids.
    `fest_plan_draft` creates stable IDs and canonical paths before `fest_plan`; nothing hardcoded, everything discovered.
  - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
+
+### Supervisor execution
+
+The main agent supervises festival implementation: it owns scope, integration,
+review, task completion, commits and human gate submission. It dispatches
+substantial implementation through the host's exposed omp subagent capability;
+the extension does not start an external agent runtime or pretend a worker ran.
+Small coordination fixes can remain inline.
+
+| Command | Behavior |
+| --- | --- |
+| `/fest workers` | Show assignments, status, worker reports and review evidence. |
+| `/fest dispatch` | Resume new dispatch and start a supervisor agent turn for the explicitly selected festival. |
+| `/fest pause` | Pause new assignments/spawns; preserve existing workers and accept their reports. |
+| `/fest review [assignment-id]` | Select a submission, inspect its report, then accept with independent verification evidence or request changes. Escape/cancel preserves pending review. |
+
+The supervisor uses `fest_supervisor` to assign, record a real dispatch as
+running, submit returned results, report blockers and record reviews. Assignments
+are session-scoped and persisted as omp transcript entries across resume and
+branch/tree navigation. Worker states are `assigned`, `running`, `blocked`,
+`ready_for_review`, and `accepted`; state is reported explicitly by the supervisor,
+not inferred from a tool invocation or a still-running worker.
+
+At most three assignments may be outstanding. Dispatch respects the current
+phase, first pending task per sequence and explicit completed dependencies.
+Unknown file boundaries or overlapping paths force sequential dispatch, including
+across festivals in the same supervisor session. Separate sessions/checkouts are
+not protected by this local assignment registry; use isolated worktrees for
+conflicting concurrent edits.
+
+Workers receive a bounded contract, including Playwright-MCP-first browser
+verification guidance. They return files changed, real verification and blockers
+through their native subagent result, without claiming the festival or running
+their own fest loop. The supervisor submits and independently reviews that result.
+Task completion rejects unaccepted assignments, and commits wait until outstanding
+assignments are settled to avoid committing unfinished shared-checkout work.
+Acceptance does not automatically complete tasks, commit changes or approve gates.
+Human approvals remain separate. The spawn boundary is agent guidance; it is not
+a filesystem sandbox for subagents.
 
 ### Plan from an inspected repository
 
@@ -189,6 +228,22 @@ nonempty relative inspected paths. Audit input failures return all affected
 field paths and diagnostic codes together, distinguishing missing paths, missing
 notes, and overlong notes. Do not add `paths`/`inspectedPaths` aliases or search
 installed binaries to repair an audit; fix only the fields named in diagnostics.
+
+### Browser verification
+
+Planning, task handoffs (`/fest next` and `fest_next`), and parallel lanes
+instruct agents to discover exposed browser tools once per session and attempt
+Playwright MCP first for browser-relevant verification. Reuse the browser session.
+If those tools are absent or fail to connect/start, record the limitation and use
+another exposed omp browser integration. No MCP server is installed automatically.
+
+UI verification exercises the target route and requested interactions, recording
+tool, route, viewport, actions, screenshots and observed results. Screenshot
+matching uses the reference viewport. UI-driven PDF exports require inspecting
+the exported PDF as well. Application failures must be fixed, not hidden by
+switching tools; unavailable browser verification remains explicitly untested.
+Backend-only work does not need a browser. This is an agent execution policy,
+not a claim that the extension itself launches or verifies a browser.
 
 SVG.js and svgdom are runtime dependencies for this headless renderer. The tool does
 not perform image recognition itself: the calling model extracts the screenshot and

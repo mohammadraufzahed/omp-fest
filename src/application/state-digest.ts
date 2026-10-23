@@ -16,7 +16,7 @@ export interface DigestDeps {
 }
 
 const RULES =
-  "fest loop: fest_next → implement → fest_task_complete → fest_commit. Never run fest/camp in the shell — use the fest_*/camp_* tools (fest_raw for uncovered subcommands). Edits to project files need a unit open from fest_next. Parallel: group pending tasks by sequence → one subagent per lane.";
+  "fest loop: fest_next → supervise implementation → review/integrate → fest_task_complete → fest_commit. Never run fest/camp in the shell — use the fest_*/camp_* tools. Parent owns festival mutations; workers return bounded submissions without claiming the festival. Parallel candidates need dependency and file-overlap checks before bounded dispatch.";
 
 /** Returns the digest text, or undefined outside a camp (no injection). sessionId scopes the unit/festival pick to that agent. */
 export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId = "default"): Promise<string | undefined> {

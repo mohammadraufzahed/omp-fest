@@ -26,13 +26,17 @@ import { normalizePlanInput } from "../../application/plan-input.js";
 import { approvedPlan, installApprovedTasks, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
+import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import type { ZodLike } from "./zod-types.js";
+import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
+import { registerSupervisorTools } from "./supervisor-tools.js";
 
 export interface ToolDeps {
   fest: FestCli;
   camp: CampCli;
   detect: CampDetect;
   tracker: LoopTracker;
+  supervisor?: Supervisor;
   /** Per-project .ompfest.json — gate behavior honors pauseAtGates/evidenceRequiredOnGates. */
   config?: () => Promise<OmpFestConfig>;
 }
@@ -297,6 +301,8 @@ function festivalRelativeTaskPath(festivalDir: string, taskPath: string): string
 
 export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const z = pi.zod;
+  const supervisor = deps.supervisor ?? new Supervisor();
+  registerSupervisorTools(pi, deps, supervisor);
 
 
   pi.registerTool({
@@ -324,11 +330,18 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         if (stale) {
           return textResult({
             ...unit,
+            browserVerification: BROWSER_VERIFICATION_POLICY,
+            supervisor: SUPERVISOR_POLICY,
             ...(visualReferences.length > 0 ? { visualReferences } : {}),
             warning: `Previous unit ${stale} was opened but never completed+committed — the work record is stale. Finish its fest_task_complete/fest_commit before starting this one.`,
           });
         }
-        return textResult({ ...unit, ...(visualReferences.length > 0 ? { visualReferences } : {}) });
+        return textResult({
+          ...unit,
+          browserVerification: BROWSER_VERIFICATION_POLICY,
+          supervisor: SUPERVISOR_POLICY,
+          ...(visualReferences.length > 0 ? { visualReferences } : {}),
+        });
       }
       return unit.kind === "blocked" ? compactBlockedUnit(unit) : textResult(unit);
     },
@@ -391,6 +404,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           }
         }
       }
+      const assignments = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) =>
+        worker.festival === basename(dir) && worker.task === (task?.path ?? taskPath));
+      if (assignments.some((worker) => worker.status !== "accepted")) {
+        return textResult({ kind: "completion_blocked", hint: "Worker submission requires independent supervisor review and acceptance before festival completion." });
+      }
       const completion = await deps.fest.taskComplete(dir, task?.path ?? taskPath ?? "", params.evidence);
       if (!completion.ok) {
         return textResult({
@@ -448,6 +466,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
+      }
+      if (supervisor.state(sessionIdOf(ctx)).workers.some((worker) => worker.status !== "accepted")) {
+        return textResult({ kind: "commit_blocked", hint: "Outstanding workers may have unfinished shared-checkout changes. Review and settle all assignments before committing." });
       }
       const hash = await deps.fest.commit(r.dir, params.message);
       deps.tracker.committed(sessionIdOf(ctx));
@@ -1105,7 +1126,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_parallel",
     label: "Fest Parallel",
     description:
-      "List pending festival tasks grouped by sequence so you can fan out subagents — tasks in different sequences are parallel-safe, tasks in the same sequence run in order. Spawn one subagent per sequence and let them work concurrently.",
+      "List candidate pending tasks grouped by sequence. Different sequences are not automatically parallel-safe: check dependency eligibility and file overlap through fest_supervisor before bounded subagent dispatch.",
     parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
     async execute(_id: string, params: { festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
       const r = await dirOrResult(pi, deps, ctx, params.festival);
@@ -1130,9 +1151,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         laneReferences.set(task.sequence, [...existing, ...refs.filter((ref) => !existing.some((item) => item.page === ref.page))]);
       }
       return textResult({
-        hint: "Each sequence is an independent lane — spawn one subagent per sequence to work tasks in parallel; same-sequence tasks stay ordered.",
+        hint: SUPERVISOR_POLICY,
         lanes: [...groups.entries()].map(([sequence, files]) => ({
           sequence, tasks: files, visualReferences: laneReferences.get(sequence) ?? [],
+          browserVerification: BROWSER_VERIFICATION_POLICY,
         })),
         pendingCount: pending.length,
         totalCount: tasks.length,

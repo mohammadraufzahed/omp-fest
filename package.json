@@ -1,6 +1,6 @@
 {
   "name": "omp-fest",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "main": "index.ts",
   "scripts": {
     "test": "vitest run",

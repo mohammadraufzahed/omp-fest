@@ -15,14 +15,17 @@ import { showCard, type OverlayUiLike } from "./overlay.js";
 import { loadConfig, saveConfig } from "../../domain/config.js";
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
 import { DEFAULT_CONFIG, type OmpFestConfig } from "../../domain/types.js";
-import { IDEA_INTERVIEW, PLAN_GUIDE, markerInterviewKickoff, planInterviewKickoff } from "../../domain/orientation.js";
+import { BROWSER_VERIFICATION_POLICY, IDEA_INTERVIEW, PLAN_GUIDE, markerInterviewKickoff, planInterviewKickoff } from "../../domain/orientation.js";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
+import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
+import { supervisorCommands } from "./supervisor-commands.js";
 
 export interface CommandDeps {
   fest: FestCli;
   camp: CampCli;
   detect: CampDetect;
   tracker?: LoopTracker;
+  supervisor?: Supervisor;
 }
 
 export interface PiCommandsLike {
@@ -237,7 +240,9 @@ async function interactiveSettings(ctx: CommandCtx, dir: string): Promise<boolea
 }
 
 export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
+  const supervisor = deps.supervisor ?? new Supervisor();
   const subs: Record<string, Sub> = {
+    ...supervisorCommands(pi, supervisor),
     "": {
       desc: "festival dashboard: camp, active festival, progress, gates",
       run: async (_args, ctx) => {
@@ -282,7 +287,11 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           return;
         }
         const refs = unit.kind === "task" ? await referencesForTask(dir, unit.doc) : [];
-        send(pi, "fest-next", JSON.stringify({ ...unit, ...(refs.length ? { visualReferences: refs } : {}) }, null, 2));
+        send(pi, "fest-next", JSON.stringify({
+          ...unit,
+          ...(unit.kind === "task" ? { browserVerification: BROWSER_VERIFICATION_POLICY } : {}),
+          ...(refs.length ? { visualReferences: refs } : {}),
+        }, null, 2));
       },
     },
     status: {
@@ -316,6 +325,11 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         const [action = "show", ...rest] = args;
         const dir = await festivalDirOf(deps, ctx);
         if (action === "done") {
+          const outstanding = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) => worker.status !== "accepted");
+          if (outstanding.length) {
+            send(pi, "fest-status", "Completion blocked: review outstanding worker submissions before completing festival tasks.");
+            return;
+          }
           const completion = await deps.fest.taskComplete(dir, rest[0] ?? "");
           send(pi, "fest-status", completion.ok ? "Task completed." : `Completion blocked:\n${completion.output}`);
           return;
@@ -479,7 +493,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           list.push(task.path);
           groups.set(task.sequence, list);
         }
-        const lines = ["Pending tasks by lane (one subagent per sequence):"];
+        const lines = ["Candidate tasks by lane (check dependencies and file overlap before dispatch):", SUPERVISOR_POLICY, BROWSER_VERIFICATION_POLICY];
         for (const [seq, files] of groups) {
           lines.push(`\n${seq}`);
           for (const file of files) {
@@ -656,7 +670,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Guided festival control: /fest [next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
+    description: "Guided festival control: /fest [workers|dispatch|pause|review|next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")

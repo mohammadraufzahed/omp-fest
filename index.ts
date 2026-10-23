@@ -17,6 +17,7 @@ import { basename, isAbsolute, resolve, sep } from "node:path";
 import { CachedDetect } from "./src/application/detect-cache.js";
 import { watchCampTransitions } from "./src/application/camp-watcher.js";
 import { LoopTracker } from "./src/application/loop-tracker.js";
+import { Supervisor, SUPERVISOR_POLICY } from "./src/application/supervisor.js";
 import { orientSession } from "./src/application/orient.js";
 import { restoreClaimFromBranch } from "./src/application/session-claim.js";
 import { claimedFestivalDir } from "./src/application/fest-resolve.js";
@@ -146,9 +147,10 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const camp = new CampCliAdapter(exec);
   const detect = new CachedDetect(new CampFsDetect());
   const tracker = new LoopTracker();
+  const supervisor = new Supervisor();
 
   const cwd = process.cwd();
-  const deps = { fest, camp, detect, tracker, config: () => loadConfig(cwd) };
+  const deps = { fest, camp, detect, tracker, supervisor, config: () => loadConfig(cwd) };
 
   registerTools(pi as unknown as PiLike, deps);
   registerCommands(pi, deps);
@@ -183,6 +185,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const restoreClaim = async (ctx: ExtensionContextLike): Promise<string | undefined> => {
     const branch = ctx.sessionManager?.getBranch?.();
     const sid = sessionIdOf(ctx);
+    supervisor.restore(sid, branch ?? []);
     if (branch && branch.length > 0) {
       restoreClaimFromBranch(tracker, sid, branch);
     }
@@ -271,7 +274,8 @@ export default function ompFest(pi: ExtensionApiLike): void {
     if (!digest) {
       return undefined;
     }
-    return { message: { customType: "fest-state", content: digest, display: false } };
+    const state = supervisor.state(sessionIdOf(ctx));
+    return { message: { customType: "fest-state", content: `${digest}\n${SUPERVISOR_POLICY}\nDispatch: ${state.paused ? "paused" : "enabled"}; workers: ${state.workers.filter((worker) => worker.status !== "accepted").length} outstanding.`, display: false } };
   });
 
   // Pre-execution nudges for bypass paths (raw fest/camp, ad hoc todos,
@@ -367,9 +371,14 @@ export default function ompFest(pi: ExtensionApiLike): void {
 
   // Subagent steering: the API can't rewrite the spawn prompt — attach a note
   // so the routing output reminds the parent to hand out explicit units.
-  pi.on("before_subagent_spawn", (_event, _ctx) => {
+  pi.on("before_subagent_spawn", async (_event, ctx) => {
+    const location = await detect.locate(ctx.cwd);
+    if (!location.campRoot) return undefined;
+    if (supervisor.state(sessionIdOf(ctx)).paused) {
+      return { block: true, reason: "Festival worker dispatch is paused. Use /fest dispatch to resume." };
+    }
     return {
-      note: "omp-fest: inside a camp, give each subagent an explicit festival unit (fest_parallel lanes or fest_next output — festivalDir + task path). Subagents run the same fest_* loop.",
+      note: "omp-fest worker: implement only the parent's explicit assignment; return files changed, actual verification results and blockers through the native subagent result. Do not select/claim festivals, run fest_next, complete festival tasks, commit, approve gates, change scope or transfer ownership. The parent supervisor alone reviews and records completion. Follow the browser-verification policy in the task contract.",
     };
   });
 

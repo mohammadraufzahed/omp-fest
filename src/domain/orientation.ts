@@ -3,6 +3,7 @@
  * starts already knowing the camp/festival/task context (~60 tokens).
  */
 import type { CampLocation, FestivalProgress } from "./types.js";
+import { SUPERVISOR_POLICY } from "../application/supervisor.js";
 
 export interface OrientationInput {
   location: CampLocation;
@@ -14,6 +15,16 @@ export interface OrientationInput {
   unfilledMarkers?: number;
   pendingGate?: string;
 }
+
+/** Agent policy: tools are exposed by the host, not installed or guessed by this extension. */
+export const BROWSER_VERIFICATION_POLICY = [
+  "Browser verification: prefer-playwright-mcp.",
+  "For browser-relevant UI changes or UI-driven exports, discover exposed browser tools once per session and attempt Playwright MCP first when available; reuse the browser session.",
+  "If its tools are absent or startup/connection fails, record the concrete limitation and use another exposed omp browser integration. Never install or assume an MCP server.",
+  "Exercise the target route and requested interactions; capture rendered evidence. For screenshot matching use the reference viewport. For PDF exports inspect the actual exported PDF, not only a browser screenshot.",
+  "Record tool, route, viewport, actions and observed result in verification proof. Fix application failures; never switch tools to hide them. With no usable browser, mark browser checks untested and state why.",
+  "Backend-only work needs no browser. During planning record the verification approach, not fabricated results.",
+].join(" ");
 
 export function buildOrientationNote(input: OrientationInput): string {
   const { location } = input;
@@ -45,8 +56,7 @@ export function buildOrientationNote(input: OrientationInput): string {
 }
 
 export const PARALLEL_HINT =
-  "Independent festival lanes: call fest_parallel to list pending tasks grouped " +
-  "by sequence — spawn one subagent per sequence so tasks finish in parallel.";
+  "Independent festival lanes: call fest_parallel for candidate sequences. Check dependencies and file overlap before bounded dispatch; workers return submissions to the supervisor, never run their own festival loop.";
 
 export const RECOVERY_PLAYBOOK = [
   "fest_* tool recovery rules:",
@@ -136,6 +146,7 @@ export const PLAN_GUIDE = [
   "   kind 'complete'. Never stop after one commit; gates and blockers are the only pauses.",
   "   Report only checks actually exercised. Failed and untested verification must remain explicit;",
   "   never turn a planned command, missing evidence or an inferred result into a passed check.",
+  BROWSER_VERIFICATION_POLICY,
   "   Visual evidence per AC: page, check, status (verified/failed/untested), proof; verified checks",
   "   also need route, viewport and state. Never invent browser proof. Failed checks block completion",
   "   and gates; untested checks remain visible to humans.",
@@ -156,6 +167,8 @@ export function planInterviewKickoff(goal: string, visualGuidance?: string): str
     "",
     "Ask only blocking questions. Batch related choices in one prompt and ask at most two rounds.",
     "Use repository evidence to resolve everything else. Do not implement before approval.",
+    SUPERVISOR_POLICY,
+    BROWSER_VERIFICATION_POLICY,
     "Then call fest_plan action:'preview' with the structured proposal.",
     "When the native review returns approval:'approved', call fest_plan action:'scaffold' with its planRevision.",
     "New planning is independent of selected festivals: create a new name and continue even when another session owns an existing festival. Only existing-festival work (tasks, promotion, or reference revisions) requires ownership; never cancel or reset another plan.",
