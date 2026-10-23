@@ -11,6 +11,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
+import { claimFestivalOwnership } from "../../application/festival-ownership.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
@@ -213,6 +214,17 @@ async function dirOrResult(
   if (!resolved.dir) {
     return { result: await idleResult(deps, ctx) };
   }
+  const ownership = await claimFestivalOwnership(resolved.dir, sessionIdOf(ctx));
+  if (ownership.kind !== "claimed") {
+    return {
+      result: textResult({
+        kind: "festival_owned",
+        festival: basename(resolved.dir),
+        owner: ownership.owner?.sessionId,
+        hint: "This festival belongs to another omp session. Use fest_select with transfer:true after explicit human confirmation; no work was started.",
+      }),
+    };
+  }
   // This session touched this festival — later digests/tracking key off it so
   // parallel agents on different festivals don't see each other's pick.
   if (deps.tracker.claimFestival(sessionIdOf(ctx), resolved.dir)) {
@@ -252,6 +264,7 @@ function festivalRelativeTaskPath(festivalDir: string, taskPath: string): string
 
 export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const z = pi.zod;
+
 
   pi.registerTool({
     name: "fest_next",
@@ -887,6 +900,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         }
         const candidate = matchFestival(await deps.detect.listFestivals(location.campRoot), params.festival);
         if (candidate.kind === "match") {
+          const ownership = await claimFestivalOwnership(candidate.festival.path, sid);
+          if (ownership.kind !== "claimed") {
+            return textResult({ kind: "festival_owned", festival: candidate.festival.id, owner: ownership.owner?.sessionId, hint: "Select and explicitly transfer this festival before promoting it." });
+          }
           const visual = await validateVisualReferences(candidate.festival.path, deps.detect);
           if (visual.issues.length > 0) {
             return textResult({ kind: "promotion_blocked", issues: visual.issues });
@@ -909,6 +926,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
       if (!dir) {
         return await idleResult(deps, ctx);
+      }
+      const ownership = await claimFestivalOwnership(dir, sid);
+      if (ownership.kind !== "claimed") {
+        return textResult({ kind: "festival_owned", festival: basename(dir), owner: ownership.owner?.sessionId, hint: "Select and explicitly transfer this festival before promoting it." });
       }
       const visual = await validateVisualReferences(dir, deps.detect);
       if (visual.issues.length > 0) {

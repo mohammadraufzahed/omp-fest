@@ -22,15 +22,14 @@ export function classifyPlanningIntent(text: string, hasImage: boolean): Plannin
   if (ui) return "ui_visual";
   return "unknown";
 }
-
 export function planningIntentGuidance(intent: PlanningIntent): string {
   if (intent === "ui_visual") {
-    return "This is an explicit UI-visual request. Inspect the image and project, then create the validated PAGE.md + wireframe.svg reference only for the requested UI change.";
+    return "This is an explicit UI-visual request. Inspect the image and project, record the original viewport and target route, then create the validated PAGE.md + wireframe.svg reference only for the requested UI change and verify the same route at the original viewport.";
   }
   return [
     `Classified image role: ${intent}.`,
     "Treat the attachment as evidence, not a UI design reference.",
-    "Do not call fest_wireframe_create, do not create referencesDir, and do not convert the image into an iframe or wireframe.",
+    "Do not call fest_wireframe_create, do not create referencesDir, and do not convert the image into an iframe or wireframe; these are prohibited for this intent.",
     "If the request also contains a UI change, split the proposal and ask one focused question before creating any visual reference.",
   ].join(" ");
 }

@@ -178,9 +178,29 @@ describe("ompFest extension", () => {
     const pdfResult = hook(pdfEvent, ctx);
     expect(pdfResult?.text).toContain("Classified image role: document_or_pdf");
     expect(pdfResult?.text).toContain("Do not call fest_wireframe_create");
-    expect(pdfResult?.text).toContain("must not");
+    expect(pdfResult?.text).toContain("prohibited");
     const errorEvent = { type: "input", text: "/fest plan investigate this error screenshot", images: [{ type: "image", data: "opaque-image" }], source: "interactive" };
     expect(hook(errorEvent, ctx)?.text).toContain("Classified image role: bug_diagnostic");
+  });
+  it("/fest select claims a festival and requires confirmation before transfer", async () => {
+    const root = await makeCamp();
+    const festival = join(root, "festivals", "active", "chosen");
+    await mkdir(festival, { recursive: true });
+    await writeFile(join(festival, "fest.yaml"), "id: chosen\nname: Chosen\n");
+    const first = mockPi(root);
+    (first.ctx as Record<string, unknown>).sessionManager = { getSessionId: () => "session-a" };
+    ompFest(first.pi as never);
+    await first.commands.get("fest")?.handler("select chosen", first.ctx);
+    expect(first.sent.at(-1)?.message.content).toContain("Selected chosen");
+
+    const second = mockPi(root);
+    (second.ctx as Record<string, unknown>).sessionManager = { getSessionId: () => "session-b" };
+    const confirm = vi.fn(() => Promise.resolve(false));
+    (second.ctx.ui as Record<string, unknown>).confirm = confirm;
+    ompFest(second.pi as never);
+    await second.commands.get("fest")?.handler("select chosen", second.ctx);
+    expect(second.sent.at(-1)?.message.content).toContain("Ownership unchanged");
+    expect(confirm).toHaveBeenCalled();
   });
 
   it("/fest idea without text interviews the user first", async () => {

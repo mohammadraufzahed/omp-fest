@@ -49,9 +49,10 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
   `git commit` like a peasant.
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
- - 🗺️ **repository-grounded planning** — `/fest plan <goal>` inspects the target project first and asks only material unanswered questions, one at a time. A simple change can use one phase and one sequence; complex work gets explicit boundaries and dependencies, not forced parallelism. `fest_plan` generates deterministic `STRUCTURE.md` from a structured contract, presents one concise approval preview, then opens an omp-native interactive proposal review when UI controls are available. Scaffolding remains revision-locked.
+ - 🗺️ **fast native planning** — `/fest plan <goal>` inspects first, asks only blocking questions in at most two short rounds, then opens an omp-native proposal review. Approval is revision-locked; conflicts never cancel another plan.
  - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
- - 🛠️ **16 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `next`, `status`, `show`, `task`, `plan`, `promote`, `validate`,
+ - 🎯 **session festival selection** — `/fest select [festival]` lists available festivals, claims one for the current omp session, persists the selection through resume/branch/tree, and requires explicit confirmation before transferring ownership from another session. Claims use an atomic ownership record.
+ - 🛠️ **16 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `next`, `status`, `show`, `select`, `task`, `plan`, `promote`, `validate`,
    `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
    `camp`, `idea`, `help` — with live autocomplete on subs, task actions, and festival ids.
    Nothing hardcoded, everything discovered.

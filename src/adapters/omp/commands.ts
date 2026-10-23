@@ -3,6 +3,10 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { matchFestival } from "../../application/fest-resolve.js";
+import { claimFestivalOwnership, festivalOwner } from "../../application/festival-ownership.js";
+import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
+import { sessionIdOf } from "../../application/session-id.js";
+import type { LoopTracker } from "../../application/loop-tracker.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { referencesForTask, validateVisualReferences } from "../../application/visual-references.js";
@@ -18,6 +22,7 @@ export interface CommandDeps {
   fest: FestCli;
   camp: CampCli;
   detect: CampDetect;
+  tracker?: LoopTracker;
 }
 
 export interface PiCommandsLike {
@@ -31,10 +36,12 @@ export interface PiCommandsLike {
   ): void;
   sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>): void;
   sendUserMessage?(text: string): void;
+  appendEntry?(customType: string, data: unknown): void;
 }
 
 interface CommandCtx {
   cwd: string;
+  sessionManager?: { getSessionId?(): string };
   ui: OverlayUiLike & {
     notify(message: string, type?: string): void;
     select?(
@@ -541,6 +548,56 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         send(pi, "camp-idea", await deps.camp.ideaAdd(location.campRoot, text));
       },
     },
+    select: {
+      desc: "select and optionally transfer a festival to this omp session: /fest select [festival]",
+      run: async (args, ctx) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        if (!location.campRoot) {
+          ctx.ui.notify("Not inside a camp", "warning");
+          return;
+        }
+        const festivals = await deps.detect.listFestivals(location.campRoot);
+        let selector = args.join(" ").trim();
+        if (!selector && typeof ctx.ui.select === "function") {
+          selector = await ctx.ui.select(
+            "Select festival for this omp session",
+            festivals.map((festival) => ({ label: festival.id, description: `${festival.name} · ${festival.status}` })),
+          ) ?? "";
+        }
+        if (!selector) {
+          send(pi, "fest-status", festivals.map((festival) => `${festival.id} (${festival.status})`).join("\n") || "No festivals found.");
+          return;
+        }
+        const match = matchFestival(festivals, selector);
+        if (match.kind !== "match") {
+          send(pi, "fest-status", match.kind === "ambiguous"
+            ? `Ambiguous festival "${selector}": ${match.matches.map((festival) => festival.id).join(", ")}`
+            : `No festival matches "${selector}".`);
+          return;
+        }
+        const sid = sessionIdOf(ctx);
+        const current = await festivalOwner(match.festival.path);
+        let transfer = false;
+        if (current && current.sessionId !== sid) {
+          const confirmed = typeof ctx.ui.confirm === "function"
+            ? await ctx.ui.confirm("Transfer festival ownership", `${match.festival.id} is owned by omp session ${current.sessionId}. Transfer it to this session?`)
+            : false;
+          if (!confirmed) {
+            send(pi, "fest-status", `Ownership unchanged — ${match.festival.id} remains with ${current.sessionId}.`);
+            return;
+          }
+          transfer = true;
+        }
+        const ownership = await claimFestivalOwnership(match.festival.path, sid, transfer);
+        if (ownership.kind !== "claimed") {
+          send(pi, "fest-status", `Ownership changed concurrently; ${match.festival.id} remains with ${ownership.owner?.sessionId ?? "another session"}.`);
+          return;
+        }
+        deps.tracker?.claimFestival(sid, match.festival.path);
+        pi.appendEntry?.(FESTIVAL_CLAIM_ENTRY, { festivalId: match.festival.id, festivalDir: match.festival.path, campRoot: location.campRoot });
+        send(pi, "fest-status", `Selected ${match.festival.id} for this omp session${ownership.transferredFrom ? `; transferred from ${ownership.transferredFrom.sessionId}` : ""}.`);
+      },
+    },
     settings: {
       desc: "view or toggle plugin settings (.ompfest.json): /fest settings [key] [value]",
       run: async (args, ctx) => {
@@ -599,7 +656,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Guided festival control: /fest [next|status|show|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
+    description: "Guided festival control: /fest [next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")
