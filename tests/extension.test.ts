@@ -148,7 +148,7 @@ describe("ompFest extension", () => {
     await handler?.("plan restructure prenatal form", ctx);
     expect(userMessages).toHaveLength(1);
     expect(userMessages[0]).toContain("interview");
-    expect(userMessages[0]).toContain("restructure prenatal form");
+    expect(userMessages[0]).toContain("New planning is independent");
   });
 
   it("passes images through the input hook when /fest plan has an attachment", async () => {

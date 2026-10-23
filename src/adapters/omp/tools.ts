@@ -692,6 +692,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description:
       "Inspect the project first, then preview a typed spec to generate deterministic STRUCTURE.md and an approval summary. " +
       "For fast, low-error planning, call fest_plan_draft first; it generates stable IDs and the canonical plan path. " +
+      "New plans do not require an existing festival selection or ownership; only existing-festival tasks, promotion, and reference revisions do. " +
       "Preview validates acceptance coverage, dependencies, existing/proposed paths and verification evidence. " +
       "After human approval, scaffold using the returned approvedRevision; changed plans or references require new approval. " +
       "The parser and generated tree must match the approved counts. One phase and sequence are valid for simple tasks. " +

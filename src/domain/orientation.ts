@@ -158,7 +158,7 @@ export function planInterviewKickoff(goal: string, visualGuidance?: string): str
     "Use repository evidence to resolve everything else. Do not implement before approval.",
     "Then call fest_plan action:'preview' with the structured proposal.",
     "When the native review returns approval:'approved', call fest_plan action:'scaffold' with its planRevision.",
-    "If another session owns the selected festival or overlaps the project, stop and show the conflict; never cancel or reset the other plan.",
+    "New planning is independent of selected festivals: create a new name and continue even when another session owns an existing festival. Only existing-festival work (tasks, promotion, or reference revisions) requires ownership; never cancel or reset another plan.",
   ].join("\n");
 }
 
