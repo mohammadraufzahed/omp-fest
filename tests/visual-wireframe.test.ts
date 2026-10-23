@@ -143,5 +143,28 @@ describe("fest_wireframe_create", () => {
     expect(auditPage).toContain("unverified; inspected paths: none verified");
     expect(auditPage).toContain("paths not found and not counted as evidence");
     expect(auditSvg).toContain("inside");
+    const invalidAudit = await call("test", {
+      outputDirectory: "audit-errors",
+      spec: {
+        title: "Audit diagnostics", slug: "audit-errors", direction: "ltr",
+        source: { width: 100, height: 100, displayWidth: 100, displayHeight: 100 },
+        components: [{ id: "inside", role: "surface", kind: "surface", x: 0, y: 0, width: 20, height: 20 }],
+        componentAudit: [
+          { component: "PersonnelDetailsModal", status: "matched", sourcePaths: ["README.md"], notes: "x".repeat(301) },
+          { component: "EmptyAudit", status: "no_match", sourcePaths: [], notes: "" },
+        ],
+        measurements: [], states: [], openQuestions: [],
+      },
+    }, undefined, undefined, { cwd: root });
+    const auditFailure: unknown = JSON.parse(invalidAudit.content[0]!.text);
+    expect(auditFailure).toMatchObject({
+      kind: "wireframe_failed",
+      diagnostics: [
+        { code: "AUDIT_NOTES_TOO_LONG", field: "spec.componentAudit[0].notes", component: "PersonnelDetailsModal" },
+        { code: "AUDIT_NOTES_REQUIRED", field: "spec.componentAudit[1].notes" },
+        { code: "AUDIT_PATHS_REQUIRED", field: "spec.componentAudit[1].sourcePaths" },
+      ],
+    });
+    expect(invalidAudit.content[0]!.text).toContain("301 characters; maximum is 300");
   });
 });

@@ -183,6 +183,13 @@ Missing audit paths do not block wireframe output: the tool returns them as
 `auditWarnings`, excludes them from verified evidence, and marks entries without any
 verified path as `unverified` in PAGE.md and the SVG.
 
+Audit entries use exactly `component`, `status`, `sourcePaths`, and `notes`.
+`notes` must be nonempty and at most 300 characters; `sourcePaths` must contain
+nonempty relative inspected paths. Audit input failures return all affected
+field paths and diagnostic codes together, distinguishing missing paths, missing
+notes, and overlong notes. Do not add `paths`/`inspectedPaths` aliases or search
+installed binaries to repair an audit; fix only the fields named in diagnostics.
+
 SVG.js and svgdom are runtime dependencies for this headless renderer. The tool does
 not perform image recognition itself: the calling model extracts the screenshot and
 inspects the target project, then passes those findings through the stable schema.

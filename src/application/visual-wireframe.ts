@@ -3,6 +3,20 @@ import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { createSVGWindow } from "svgdom";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+export interface WireframeDiagnostic {
+  code: string;
+  field: string;
+  component: string;
+  message: string;
+}
+
+export class WireframeInputError extends Error {
+  constructor(readonly diagnostics: WireframeDiagnostic[]) {
+    super(diagnostics.map((issue) => `${issue.field}: ${issue.message}`).join("; "));
+    this.name = "WireframeInputError";
+  }
+}
+
 export type WireframeCategory = string;
 export type WireframeKind = string;
 export type WireframePrimitive = "rectangle" | "text-bar" | "line" | "circle" | "ellipse" | "chevron" | "checkbox";
@@ -192,14 +206,25 @@ async function validate(spec: WireframeSpec, workingDirectory: string): Promise<
   }
   const missingAuditPaths = new Map<string, string[]>();
   const audited = new Set<string>();
+  const auditIssues: WireframeDiagnostic[] = [];
+  for (const [index, entry] of spec.componentAudit.entries()) {
+    const field = `spec.componentAudit[${index}]`;
+    if (typeof entry.notes !== "string" || !entry.notes.trim()) {
+      auditIssues.push({ code: "AUDIT_NOTES_REQUIRED", field: `${field}.notes`, component: entry.component, message: "Supply nonempty notes describing the inspection." });
+    } else if (entry.notes.length > MAX_TEXT) {
+      auditIssues.push({ code: "AUDIT_NOTES_TOO_LONG", field: `${field}.notes`, component: entry.component, message: `Notes contain ${entry.notes.length} characters; maximum is ${MAX_TEXT}. Shorten notes only; keep sourcePaths unchanged.` });
+    }
+    if (!Array.isArray(entry.sourcePaths) || !entry.sourcePaths.length ||
+        entry.sourcePaths.some((path) => typeof path !== "string" || !path.trim())) {
+      auditIssues.push({ code: "AUDIT_PATHS_REQUIRED", field: `${field}.sourcePaths`, component: entry.component, message: "Supply a nonempty array of relative paths actually inspected. The canonical field is sourcePaths, not paths or inspectedPaths." });
+    }
+  }
+  if (auditIssues.length) throw new WireframeInputError(auditIssues);
   for (const entry of spec.componentAudit) {
     if (!entry.component.trim() || entry.component.length > MAX_TEXT || audited.has(entry.component)) {
       throw new Error(`invalid or duplicate component audit entry: ${entry.component}`);
     }
     audited.add(entry.component);
-    if (!entry.notes.trim() || entry.notes.length > MAX_TEXT || !entry.sourcePaths.length) {
-      throw new Error(`component audit requires inspected paths and notes: ${entry.component}`);
-    }
     for (const sourcePath of entry.sourcePaths) {
       if (isAbsolute(sourcePath)) throw new Error(`component audit paths must be relative: ${sourcePath}`);
       const resolved = resolve(workingDirectory, sourcePath);

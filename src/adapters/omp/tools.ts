@@ -20,7 +20,7 @@ import { festivalConstraints, seedFestivalRules, stampGateRules } from "../../ap
 import { recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
 import { applyReferenceRevision, findReuseCandidates, inspectReferenceRevision, renderPlanPreview } from "../../application/visual-plan-review.js";
 import { installVisualReferences, prepareVisualReferences, referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
-import { createWireframe, type WireframeSpec } from "../../application/visual-wireframe.js";
+import { createWireframe, WireframeInputError, type WireframeSpec } from "../../application/visual-wireframe.js";
 import { structuredPlanSchema, type StructuredPlan } from "../../application/structured-plan.js";
 import { normalizePlanInput } from "../../application/plan-input.js";
 import { approvedPlan, installApprovedTasks, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
@@ -966,7 +966,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           component: z.string().describe("Semantic component name/role inspected in the target project"),
           status: z.enum(["matched", "no_match"]),
           sourcePaths: z.array(z.string()).describe("Existing relative project paths actually inspected; matched entries cite implementation sources, no_match entries cite only existing files/directories searched"),
-          notes: z.string().describe("What was found or what existing project paths were checked"),
+          notes: z.string().describe("Nonempty inspection summary, maximum 300 characters. Longer notes must be shortened, not moved into alias fields."),
         })).describe("Project component discovery results; never invent candidate paths. Missing source paths are reported in auditWarnings, excluded from verified evidence, and marked unverified in PAGE.md"),
         measurements: z.array(z.object({
           label: z.string().describe("Measured gap or dimension name"),
@@ -989,7 +989,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         const result = await createWireframe(params.outputDirectory, ctx.cwd, params.spec);
         return textResult({ kind: "wireframe_created", ...result });
       } catch (error) {
-        return textResult({ kind: "wireframe_failed", error: String(error) });
+        return textResult({
+          kind: "wireframe_failed",
+          ...(error instanceof WireframeInputError
+            ? { diagnostics: error.diagnostics, hint: "Fix only the named fields. Use the tool schema; do not search binaries or add compatibility aliases." }
+            : { error: String(error) }),
+        });
       }
     },
   });
