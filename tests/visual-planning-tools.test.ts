@@ -127,6 +127,21 @@ describe("visual planning tool handoff", () => {
     expect(await readFile(join(festival, "references", "pages", "results", "wireframe.svg"), "utf8")).toContain("Find</text>");
     expect(scaffoldFromPlan).toHaveBeenCalledTimes(2);
   });
+  it("creates a compact draft with stable IDs before the full plan preview", async () => {
+    const { call } = await setup();
+    const draft = await call("fest_plan_draft", {
+      name: "feature",
+      goal: "Fix sidebar overflow",
+      scope: ["Sidebar layout"],
+      acceptance: ["Sidebar remains usable"],
+      inspection: [{ path: "package.json", reason: "Existing test command" }],
+    });
+    expect(draft.kind).toBe("plan_draft");
+    expect((draft.spec as { phases: { id: string }[] }).phases[0]?.id).toBe("build");
+    expect((draft.spec as { acceptance: { id: string }[] }).acceptance[0]?.id).toBe("ac-1");
+    expect(draft.plan).toContain(".ompfest/plans/feature.STRUCTURE.md");
+  });
+
   it("opens a native proposal review before allowing scaffolding", async () => {
     const { plan, spec, call } = await setup();
     const ui = {

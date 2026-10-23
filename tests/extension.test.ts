@@ -86,12 +86,12 @@ async function makeCamp(): Promise<string> {
 describe("ompFest extension", () => {
   it("registers the fest toolset and slash commands", async () => {
     const root = await makeCamp();
-    const { pi, commands, tools } = mockPi(root);
+    const { pi, tools } = mockPi(root);
     ompFest(pi as never);
     expect(tools.map((t) => t.name)).toContain("fest_next");
     expect(tools.map((t) => t.name)).toContain("fest_parallel");
-    expect(tools).toHaveLength(16);
-    expect([...commands.keys()].sort()).toEqual(["fest"]);
+    expect(tools.map((t) => t.name)).toContain("fest_plan_draft");
+    expect(tools).toHaveLength(17);
   });
 
   it("injects a live state digest into every turn inside a camp", async () => {

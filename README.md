@@ -50,12 +50,13 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
 - 📟 **live status line** — `🏕 camp ▸ festival ▸ task 22/30 ▸ ⛔ gate`
   always on screen, fed by the progress event log. zero prompts spent.
  - 🗺️ **fast native planning** — `/fest plan <goal>` inspects first, asks only blocking questions in at most two short rounds, then opens an omp-native proposal review. Approval is revision-locked; conflicts never cancel another plan.
+ - 🧰 **repair-friendly plan inputs** — plan paths, project-relative inspection/verification paths, and common unstable IDs are normalized before validation. Failures return compact field-level diagnostics instead of dumping the fest CLI transcript.
  - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
  - 🎯 **session festival selection** — `/fest select [festival]` lists available festivals, claims one for the current omp session, persists the selection through resume/branch/tree, and requires explicit confirmation before transferring ownership from another session. Claims use an atomic ownership record.
- - 🛠️ **16 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `next`, `status`, `show`, `select`, `task`, `plan`, `promote`, `validate`,
+ - 🛠️ **17 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `next`, `status`, `show`, `select`, `task`, `plan`, `promote`, `validate`,
    `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
    `camp`, `idea`, `help` — with live autocomplete on subs, task actions, and festival ids.
-   Nothing hardcoded, everything discovered.
+   `fest_plan_draft` creates stable IDs and canonical paths before `fest_plan`; nothing hardcoded, everything discovered.
  - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
 
 ### Plan from an inspected repository

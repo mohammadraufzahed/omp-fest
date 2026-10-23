@@ -22,6 +22,7 @@ import { applyReferenceRevision, findReuseCandidates, inspectReferenceRevision, 
 import { installVisualReferences, prepareVisualReferences, referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
 import { createWireframe, type WireframeSpec } from "../../application/visual-wireframe.js";
 import { structuredPlanSchema, type StructuredPlan } from "../../application/structured-plan.js";
+import { normalizePlanInput } from "../../application/plan-input.js";
 import { approvedPlan, installApprovedTasks, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
@@ -83,6 +84,42 @@ function textResult(payload: unknown): ToolResult {
     ],
   };
 }
+function compactBlockedUnit(unit: Extract<NextUnit, { kind: "blocked" }>): ToolResult {
+  const issues = unit.errors.slice(0, 12).map((issue) => ({
+    file: issue.file,
+    markers: issue.markers.slice(0, 6),
+    ...(issue.error ? { error: issue.error } : {}),
+  }));
+  return textResult({
+    kind: "blocked",
+    issueCount: unit.errors.length,
+    issues,
+    ...(unit.errors.length > issues.length ? { truncated: unit.errors.length - issues.length } : {}),
+    hint: "Fix the listed files only, then call fest_next again. Use fest_markers for marker details; do not paste raw validation output into the plan.",
+  });
+}
+function planFailure(error: unknown, extra: Record<string, unknown> = {}): ToolResult {
+  const raw = String(error).replace(/^Error:\s*/, "");
+  const message = raw.length > 600 ? `${raw.slice(0, 600)}…` : raw;
+  const field = /^([^\s]+)\s/.exec(message)?.[1];
+  const code =
+    message.includes("must be project-relative") ? "PROJECT_RELATIVE_PATH_REQUIRED"
+      : message.includes("does not exist") ? "PATH_NOT_FOUND"
+        : message.includes("stable identifier") ? "INVALID_IDENTIFIER"
+          : message.includes("Plan must be") ? "INVALID_PLAN_PATH"
+            : message.includes("Verification cwd") ? "INVALID_VERIFICATION_CWD"
+              : "PLAN_VALIDATION_FAILED";
+  return textResult({
+    kind: "plan_failed",
+    code,
+    ...(field ? { field } : {}),
+    error: message,
+    diagnostics: [{ code, ...(field ? { field } : {}), message }],
+    ...extra,
+  });
+}
+
+
 
 async function interactivePlanReview(
   ctx: ToolContextLike,
@@ -297,7 +334,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         }
         return textResult({ ...unit, ...(visualReferences.length > 0 ? { visualReferences } : {}) });
       }
-      return textResult(unit);
+      return unit.kind === "blocked" ? compactBlockedUnit(unit) : textResult(unit);
     },
   });
 
@@ -584,10 +621,81 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   });
 
   pi.registerTool({
+    name: "fest_plan_draft",
+    label: "Draft Fest Plan",
+    description:
+      "Build a compact, normalized plan draft from plain-language fields. Generates stable IDs and the canonical camp plan path without writing files or starting a festival.",
+    parameters: z.object({
+      name: z.string().describe("Festival name/slug"),
+      goal: z.string().describe("Outcome the plan should produce"),
+      scope: z.array(z.string()).describe("Included work"),
+      acceptance: z.array(z.string()).describe("Observable Done-When statements"),
+      inspection: z.array(z.object({ path: z.string(), reason: z.string() })).describe("Project-relative paths actually inspected"),
+      workingDir: z.string().optional().describe("Camp-relative or absolute project path"),
+      exclusions: z.array(z.string()).optional().describe("Explicitly excluded work"),
+      files: z.array(z.string()).optional().describe("Existing project-relative files touched by the task"),
+      verification: z.object({ command: z.string(), evidencePath: z.string(), expected: z.string() }).optional(),
+      visualIntent: z.enum(["ui_visual", "document_or_pdf", "backend_or_api", "bug_diagnostic", "mixed", "unknown"]).optional(),
+    }),
+    async execute(_id: string, params: {
+      name: string; goal: string; scope: string[]; acceptance: string[];
+      inspection: { path: string; reason: string }[]; workingDir?: string; exclusions?: string[];
+      files?: string[]; verification?: { command: string; evidencePath: string; expected: string };
+      visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown";
+    }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const root = await campRootOf(deps, ctx);
+      if (!root) return await idleResult(deps, ctx);
+      const project = await resolveWorkingDir(root, deps.camp, params.workingDir);
+      const missing = [
+        ...(params.scope.length ? [] : ["scope"]),
+        ...(params.acceptance.length ? [] : ["acceptance"]),
+        ...(params.inspection.length ? [] : ["inspection"]),
+      ];
+      if (!project.dir || missing.length > 0) {
+        return textResult({
+          kind: "plan_draft_incomplete",
+          missing,
+          projects: project.candidates,
+          hint: "Supply only the listed missing fields; do not construct nested phase/task IDs manually.",
+        });
+      }
+      const acceptance = params.acceptance.map((description, index) => ({ id: `ac-${index + 1}`, description }));
+      const files = (params.files ?? []).map((path) => ({ path, status: "existing" as const }));
+      const task = {
+        id: "implement",
+        title: params.goal,
+        description: params.goal,
+        dependsOn: [],
+        implements: acceptance.map((item) => item.id),
+        verifies: acceptance.map((item) => item.id),
+        files,
+        verification: params.verification ? [{ ...params.verification, cwd: "." }] : [],
+      };
+      return textResult({
+        kind: "plan_draft",
+        plan: join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`),
+        workingDir: project.dir,
+        visualIntent: params.visualIntent ?? "unknown",
+        spec: {
+          goal: params.goal,
+          scope: params.scope,
+          exclusions: params.exclusions ?? [],
+          acceptance,
+          questions: [],
+          inspection: params.inspection,
+          phases: [{ id: "build", name: "BUILD", type: "implementation", sequences: [{ id: "implement", name: "IMPLEMENT", tasks: [task] }] }],
+        },
+        nextSteps: "Review this draft, then pass its spec unchanged to fest_plan action:'preview'.",
+      });
+    },
+  });
+
+  pi.registerTool({
     name: "fest_plan",
     label: "Fest Plan (Scaffold From Plan)",
     description:
       "Inspect the project first, then preview a typed spec to generate deterministic STRUCTURE.md and an approval summary. " +
+      "For fast, low-error planning, call fest_plan_draft first; it generates stable IDs and the canonical plan path. " +
       "Preview validates acceptance coverage, dependencies, existing/proposed paths and verification evidence. " +
       "After human approval, scaffold using the returned approvedRevision; changed plans or references require new approval. " +
       "The parser and generated tree must match the approved counts. One phase and sequence are valid for simple tasks. " +
@@ -612,10 +720,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!root) {
         return await idleResult(deps, ctx);
       }
-      if (params.action && params.referenceAction) return textResult({ kind: "plan_failed", error: "Use action for the full plan preview/scaffold flow, or referenceAction for an existing reference revision—not both." });
-      if (!params.action && !params.referenceAction) return textResult({ kind: "plan_failed", error: "Choose action:'preview' with a structured spec, then action:'scaffold' with the human-approved planRevision." });
-      if (params.action === "preview" && !params.spec) return textResult({ kind: "plan_failed", error: "Plan preview requires a structured spec." });
-      if (params.action === "scaffold" && (!params.approvedRevision || params.spec)) return textResult({ kind: "plan_failed", error: "Scaffolding requires the human-approved planRevision and must omit spec." });
+      const canonicalPlan = join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
+      const planPath = resolve(params.plan) === resolve(canonicalPlan) ? params.plan : canonicalPlan;
+      const planWarnings = params.plan === planPath ? [] : [`plan was normalized to ${planPath}`];
+      if (params.action && params.referenceAction) return planFailure("Use action for the full plan preview/scaffold flow, or referenceAction for an existing reference revision—not both.");
+      if (!params.action && !params.referenceAction) return planFailure("Choose action:'preview' with a structured spec, then action:'scaffold' with the human-approved planRevision.");
+      if (params.action === "preview" && !params.spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
+      if (params.action === "scaffold" && (!params.approvedRevision || params.spec)) return planFailure("Scaffolding requires the human-approved planRevision and must omit spec.", { code: "INVALID_SCAFFOLD_INPUT" });
       if (params.referencesDir && params.visualIntent && params.visualIntent !== "ui_visual") {
         return textResult({
           kind: "plan_failed",
@@ -628,40 +739,45 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       let bundle;
       if (params.referencesDir) {
         try {
-          bundle = await prepareVisualReferences(root, params.plan, params.referencesDir);
+          bundle = await prepareVisualReferences(root, planPath, params.referencesDir);
         } catch (error) {
-          return textResult({ kind: "plan_failed", error: String(error), hint: "Fix the visual bundle before scaffolding." });
+          return planFailure(error, { hint: "Fix the visual bundle before scaffolding." });
         }
       }
       if (params.action === "preview") {
         try {
           const project = await resolveWorkingDir(root, deps.camp, params.workingDir);
-          if (!project.dir) return textResult({ kind: "plan_failed", error: "Choose a target project before preview", projects: project.candidates });
+          if (!project.dir) return planFailure("Choose a target project before preview", { projects: project.candidates });
           const spec = params.spec;
-          if (!spec) return textResult({ kind: "plan_failed", error: "Plan preview requires a structured spec." });
-          const prepared = await previewPlan(root, params.plan, {
+          if (!spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
+          const normalized = normalizePlanInput(spec, resolve(root, project.dir));
+          const prepared = await previewPlan(root, planPath, {
             name: params.name, workingDir: project.dir, rules: params.rules ?? "",
-            ...(params.referencesDir ? { referencesDir: params.referencesDir } : {}), spec,
+            ...(params.referencesDir ? { referencesDir: params.referencesDir } : {}), spec: normalized.spec,
           }, bundle?.files);
           const visual = bundle ? await renderPlanPreview(prepared.plan, bundle) : undefined;
           const reuseCandidates = bundle ? await findReuseCandidates(root, project.dir, bundle) : [];
           return await interactivePlanReview(ctx, {
             kind: "plan_preview", plan: prepared.plan, preview: prepared.preview, previewFile: prepared.previewFile,
             counts: prepared.counts, planRevision: prepared.planRevision, reuseCandidates,
+            ...(planWarnings.length || normalized.warnings.length ? { warnings: [...planWarnings, ...normalized.warnings] } : {}),
             ...(visual ? { visualPreview: visual } : {}),
           });
         } catch (error) {
-          return textResult({ kind: "plan_failed", error: String(error) });
+          return planFailure(error);
         }
       }
       if (params.action === "scaffold") {
         try {
           const revision = params.approvedRevision;
           if (!revision) throw new Error("Scaffolding requires the human-approved planRevision.");
-          approved = await approvedPlan(root, params.plan, params.name, revision, bundle?.files);
+          const normalizedWorkingDir = params.workingDir
+            ? (await resolveWorkingDir(root, deps.camp, params.workingDir)).dir
+            : undefined;
+          approved = await approvedPlan(root, planPath, params.name, revision, bundle?.files);
           if (approved.artifact.name !== params.name ||
               approved.artifact.referencesDir !== params.referencesDir ||
-              (params.workingDir !== undefined && approved.artifact.workingDir !== params.workingDir) ||
+              (normalizedWorkingDir !== undefined && approved.artifact.workingDir !== normalizedWorkingDir) ||
               (params.rules !== undefined && approved.artifact.rules !== params.rules)) {
             throw new Error("Scaffold options differ from the approved preview. Preview the changes before scaffolding.");
           }
@@ -681,7 +797,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             return textResult({ kind: "plan_failed", error: resolved?.error ?? "Festival not found" });
           }
           if (params.referenceAction === "preview") {
-            const preview = await renderPlanPreview(params.plan, bundle);
+            const preview = await renderPlanPreview(planPath, bundle);
             const project = await resolveWorkingDir(root, deps.camp, params.workingDir);
             const reuseCandidates = await findReuseCandidates(root, project.dir, bundle);
             const impact = resolved?.dir ? await inspectReferenceRevision(resolved.dir, bundle, deps.detect) : undefined;
@@ -703,7 +819,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         }
       }
       if (!approved) return textResult({ kind: "plan_failed", error: "No approved structured plan is available to scaffold." });
-      const previewOutput = await deps.fest.scaffoldFromPlan(root, { plan: params.plan, name: params.name, dest: "planning", dryRun: true });
+      const previewOutput = await deps.fest.scaffoldFromPlan(root, { plan: planPath, name: params.name, dest: "planning", dryRun: true });
       const previewResult = parseScaffoldPlanResult(previewOutput);
       const hasCounts = (
         result: ScaffoldPlanResult | undefined,
@@ -726,7 +842,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!matchesApproved(previewResult)) {
         return textResult({ kind: "plan_failed", error: "Parser output differs from the approved plan; no festival was created.", expected: approved.counts, actual: { phases: previewResult.phases_created, sequences: previewResult.sequences_created, tasks: previewResult.tasks_created }, output: previewOutput });
       }
-      const output = await deps.fest.scaffoldFromPlan(root, { plan: params.plan, name: params.name, dest: "planning" });
+      const output = await deps.fest.scaffoldFromPlan(root, { plan: planPath, name: params.name, dest: "planning" });
       deps.detect.bustCache?.();
       const parsed = parseScaffoldPlanResult(output);
       if (parsed?.ok !== true || !hasCounts(parsed) || !matchesApproved(parsed)) {

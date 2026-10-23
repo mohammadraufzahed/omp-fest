@@ -8,7 +8,7 @@
  * The plugin stamps the resolved dir into every sequence goal missing it.
  */
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 import type { CampCli } from "../ports.js";
 
@@ -53,6 +53,11 @@ export async function resolveWorkingDir(
   explicit?: string,
 ): Promise<{ dir?: string; candidates: string[] }> {
   if (explicit && explicit.length > 0) {
+    const absolute = resolve(campRoot, explicit);
+    const relativeDir = relative(campRoot, absolute);
+    if (resolve(explicit) === absolute && relativeDir !== ".." && !relativeDir.startsWith(`..${sep}`)) {
+      return { dir: relativeDir || ".", candidates: [] };
+    }
     return { dir: explicit, candidates: [] };
   }
   // `camp project list` is authoritative — projects/ also holds camp-internal
