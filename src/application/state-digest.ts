@@ -24,19 +24,15 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
   if (!location.campRoot) {
     return undefined;
   }
-  // Resolution: cwd inside a festival > the festival this session claimed via
-  // fest_* tools > the camp-wide active pick. Without the middle step two
-  // agents on different festivals both see whichever festival sorts first.
-  const festivalDir =
-    location.festivalDir ??
-    (await claimedFestivalDir(deps.tracker, deps.detect, sessionId, location.campRoot)) ??
-    (await deps.detect.activeFestival(location.campRoot));
+  // A new omp session is intentionally unselected. Never fall back to the
+  // camp-wide active festival because that can expose another agent's work.
+  const festivalDir = await claimedFestivalDir(deps.tracker, deps.detect, sessionId, location.campRoot);
   if (!festivalDir) {
     const festivals = await deps.detect.listFestivals(location.campRoot);
     const names = festivals.map((f) => `${f.id} (${f.status})`).join(", ") || "none";
     return [
       `fest: camp=${location.campName ?? location.campRoot} — no active festival. festivals: ${names}.`,
-      "Pick one (festival arg / /fest next <id>) or start the planning flow (/fest idea → /fest plan).",
+      "Select one with /fest select <id> (ownership transfer requires confirmation), or start the planning flow (/fest idea → /fest plan).",
       RULES,
     ].join("\n");
   }

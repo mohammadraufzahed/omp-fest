@@ -114,7 +114,7 @@ describe("session festival claim", () => {
     expect(laneTasks(s2Again!)).toEqual(["001_IMPLEMENT/01_seq/01_task-a.md"]);
   });
 
-  it("defaults to the camp-wide pick only while the session has no claim", async () => {
+  it("keeps a new session unselected until it explicitly chooses a festival", async () => {
     const root = await makeCamp();
     await makeFestival(root, "fest-a", "01_task-a.md");
     const tracker = new LoopTracker();
@@ -127,7 +127,7 @@ describe("session festival claim", () => {
     });
     const parallel = tools.get("fest_parallel")?.execute;
     const fresh = await parallel?.("t", {}, undefined, undefined, ctxFor(root, "fresh"));
-    expect(laneTasks(fresh!)).toEqual(["001_IMPLEMENT/01_seq/01_task-a.md"]);
+    expect(laneTasks(fresh!)).toEqual([]);
   });
 
   it("keeps the claim live across a promote-style status-dir rename", async () => {

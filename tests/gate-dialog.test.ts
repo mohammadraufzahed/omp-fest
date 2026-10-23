@@ -92,16 +92,22 @@ function parse(result: ToolResultShape): Record<string, unknown> {
   return JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
 }
 
-function harness(calls: FestCalls, config?: Partial<OmpFestConfig>) {
+function harness(calls: FestCalls, config: Partial<OmpFestConfig> = {}) {
   const { pi, tools } = makePi();
+  const tracker = new LoopTracker();
   registerTools(pi, {
     fest: fakeFest(calls),
     camp: { projects: () => Promise.resolve([]) } as unknown as CampCli,
     detect: new CampFsDetect(),
-    tracker: new LoopTracker(),
+    tracker,
     config: () => Promise.resolve({ ...DEFAULT_CONFIG, ...config }),
   });
-  return tools.get("fest_gate_submit")!.execute;
+  const execute = tools.get("fest_gate_submit")!.execute;
+  return async (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => {
+    const cwd = (ctx as { cwd: string }).cwd;
+    tracker.claimFestival("s1", join(cwd, "festivals", "active", "fest-a"));
+    return execute(id, params, signal, update, ctx);
+  };
 }
 
 describe("fest_gate_submit dialog", () => {

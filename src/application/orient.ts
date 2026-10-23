@@ -24,8 +24,7 @@ export async function orientSession(
   if (location.kind === "outside" || !location.campRoot) {
     return { location, note: "", statusLine: "" };
   }
-  const festivalDir =
-    location.festivalDir ?? claimedDir ?? (await detect.activeFestival(location.campRoot));
+  const festivalDir = claimedDir;
   if (!festivalDir) {
     const statusLine = `🏕 ${location.campName ?? "camp"}`;
     return {

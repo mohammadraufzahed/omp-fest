@@ -73,6 +73,8 @@ async function setup() {
     workflowAdvance,
     workflowApprove,
   } as unknown as FestCli;
+  const tracker = new LoopTracker();
+  tracker.claimFestival("session-1", festival);
   const tools = new Map<string, Execute>();
   registerTools({
     zod: { object: schema, string: schema, number: schema, boolean: schema, enum: schema, array: schema } as never,
@@ -81,7 +83,7 @@ async function setup() {
     fest,
     camp: { projects: () => Promise.resolve([]) } as unknown as CampCli,
     detect: new CampFsDetect(),
-    tracker: new LoopTracker(),
+    tracker,
   });
   const ctx = { cwd: root, sessionManager: { getSessionId: () => "session-1" } };
   async function call(name: string, params: Record<string, unknown> = {}, ui?: Record<string, unknown>) {
@@ -91,16 +93,18 @@ async function setup() {
   async function scaffold(params: Record<string, unknown>) {
     const preview = await call("fest_plan", { ...params, action: "preview", spec });
     expect(preview.kind).toBe("plan_preview");
-    return call("fest_plan", { ...params, action: "scaffold", approvedRevision: preview.planRevision });
+    const result = await call("fest_plan", { ...params, action: "scaffold", approvedRevision: preview.planRevision });
+    await handler?.("select feature", { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
+    return result;
   }
   let handler: Parameters<PiCommandsLike["registerCommand"]>[1]["handler"] | undefined;
   const sent: string[] = [];
   registerCommands({
     registerCommand: (_name, options) => { handler = options.handler; },
     sendMessage: (message) => { sent.push(String(message.content)); },
-  }, { fest, camp: {} as CampCli, detect: new CampFsDetect() });
+  }, { fest, camp: {} as CampCli, detect: new CampFsDetect(), tracker });
   async function command(args: string): Promise<string> {
-    await handler?.(args, { cwd: root, ui: { notify: vi.fn() } });
+    await handler?.(args, { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
     return sent.at(-1) ?? "";
   }
   return { root, referencesDir, festival, plan, spec, taskPath, scaffoldFromPlan, promote, taskComplete, workflowAdvance, workflowApprove, call, command, scaffold, fest };

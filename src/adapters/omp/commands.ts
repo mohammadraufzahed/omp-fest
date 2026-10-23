@@ -2,7 +2,7 @@
  * Human-facing slash commands with live autocomplete sourced from the CLIs —
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
-import { matchFestival } from "../../application/fest-resolve.js";
+import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { claimFestivalOwnership, festivalOwner } from "../../application/festival-ownership.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
@@ -85,11 +85,11 @@ async function festivalDirOf(deps: CommandDeps, ctx: CommandCtx, selector?: stri
     }
     throw new Error(`No festival matches "${selector}" — known: ${all.map((f) => f.id).join(", ") || "none"}`);
   }
-  const dir = location.festivalDir ?? (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
-  if (!dir) {
-    throw new Error("No festival found — pass a festival name or run inside a camp");
-  }
-  return dir;
+  const claimed = location.campRoot && deps.tracker
+    ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)
+    : undefined;
+  if (claimed) return claimed;
+  throw new Error("No festival selected for this omp session — use /fest select <festival>.");
 }
 
 interface AutocompleteItemLike {

@@ -216,15 +216,11 @@ async function festivalDirOf(
       },
     };
   }
-  // cwd inside a festival > this session's claimed festival > the camp-wide
-  // active pick. The claim is what lets two agents in one camp work two
-  // different festivals without stealing each other's target.
-  const dir =
-    location.festivalDir ??
-    (location.campRoot
-      ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)
-      : undefined) ??
-    (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
+  // New sessions are intentionally unselected. The active festival is only a
+  // candidate shown by idleResult; it must never be claimed implicitly.
+  const dir = location.campRoot
+    ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)
+    : undefined;
   return { dir, campRoot: location.campRoot };
 }
 
@@ -258,7 +254,7 @@ async function dirOrResult(
         kind: "festival_owned",
         festival: basename(resolved.dir),
         owner: ownership.owner?.sessionId,
-        hint: "This festival belongs to another omp session. Use fest_select with transfer:true after explicit human confirmation; no work was started.",
+        hint: "This festival belongs to another omp session. Use /fest select <id> and confirm ownership transfer; no work was started.",
       }),
     };
   }
@@ -284,7 +280,7 @@ async function idleResult(deps: ToolDeps, ctx: ToolContextLike) {
     ...(location.campRoot ? { campRoot: location.campRoot } : {}),
     festivals: festivals.map((f) => ({ id: f.id, status: f.status, path: f.path })),
     hint: festivals.length > 0
-      ? "Choose one of the listed festivals (/fest next <id> or pass festival:<id> to the fest_* tools) or, for brand-new work, the planning flow (/fest idea → /fest plan). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools."
+      ? "Select a festival first with /fest select <id> (ownership transfer requires confirmation), or use festival:<id> explicitly. For brand-new work, use /fest idea → /fest plan. Never run `fest`/`camp` via shell — use the fest_*/camp_* tools."
       : "No festival exists in this camp yet — brand-new work starts with the planning flow (/fest idea → /fest plan <goal>). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools.",
   });
 }
