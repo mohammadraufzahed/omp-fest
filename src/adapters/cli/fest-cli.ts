@@ -53,7 +53,8 @@ export class FestCliAdapter implements FestCli {
     if (action === "update" && opts.percent) {
       args.push(opts.percent);
     }
-    args.push("--yes", "--json");
+    if (CONFIRMING_TASK_ACTIONS.has(action)) args.push("--yes");
+    args.push("--json");
     await this.checked(this.exec.run("fest", args, festivalDir));
   }
 

@@ -34,6 +34,19 @@ describe("FestCliAdapter", () => {
     await fest.raw("/f", ["task", "completed", "01_task.md"]);
     expect(exec.calls[2]?.args).toContain("--yes");
   });
+  it("omits --yes for unblock and other non-confirming task mutations", async () => {
+    const exec = fakeExec({});
+    const fest = new FestCliAdapter(exec);
+    await fest.taskMutate("/f", "unblock", {});
+    await fest.taskMutate("/f", "update", { percent: "50%" });
+    await fest.taskMutate("/f", "reset", {});
+    expect(exec.calls.map((call) => call.args)).toEqual([
+      ["task", "unblock", "--json"],
+      ["task", "update", "50%", "--json"],
+      ["task", "reset", "--yes", "--json"],
+    ]);
+  });
+
 
   it("extracts commit hash", async () => {
     const exec = fakeExec({ stdout: "COMMIT\nHash 0f973a9\n" });
