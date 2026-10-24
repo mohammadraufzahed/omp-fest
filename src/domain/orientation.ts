@@ -56,25 +56,26 @@ export function buildOrientationNote(input: OrientationInput): string {
 }
 
 export const PARALLEL_HINT =
-  "Independent festival lanes: call fest_parallel for candidate sequences. Check dependencies and file overlap before bounded dispatch; workers return submissions to the supervisor, never run their own festival loop.";
+  "Parallel festival work: the coordinator uses fest_parallel/fest_supervisor with native omp subagents; independent omp sessions explicitly join via /fest join and coordinate exact-task claims, questions, and reports through fest_team. Do not cancel another plan or duplicate a claimed task. Same-project file locks exist only during native writes, not during idle task time.";
 
 export const RECOVERY_PLAYBOOK = [
   "fest_* tool recovery rules:",
   "- NEVER run `fest` or `camp` in the shell — the fest_*/camp_* tools handle cwd, --yes, and JSON",
-  "- NEVER implement festival work ad hoc — once a festival exists, EVERY change goes through the",
-  "  fest_next loop: call fest_next, implement ONLY the unit it returns, then fest_task_complete",
-  "  + fest_commit. Editing project files outside the loop leaves tasks pending and gates unsatisfied.",
-  "  After every successful fest_commit, immediately call fest_next and continue until kind 'complete';",
+  "- NEVER implement festival work ad hoc — once a festival exists, EVERY change goes through its",
+  "  assignment flow. The coordinator uses fest_next → fest_task_complete → fest_commit. A",
+  "  collaborator first joins with /fest join, then uses fest_team queue/claim, implements only that",
+  "  exact assignment, and submits actual evidence; collaborators never complete tasks or commit.",
+  "  After every coordinator fest_commit, immediately call fest_next and continue until kind 'complete';",
   "  do not stop after one task. Stop only at a human gate or a real blocker.",
-  "- NEVER track festival work with ad hoc todo lists — the festival plan IS the task list; fest_next is the only source of what to do next",
-  "- kind 'idle': at camp root with no festival — call camp_status to list festivals; for NEW work, start the plan workflow instead of writing your own todo list",
-  "- kind 'blocked': fix the listed files/markers, then call fest_next again",
-  "- kind 'gate_step': gather evidence and call fest_gate_submit — it asks the human directly; never approve",
-  "- kind 'task': work in the returned working_dir only after fest_supervisor queue confirms eligibility; overlapping tasks can proceed because writes lock exact files only while native write/edit tools execute. If queue reports a live lock, refresh after it clears; reclaim only an orphaned lock after confirming the writer stopped. Never complete or commit while the current task is blocked.",
-  "- never run bare `git commit` in a linked project — use fest_commit",
+  "- NEVER track festival work with ad hoc todo lists — the festival plan IS the task list; use fest_next or the shared fest_team queue as appropriate",
+  "- kind 'idle': no festival is selected in this session — call camp_status to list festivals; explicitly /fest select as coordinator or /fest join as collaborator; for NEW work, start planning",
+  "- kind 'blocked': fix the listed files/markers, then refresh the relevant task queue",
+  "- kind 'gate_step': coordinator gathers evidence and calls fest_gate_submit — it asks the human directly; never approve",
+  "- task eligibility comes from fest_supervisor for the coordinator or fest_team for joined sessions; overlapping tasks may proceed because write locks cover only native write/edit calls. If a lock is live, refresh after it clears; reclaim only an orphaned lock after confirming the writer stopped.",
+  "- never run bare `git commit` in a linked project — use fest_commit from the coordinator session",
+
+
 ].join("\n");
-
-
 export const PLAN_GUIDE = [
   "Guided planning protocol (inspect first; ask only material unanswered questions; the human approves):",
   "1. Read the target repository before interviewing or drafting. Resolve the camp project/workingDir",

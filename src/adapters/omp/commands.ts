@@ -3,12 +3,14 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
-import { claimFestivalOwnership, festivalOwner, type FestivalOwner } from "../../application/festival-ownership.js";
+import { joinFestivalTeam, transferFestivalTeamCoordinator, readFestivalTeam } from "../../application/festival-team.js";
+import { festivalOwner, type FestivalOwner, claimFestivalOwnership } from "../../application/festival-ownership.js";
+import { listFestivalCreationOrphans, quarantineFestival, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { LoopTracker } from "../../application/loop-tracker.js";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { referencesForTask, validateVisualReferences } from "../../application/visual-references.js";
 import { visualEvidenceStatus } from "../../application/visual-evidence.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
@@ -99,6 +101,15 @@ async function festivalDirOf(deps: CommandDeps, ctx: CommandCtx, selector?: stri
   if (claimed) return claimed;
   throw new Error("No festival selected for this omp session — use /fest select <festival>.");
 }
+
+async function coordinatorOnly(pi: PiCommandsLike, deps: CommandDeps, ctx: CommandCtx, festivalDir: string): Promise<boolean> {
+  const owner = await festivalOwner(festivalDir);
+  if (owner?.sessionId === sessionIdOf(ctx)) return true;
+  send(pi, "fest-status", `This action belongs to the festival coordinator${owner ? ` (${owner.sessionId})` : ""}. Use /fest join to collaborate; task work goes through fest_team.`);
+  return false;
+}
+
+const RAW_READ_COMMANDS: Record<string, true> = { list: true, show: true, status: true, rules: true, context: true, markers: true, version: true, types: true, chain: true, feedback: true, links: true, watch: true, deps: true, parse: true, tokens: true, "--help": true };
 
 interface AutocompleteItemLike {
   value: string;
@@ -265,7 +276,9 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           send(pi, "fest-status", "Not inside a camp. `camp init` creates one; `fest init` works standalone.");
           return;
         }
-        const dir = location.festivalDir ?? (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
+        const dir = location.festivalDir ?? (location.campRoot && deps.tracker
+          ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)
+          : undefined);
         const lines: string[] = [`Camp: ${location.campName ?? location.campRoot}`];
         if (dir) {
           lines.push(`Festival dir: ${dir}`, await deps.fest.status(dir));
@@ -338,6 +351,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       run: async (args, ctx) => {
         const [action = "show", ...rest] = args;
         const dir = await festivalDirOf(deps, ctx);
+        if (action !== "show" && !(await coordinatorOnly(pi, deps, ctx, dir))) return;
         if (action === "done") {
           const outstanding = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) => worker.status !== "accepted");
           if (outstanding.length) {
@@ -384,6 +398,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           return;
         }
         const dir = await festivalDirOf(deps, ctx, args[0]);
+        if (!(await coordinatorOnly(pi, deps, ctx, dir))) return;
         const visual = await validateVisualReferences(dir, deps.detect);
         if (visual.issues.length > 0) {
           send(pi, "fest-status", `Promotion blocked by visual references:\n${visual.issues.join("\n")}`);
@@ -396,6 +411,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "structure check: /fest validate [--fix]",
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx);
+        if (args.includes("--fix") && !(await coordinatorOnly(pi, deps, ctx, dir))) return;
         const result = await deps.fest.validate(dir, args.includes("--fix"));
         const visual = await validateVisualReferences(dir, deps.detect);
         const verification = visual.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
@@ -424,6 +440,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "workflow status/advance: /fest workflow [status|advance]",
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx);
+        if (args[0] === "advance" && !(await coordinatorOnly(pi, deps, ctx, dir))) return;
         send(pi, "fest-status", args[0] === "advance" ? await deps.fest.workflowAdvance(dir) : await deps.fest.workflowStatus(dir));
       },
     },
@@ -431,6 +448,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "approve the pending gate checkpoint (human attestation)",
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx);
+        if (!(await coordinatorOnly(pi, deps, ctx, dir))) return;
         const visual = await validateVisualReferences(dir, deps.detect);
         const verification = visual.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
         if (visual.issues.length || verification?.issues.length) {
@@ -474,6 +492,8 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     reject: {
       desc: "reject the pending checkpoint: /fest reject <reason>",
       run: async (args, ctx) => {
+        const dir = await festivalDirOf(deps, ctx);
+        if (!(await coordinatorOnly(pi, deps, ctx, dir))) return;
         let reason = args.join(" ");
         if (!reason && typeof ctx.ui.input === "function") {
           const typed = await ctx.ui.input("Reject checkpoint — reason", "what should be fixed?");
@@ -483,7 +503,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           }
           reason = typed;
         }
-        send(pi, "fest-gate", await deps.fest.workflowReject(await festivalDirOf(deps, ctx), reason || "no reason given"));
+        send(pi, "fest-gate", await deps.fest.workflowReject(dir, reason || "no reason given"));
       },
     },
     parallel: {
@@ -539,9 +559,17 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "raw fest passthrough: /fest cmd <args> — e.g. /fest cmd list --json",
       run: async (args, ctx) => {
         const location = await deps.detect.locate(ctx.cwd);
-        const cwd = location.festivalDir ?? (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined) ?? location.campRoot;
+        const cwd = location.festivalDir ?? (location.campRoot && deps.tracker
+          ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)
+          : undefined) ?? location.campRoot;
         if (!cwd) {
           send(pi, "fest-status", "Not inside a camp.");
+          return;
+        }
+        if (location.campRoot && resolve(cwd) !== resolve(location.campRoot)) {
+          if (!(await coordinatorOnly(pi, deps, ctx, cwd))) return;
+        } else if (!RAW_READ_COMMANDS[args[0] ?? ""]) {
+          send(pi, "fest-status", "Mutating raw fest commands require an explicitly selected festival. Use /fest select <festival> first; read-only camp commands remain available.");
           return;
         }
         const result = await deps.fest.raw(cwd, args);
@@ -603,6 +631,11 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
             : `No festival matches "${selector}".`);
           return;
         }
+        const pending = (await listFestivalCreationOrphans(location.campRoot)).find((item) => item.receipt.name === match.festival.id || item.festivalDir === match.festival.path);
+        if (pending) {
+          send(pi, "fest-status", `${match.festival.id} has an incomplete scaffold transaction. Review /fest orphans before selecting it.`);
+          return;
+        }
         const sid = sessionIdOf(ctx);
         const current = await festivalOwner(match.festival.path);
         let transfer: FestivalOwner | undefined;
@@ -616,14 +649,156 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           }
           transfer = current;
         }
+        if (transfer) await joinFestivalTeam(location.campRoot, match.festival.path, sid, transfer.sessionId);
         const ownership = await claimFestivalOwnership(match.festival.path, sid, transfer);
         if (ownership.kind !== "claimed") {
           send(pi, "fest-status", `Ownership changed concurrently; ${match.festival.id} remains with ${ownership.owner?.sessionId ?? "another session"}.`);
           return;
         }
+        try {
+          if (ownership.transferredFrom) {
+            await transferFestivalTeamCoordinator(location.campRoot, match.festival.path, ownership.transferredFrom.sessionId, sid);
+          } else {
+            await joinFestivalTeam(location.campRoot, match.festival.path, sid, sid);
+          }
+        } catch (error) {
+          if (ownership.transferredFrom) {
+            await claimFestivalOwnership(match.festival.path, ownership.transferredFrom.sessionId, ownership.owner).catch(() => undefined);
+          }
+          send(pi, "fest-status", `Festival selection failed while updating team coordination: ${String(error)}`);
+          return;
+        }
         deps.tracker?.claimFestival(sid, match.festival.path);
         pi.appendEntry?.(FESTIVAL_CLAIM_ENTRY, { festivalId: match.festival.id, festivalDir: match.festival.path, campRoot: location.campRoot });
         send(pi, "fest-status", `Selected ${match.festival.id} for this omp session${ownership.transferredFrom ? `; transferred from ${ownership.transferredFrom.sessionId}` : ""}.`);
+      },
+    },
+    join: {
+      desc: "join a festival for this omp session without transferring ownership: /fest join <festival>",
+      run: async (args, ctx) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        if (!location.campRoot) {
+          ctx.ui.notify("Not inside a camp", "warning");
+          return;
+        }
+        const selector = args.join(" ").trim();
+        if (!selector) {
+          send(pi, "fest-status", "Choose a festival explicitly: /fest join <festival-id>. New sessions remain unselected.");
+          return;
+        }
+        const match = matchFestival(await deps.detect.listFestivals(location.campRoot), selector);
+        if (match.kind !== "match") {
+          send(pi, "fest-status", match.kind === "ambiguous"
+            ? `Ambiguous festival "${selector}": ${match.matches.map((festival) => festival.id).join(", ")}`
+            : `No festival matches "${selector}".`);
+          return;
+        }
+        const pending = (await listFestivalCreationOrphans(location.campRoot)).find((item) => item.receipt.name === match.festival.id || item.festivalDir === match.festival.path);
+        if (pending) {
+          send(pi, "fest-status", `${match.festival.id} has an incomplete scaffold transaction. Review /fest orphans before joining it.`);
+          return;
+        }
+        const owner = await festivalOwner(match.festival.path);
+        if (!owner) {
+          send(pi, "fest-status", `${match.festival.id} has no coordinator. Use /fest select ${match.festival.id} in the session that will coordinate it.`);
+          return;
+        }
+        const sid = sessionIdOf(ctx);
+        await joinFestivalTeam(location.campRoot, match.festival.path, sid, owner.sessionId);
+        deps.tracker?.claimFestival(sid, match.festival.path);
+        pi.appendEntry?.(FESTIVAL_CLAIM_ENTRY, { festivalId: match.festival.id, festivalDir: match.festival.path, campRoot: location.campRoot });
+        send(pi, "fest-status", `Joined ${match.festival.id} as a collaborator. Ownership remains with ${owner.sessionId}; coordinate tasks through fest_team.`);
+      },
+    },
+    team: {
+      desc: "show the shared festival team board: /fest team [festival]",
+      run: async (args, ctx) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        if (!location.campRoot) throw new Error("Not inside a camp.");
+        const dir = await festivalDirOf(deps, ctx, args.join(" ").trim() || undefined);
+        const team = await readFestivalTeam(location.campRoot, dir);
+        const owner = await festivalOwner(dir);
+        if (!team) {
+          send(pi, "fest-status", `No team board exists for ${basename(dir)}. The coordinator selects with /fest select; collaborators join with /fest join.`);
+          return;
+        }
+        const lines = [
+          `Festival: ${basename(dir)}`,
+          `Coordinator session: ${team.coordinatorSessionId ?? owner?.sessionId ?? "not recorded"}`,
+          `Assignments: ${team.assignments.length}`,
+          ...team.assignments.map((assignment) => `- ${assignment.task} · ${assignment.status} · ${assignment.sessionId}${assignment.report ? ` · ${assignment.report.slice(0, 180)}` : ""}`),
+        ];
+        send(pi, "fest-status", lines.join("\n"));
+      },
+    },
+    orphans: {
+      desc: "review incomplete or unowned planning festivals; quarantine is reversible and always asks first: /fest orphans",
+      run: async (args, ctx) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        if (!location.campRoot) throw new Error("Not inside a camp.");
+        const root = location.campRoot;
+        const journals = await listFestivalCreationOrphans(root);
+        const festivals = await deps.detect.listFestivals(root);
+        const journalNames = new Set(journals.map((orphan) => orphan.receipt.name));
+        const legacy: typeof festivals = [];
+        for (const festival of festivals.filter((item) => item.status === "planning" && !journalNames.has(item.id))) {
+          const has = async (file: string) => {
+            const info = await lstat(join(festival.path, file)).catch(() => undefined);
+            return Boolean(info?.isFile() && !info.isSymbolicLink());
+          };
+          if (!(await has(".omp-fest-owner.json")) && !(await has("APPROVED_PLAN.json")) && !(await has(".omp-fest-creation.json"))) legacy.push(festival);
+        }
+        const [action, selector] = args;
+        if (action === "rollback") {
+          const found = journals.find((item) => item.receipt.id === selector);
+          if (!found) throw new Error("No matching creation transaction. Run /fest orphans to inspect exact IDs.");
+          const confirmed = await ctx.ui.confirm?.("Remove incomplete festival creation", `Roll back only ${found.receipt.name} from transaction ${found.receipt.id}? Removal proceeds only if its on-disk marker matches this transaction; otherwise it is preserved for manual inspection.`);
+          if (!confirmed) {
+            send(pi, "fest-status", "No cleanup performed.");
+            return;
+          }
+          const remaining = await rollbackFestivalCreation(found.receipt, found.festivalDir);
+          send(pi, "fest-status", remaining
+            ? `Preserved ${remaining.festivalDir ?? found.receipt.name}; transaction could not prove safe ownership. Inspect it manually.`
+            : `Rolled back incomplete creation ${found.receipt.name}.`);
+          deps.detect.bustCache?.();
+          return;
+        }
+        if (action === "quarantine") {
+          const found = legacy.find((item) => item.id === selector);
+          if (!found) throw new Error("No matching unowned legacy planning candidate. Run /fest orphans to inspect candidates.");
+          const confirmed = await ctx.ui.confirm?.("Quarantine planning festival", `Move ${found.id} out of fest listings into .ompfest/orphans? It has no owner or approved plan. The move is reversible with /fest orphans restore.`);
+          if (!confirmed) {
+            send(pi, "fest-status", "No cleanup performed.");
+            return;
+          }
+          const destination = await quarantineFestival(root, found.path);
+          deps.detect.bustCache?.();
+          send(pi, "fest-status", `Quarantined ${found.id} to ${destination}. Restore with /fest orphans restore ${basename(destination)}.`);
+          return;
+        }
+        if (action === "restore") {
+          if (!selector) throw new Error("Specify the exact quarantine folder id from /fest orphans.");
+          const dir = join(root, ".ompfest", "orphans", selector);
+          const confirmed = await ctx.ui.confirm?.("Restore quarantined festival", `Restore ${selector} to festivals/planning?`);
+          if (!confirmed) {
+            send(pi, "fest-status", "No restore performed.");
+            return;
+          }
+          const restored = await restoreQuarantinedFestival(root, dir);
+          deps.detect.bustCache?.();
+          send(pi, "fest-status", `Restored ${basename(restored)}.`);
+          return;
+        }
+        const lines = [
+          "Incomplete creation transactions (not automatically removed):",
+          ...(journals.length ? journals.map((item) => `- ${item.receipt.id} · ${item.receipt.name} · ${item.festivalDir ?? "no festival directory recorded"} · ${item.receipt.sessionId}`) : ["- none"]),
+          "Unowned legacy planning candidates (inspect before quarantine):",
+          ...(legacy.length ? legacy.map((item) => `- ${item.id} · ${item.path}`) : ["- none"]),
+          "Actions: /fest orphans rollback <transaction-id> · /fest orphans quarantine <festival-id> · /fest orphans restore <quarantine-id>",
+          "Plan drafts and previews in .ompfest/plans are not orphans and are never removed by this flow.",
+        ];
+        send(pi, "fest-status", lines.join("\n"));
       },
     },
     settings: {
@@ -684,7 +859,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|dispatch|pause|review|next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
+    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|dispatch|pause|review|next|status|show|select|join|team|orphans|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")

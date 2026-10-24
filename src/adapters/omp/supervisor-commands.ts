@@ -33,7 +33,7 @@ export function supervisorCommands(pi: PiCommandsLike, supervisor: Supervisor, h
         if (!mainOnly(ctx)) return;
         const state = supervisor.state(sessionIdOf(ctx));
         const lines = [
-          `Dispatch ${state.paused ? "paused" : "enabled"}; maximum 3 outstanding assignments`,
+          `Dispatch ${state.paused ? "paused" : "enabled"}; no fixed assignment cap; file locks cover writes only`,
           ...state.workers.map((worker) => `${worker.worker} · reported: ${worker.status} · ${worker.festival}/${worker.task}\nNative: ${worker.runtime ? `${worker.runtime.status} (${worker.runtime.source}, ${worker.runtime.runtimeId ?? "identity unavailable"})` : "unverified"}\nReport: ${worker.report || "not submitted"}${worker.reportArtifact ? `\nEvidence artifact: ${worker.reportArtifact}` : ""}\nReview: ${worker.review || "pending"}`),
         ].flatMap((line) => line.split("\n"));
         if (!state.workers.length) lines.push("No workers assigned in this session.");

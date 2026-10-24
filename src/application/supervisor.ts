@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 export const SUPERVISOR_ENTRY = "com.github.mohammadraufzahed.omp-fest.supervisor";
 export const SUPERVISOR_POLICY = [
-  "Festival supervisor mode: the main agent owns planning, decisions, integration, review, task completion and commits.",
+  "Festival supervisor mode: the main agent owns planning, decisions, integration, review, task completion and commits; explicitly joined omp sessions share the festival team board and task claims without transferring ownership.",
   "After human-authorized activation reaches active, immediately continue with fest_next and supervisor dispatch; do not end the turn at activation or wait for a separate /fest dispatch command.",
   "Activation itself is not a worker launch. Invoke the exposed omp subagent tool; /fest dispatch explicitly unpauses, /fest resume reconciles without changing pause.",
   "Continue assignment, worker results, independent review, integration, task completion and commits until complete, a human gate, an explicit pause or a real blocker. Missing subagent capability means blocked, not launched.",
@@ -11,8 +11,8 @@ export const SUPERVISOR_POLICY = [
   "Workers return compact files/evidence/failures/blockers reports through their native channel and must use path-bearing native write/edit tools for project mutations; shell file mutations are blocked. They must not select/claim festivals, mutate festival tasks, commit, approve gates, change scope or transfer ownership.",
   "Submit returned results through fest_supervisor; native completion is not acceptance. Independently review and verify, accept with evidence, then fest_task_complete and fest_commit.",
   "After each accepted submission record task completion and continue fest_next/queue in the same native agent turn; this is not an autonomous background scheduler. After workers and tasks settle, follow /fest finish and record actual combined checks and visual comparisons through fest_integration before the completion gate. Never approve that gate yourself.",
-  "Maximum three outstanding workers. Never relaunch unfinished, exited, failed or unverifiable workers on resume; reconcile and continue the existing worker. Conflicting file writes wait for the current write operation, not for the full task.",
-  "Pause stops new assignments, not existing workers. Answer worker questions through the blocker inbox and send the answer to the same native worker. Human gates remain human-only.",
+  "Use host-provided concurrency; omp-fest does not impose a fixed worker/session cap. Team task claims prevent duplicate assignment across sessions, while exact-file write locks are held only during writes.",
+  "Pause stops new assignments, not existing workers. Answer worker questions through the shared team inbox and send the answer to the same native worker. Human gates remain human-only.",
 ].join(" ");
 
 export type WorkerStatus = "assigned" | "running" | "blocked" | "ready_for_review" | "accepted";
@@ -119,7 +119,6 @@ export class Supervisor {
     if (state.paused) throw new Error("Dispatch is paused. Use /fest dispatch to resume explicitly.");
     if (!worker.trim()) throw new Error("Worker name is required.");
     const active = state.workers.filter((row) => row.status !== "accepted");
-    if (active.length >= 3) throw new Error("Three assignments are outstanding; review or settle them before dispatching more.");
     if (active.some((row) => row.festival === festival && row.task === task)) throw new Error("This task already has an outstanding assignment; continue that worker instead.");
     if (active.some((row) => row.worker === worker)) throw new Error("This worker already has an outstanding assignment.");
     const row: WorkerAssignment = { id: options.id ?? randomUUID(), festival, task, worker, files: [...files], status: "assigned", report: "", review: "" };

@@ -12,6 +12,8 @@ import { describe, expect, it } from "vitest";
 import { CampFsDetect } from "../src/adapters/fs/camp-fs.js";
 import { registerTools, type PiLike } from "../src/adapters/omp/tools.js";
 import { seedFestivalRules } from "../src/application/festival-rules.js";
+import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
+import { joinFestivalTeam } from "../src/application/festival-team.js";
 import { LoopTracker } from "../src/application/loop-tracker.js";
 import { DEFAULT_CONFIG, type OmpFestConfig } from "../src/domain/types.js";
 import type { CampCli, FestCli } from "../src/ports.js";
@@ -81,6 +83,9 @@ async function makeCampWithFestival(id = "fest-a"): Promise<{ root: string; dir:
   const dir = join(root, "festivals", "active", id);
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "fest.yaml"), `id: ${id}\n`);
+  const ownership = await claimFestivalOwnership(dir, "s1");
+  if (ownership.kind !== "claimed") throw new Error(`Cannot select gate test festival: ${ownership.kind}`);
+  await joinFestivalTeam(root, dir, "s1", "s1");
   return { root, dir };
 }
 

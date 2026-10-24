@@ -22,6 +22,7 @@ import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY } from "./src/applicati
 import { orientSession } from "./src/application/orient.js";
 import { restoreClaimFromBranch } from "./src/application/session-claim.js";
 import { claimedFestivalDir } from "./src/application/fest-resolve.js";
+import { festivalOwner } from "./src/application/festival-ownership.js";
 import { buildStateDigest } from "./src/application/state-digest.js";
 import { sessionIdOf } from "./src/application/session-id.js";
 import { CampCliAdapter } from "./src/adapters/cli/camp-cli.js";
@@ -323,8 +324,18 @@ export default function ompFest(pi: ExtensionApiLike): void {
       { placement: "aboveEditor" },
     );
     if (!digest) return updates.length ? { message: { customType: "fest-state", content: `Native omp worker lifecycle: ${updates.join("; ")}. Review the existing worker result through fest_supervisor; do not relaunch or auto-accept.`, display: false } } : undefined;
+    const location = await detect.locate(ctx.cwd);
+    const festivalDir = location.festivalDir ?? (location.campRoot
+      ? await claimedFestivalDir(tracker, detect, sid, location.campRoot)
+      : undefined);
+    const owner = festivalDir ? await festivalOwner(festivalDir) : undefined;
+    const rolePolicy = owner?.sessionId === sid
+      ? `${SUPERVISOR_POLICY}\n${INTEGRATION_GUIDE}`
+      : digest.includes("festival collaborator")
+        ? "Festival collaboration mode: claim only explicit eligible tasks through fest_team; the selected coordinator owns integration, review, task completion, gates and commits."
+        : "";
     const state = supervisor.state(sid);
-    return { message: { customType: "fest-state", content: `${updates.length ? `Native omp worker lifecycle: ${updates.join("; ")}. Review the existing result; never relaunch or auto-accept.\n` : ""}${digest}\n${SUPERVISOR_POLICY}\n${INTEGRATION_GUIDE}\nDispatch: ${state.paused ? "paused" : "enabled"}; workers: ${state.workers.filter((worker) => worker.status !== "accepted").length} outstanding.`, display: false } };
+    return { message: { customType: "fest-state", content: `${updates.length ? `Native omp worker lifecycle: ${updates.join("; ")}. Review the existing result; never relaunch or auto-accept.\n` : ""}${digest}${rolePolicy ? `\n${rolePolicy}` : ""}\nDispatch: ${state.paused ? "paused" : "enabled"}; workers: ${state.workers.filter((worker) => worker.status !== "accepted").length} outstanding.`, display: false } };
   });
 
   // Pre-execution nudges for bypass paths (raw fest/camp, ad hoc todos,
@@ -442,8 +453,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
     const location = await detect.locate(ctx.cwd);
     const festivalDir =
       location.festivalDir ??
-      (location.campRoot ? await claimedFestivalDir(tracker, detect, sid, location.campRoot) : undefined) ??
-      (location.campRoot ? await detect.activeFestival(location.campRoot) : undefined);
+      (location.campRoot ? await claimedFestivalDir(tracker, detect, sid, location.campRoot) : undefined);
     if (!festivalDir) {
       return undefined;
     }
@@ -480,7 +490,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return { block: true, reason: "Festival worker dispatch is paused. Use /fest dispatch to resume." };
     }
     return {
-      note: "omp-fest worker: implement only the parent's explicit assignment; use native path-bearing write/edit tools for all project changes so exact per-file locks are acquired. Shell file mutations are blocked. Return files changed, actual verification results and blockers through the native subagent result. Do not select/claim festivals, run fest_next, complete festival tasks, commit, approve gates, change scope or transfer ownership. The parent supervisor alone reviews and records completion. Follow the browser-verification policy in the task contract.",
+      note: "omp-fest worker: implement only the parent's explicit assignment; use native path-bearing write/edit tools for all project changes so exact per-file locks are acquired. Shell file mutations are blocked. Return files changed, actual verification results and blockers through the native subagent result. Do not select/claim festivals, run fest_next, complete festival tasks, commit, approve gates, change scope or transfer ownership. The parent supervisor alone reviews and records completion. When the assignment belongs to a cross-session team, the parent coordinates through fest_team; do not claim work outside your assignment. Follow the browser-verification policy in the task contract.",
     };
   });
 

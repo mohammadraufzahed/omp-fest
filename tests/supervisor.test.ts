@@ -11,6 +11,8 @@ import { supervisorQueue } from "../src/adapters/omp/supervisor-tools.js";
 import { LoopTracker } from "../src/application/loop-tracker.js";
 import type { PiLike, ToolDeps } from "../src/adapters/omp/tools.js";
 import { listProjectReservations, reserveProjectFiles, releaseProjectFiles } from "../src/application/project-conflicts.js";
+import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
+import { joinFestivalTeam } from "../src/application/festival-team.js";
 
 describe("festival supervisor", () => {
   it("requires a real dispatch and independent review before acceptance", () => {
@@ -38,18 +40,19 @@ describe("festival supervisor", () => {
     expect(supervisor.snapshot("s", "expired")).toMatchObject({ full: true, reset: true });
   });
 
-  it("bounds independent work, permits overlapping assignments and preserves running work on pause", () => {
+  it("allows parallel task assignments without an arbitrary worker cap and preserves running work on pause", () => {
     const supervisor = new Supervisor();
-    const row = supervisor.assign("s", "festival", "a.md", "A", ["src/a"]);
-    supervisor.update("s", row.id, "running", "");
+    const first = supervisor.assign("s", "festival", "a.md", "A", ["src/a"]);
+    supervisor.update("s", first.id, "running", "");
     const overlapping = supervisor.assign("s", "festival", "b.md", "B", ["src/a/child.ts"]);
-    expect(supervisor.assign("s", "festival", "c.md", "C", [])).toMatchObject({ status: "assigned" });
     expect(overlapping.status).toBe("assigned");
-    expect(() => supervisor.assign("s", "festival", "d.md", "D", ["src/d.ts"])).toThrow("Three assignments");
+    for (let index = 0; index < 20; index += 1) {
+      expect(supervisor.assign("s", "festival", `${index}.md`, `worker-${index}`, [`src/${index}.ts`]).status).toBe("assigned");
+    }
     supervisor.pause("s", true);
     expect(supervisor.state("s").workers[0]?.status).toBe("running");
-    expect(() => supervisor.assign("s", "festival", "d.md", "D", ["src/d.ts"])).toThrow("paused");
-    supervisor.update("s", row.id, "submit", "Completed during pause");
+    expect(() => supervisor.assign("s", "festival", "paused.md", "Paused", ["src/paused.ts"])).toThrow("paused");
+    supervisor.update("s", first.id, "submit", "Completed during pause");
     expect(supervisor.state("s").workers[0]?.status).toBe("ready_for_review");
   });
 
@@ -101,13 +104,13 @@ describe("festival supervisor", () => {
     expect(dispatchQueue({ ...input, paused: true }).candidates).toEqual([]);
   });
 
-  it("bounds queued candidates and allows overlapping or unknown file boundaries", () => {
+  it("queues eligible work without a fixed cap and allows overlapping or unknown file boundaries", () => {
     const tasks = ["a", "b", "c", "d"].map((name, index) => ({
       path: `001_BUILD/0${index + 1}_${name}/01_task.md`, sequence: `001_BUILD/0${index + 1}_${name}`,
       done: false, document: `Task ID: ${name}\nDependencies: none\n- src/${name}.ts (existing)`,
     }));
     const input = { festivalDir: "/festival", festival: "festival", current: { kind: "task" as const, path: tasks[0]!.path, doc: "", goals: [] }, tasks, workers: [], paused: false };
-    expect(dispatchQueue(input).candidates).toHaveLength(3);
+    expect(dispatchQueue(input).candidates).toHaveLength(4);
     tasks[1]!.document = "Dependencies: none\n- src (existing)";
     expect(dispatchQueue(input).candidates.map((row) => row.task)).toContain(tasks[1]!.path);
     const supervisor = new Supervisor();
@@ -196,7 +199,9 @@ describe("festival supervisor", () => {
       await mkdir(join(festival, sequence), { recursive: true });
       await mkdir(project);
       await writeFile(join(festival, task), "Task ID: a\nDependencies: none\n- src/a.ts (proposed)");
-      await writeFile(join(festival, sequence, "SEQUENCE_GOAL.md"), `---\nfest_working_dir: ${JSON.stringify(project)}\n---\n`);
+      const ownership = await claimFestivalOwnership(festival, "s");
+      if (ownership.kind !== "claimed") throw new Error(`Cannot select supervisor test festival: ${ownership.kind}`);
+      await joinFestivalTeam(root, festival, "s", "s");
       const current: NextUnit = { kind: "task", path: task, workingDir: project, doc: "", goals: [] };
       const deps = {
         detect: {

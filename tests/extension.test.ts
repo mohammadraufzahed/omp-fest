@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import ompFest from "../index.js";
+import { festivalOwner } from "../src/application/festival-ownership.js";
 import { listProjectReservations } from "../src/application/project-conflicts.js";
 
 interface AutocompleteItem {
@@ -86,8 +87,11 @@ async function makeCamp(): Promise<string> {
 
 describe("ompFest extension", () => {
 
-  it("injects a live state digest into every turn inside a camp", async () => {
+  it("keeps a new omp session unselected even when the camp contains an active festival", async () => {
     const root = await makeCamp();
+    const active = join(root, "festivals", "active", "other-session-festival");
+    await mkdir(active, { recursive: true });
+    await writeFile(join(active, "fest.yaml"), "id: other-session-festival\nname: Other session festival\n");
     const { pi, handlers, ctx } = mockPi(root);
     ompFest(pi as never);
     const hook = handlers.get("before_agent_start") as (
@@ -96,10 +100,9 @@ describe("ompFest extension", () => {
     ) => Promise<{ message?: { customType: string; content: string; display: boolean } } | undefined>;
     const result = await hook({}, ctx);
     expect(result?.message?.customType).toBe("fest-state");
-    expect(result?.message?.display).toBe(false);
-    expect(result?.message?.content).toContain("fest:");
     expect(result?.message?.content).toContain("no active festival");
-    expect(result?.message?.content).toContain("fest_next");
+    expect(result?.message?.content).toContain("This session is explicitly unselected.");
+    expect(result?.message?.content).not.toContain("festival=other-session-festival");
   });
 
   it("before_agent_start digest stays silent outside a camp", async () => {
@@ -193,6 +196,13 @@ describe("ompFest extension", () => {
     await second.commands.get("fest")?.handler("select chosen", second.ctx);
     expect(second.sent.at(-1)?.message.content).toContain("Ownership unchanged");
     expect(confirm).toHaveBeenCalled();
+    await second.commands.get("fest")?.handler("join chosen", second.ctx);
+    expect(second.sent.at(-1)?.message.content).toContain("Joined chosen");
+    expect((await festivalOwner(festival))?.sessionId).toBe("session-a");
+    const start = second.handlers.get("before_agent_start") as (event: unknown, context: unknown) => Promise<{ message?: { content: string } } | undefined>;
+    const prompt = await start({}, second.ctx);
+    expect(prompt?.message?.content).toContain("festival collaborator");
+    expect(prompt?.message?.content).toContain("fest_team queue");
   });
 
   it("/fest idea without text interviews the user first", async () => {
@@ -348,8 +358,9 @@ it("tool_result hook warns on untracked edits and dedupes per path", async () =>
     join(festivalDir, "001_P", "01_seq", "01_task.md"),
     "---\nfest_type: task\n---\n# Task\n",
   );
-  const { pi, handlers, ctx } = mockPi(root);
+  const { pi, handlers, commands, ctx } = mockPi(root);
   ompFest(pi as never);
+  await commands.get("fest")?.handler("select fest-A1", ctx);
   const hook = handlers.get("tool_result") as (
     event: unknown,
     ctx: unknown,

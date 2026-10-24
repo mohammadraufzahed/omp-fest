@@ -52,7 +52,7 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
  - 🗺️ **fast native planning** — `/fest plan <goal>` inspects first, asks only blocking questions in at most two short rounds, then opens an omp-native proposal review. Approval is revision-locked; conflicts never cancel another plan.
  - 🧰 **repair-friendly plan inputs** — plan paths, project-relative inspection/verification paths, and common unstable IDs are normalized before validation. Failures return compact field-level diagnostics instead of dumping the fest CLI transcript.
  - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
- - 🎯 **session festival selection** — `/fest select [festival]` lists available festivals, claims one for the current omp session, persists the selection through resume/branch/tree, and requires explicit confirmation before transferring ownership from another session. Claims use an atomic ownership record.
+- 🎯 **session festival selection** — new omp sessions start unselected. `/fest select [festival]` claims coordinator ownership; `/fest join <festival>` joins an existing team without transfer. Only explicit selection/join binds the session.
 - **native `/fest` flow** — planning, selection, approval, blockers, conflict handling, workers, evidence, login flows and release use omp tools/UI. `fest_plan` owns editable draft revisions and structured preview/scaffold; `fest_capabilities` reports actual host support.
  - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
 
@@ -74,6 +74,9 @@ missing native subagent capability is reported as a blocker, not fabricated succ
 
 | Command | Behavior |
 | --- | --- |
+| `/fest join <festival>` | Join an explicitly chosen festival team without changing its coordinator. |
+| `/fest team [festival]` | Inspect shared participants, task claims, submissions and messages. |
+| `/fest orphans` | Review incomplete scaffold transactions and legacy planning debris; rollback or quarantine only after confirmation, with quarantine reversible. |
 | `/fest workers` | Show assignments, status, worker reports and review evidence. |
 | `/fest dispatch` | Resume new dispatch and start a supervisor agent turn for the explicitly selected festival. |
 | `/fest pause` | Pause new assignments/spawns; preserve existing workers and accept their reports. |
@@ -92,37 +95,35 @@ registry serializes writes to the same file rather than reserving task files for
 the worker's full lifetime. The tool reports candidates; the agent launches them
 using native omp tools. It does not create a background process scheduler.
 
-Reported workflow status and observed native lifecycle are distinct. Structured
-native subagent results with matching assignment/runtime identity can record
-running/completed/failed/exited observations. Missing runtime capability remains
-unverified; resume never interprets silence as worker exit or permission to relaunch.
-Assignments, blockers, answers, runtime observations and report links persist in
-the session transcript. Native completion never implies supervisor acceptance.
+Workflow status and observed native lifecycle remain distinct. Cross-session
+team claims, submissions, reviews and messages persist under the camp's private
+`.ompfest/teams` state. Native completion never implies coordinator acceptance.
 
-At most three assignments may be outstanding. File locks are acquired atomically
-for exact target paths immediately before native `write`/`edit` tools run and are
-released when that tool returns, including errors. Different files and idle
-workers never hold locks; overlapping task assignments may proceed concurrently.
-The queue can briefly report a live write lock that clears before it is read;
-refresh the queue, and `/fest conflicts` shows the current lock owner and exact
-paths. If a write process stopped without returning, `/fest conflicts reclaim`
-asks for native confirmation before exact-token release. Never reclaim while a
-write is active. Locks live in private per-checkout Git metadata.
+There is no fixed team worker cap. Explicitly joined sessions share task claims,
+while file locks are acquired only for exact paths immediately before native
+`write`/`edit` tools run and released when that tool returns. Different files and
+idle workers never hold locks; overlapping task assignments can proceed
+concurrently. `/fest conflicts` shows live write-lock owners and paths.
 
 Common shell file mutations are blocked because their target paths cannot be
-locked reliably; use native file write/edit tools. Workers must follow this
-rule. This is a tool-level guard, not an OS sandbox: arbitrary external
-processes can still modify files outside omp's tools.
+locked reliably; use native file write/edit tools. This is a tool-level guard,
+not an OS sandbox: arbitrary external processes can still modify files outside
+omp's tools.
 
 Workers receive a bounded contract, including Playwright-MCP-first browser
 verification guidance. They return files changed, real verification and blockers
 through their native subagent result, without claiming the festival or running
 their own fest loop. The supervisor submits and independently reviews that result.
 Task completion rejects unaccepted assignments, and commits wait until outstanding
-assignments are settled to avoid committing unfinished shared-checkout work.
-Acceptance does not automatically complete tasks, commit changes or approve gates.
-Human approvals remain separate. The spawn boundary is agent guidance; it is not
-a filesystem sandbox for subagents.
+assignments are settled. Acceptance does not automatically complete tasks, commit
+changes or approve gates.
+The queue may briefly report a live write lock that clears before it is read;
+refresh the queue. If a write process stopped without returning, `/fest conflicts
+reclaim` asks for native confirmation before exact-token release. Never reclaim
+while a write is active. Locks live in private per-checkout Git metadata.
+
+Human approvals remain separate. The spawn boundary is agent guidance, not a
+filesystem sandbox for subagents.
 
 ### Reusable website login flows
 

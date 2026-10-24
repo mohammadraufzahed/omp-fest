@@ -11,7 +11,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
-import { claimFestivalOwnership } from "../../application/festival-ownership.js";
+import { festivalOwner } from "../../application/festival-ownership.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
@@ -33,11 +33,14 @@ import { showCard, type OverlayUiLike } from "./overlay.js";
 import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import type { ZodLike } from "./zod-types.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
-import { registerSupervisorTools } from "./supervisor-tools.js";
-import { registerQualityTools } from "./quality-tools.js";
+import { registerFestivalTeamTools } from "./team-tools.js";
+import { beginFestivalCreation, completeFestivalCreation, listFestivalCreationOrphans, recordFestivalCreation, rollbackFestivalCreation } from "../../application/festival-creation.js";
+import { readFestivalTeam, joinFestivalTeam } from "../../application/festival-team.js";
 import { INTEGRATION_GUIDE, integrationReviewStatus } from "../../application/integration-review.js";
 import { planningDiagnostic } from "../../application/planning-errors.js";
 import { registerFlowTools, type FlowHost } from "./flow-tools.js";
+import { registerSupervisorTools } from "./supervisor-tools.js";
+import { registerQualityTools } from "./quality-tools.js";
 
 export interface ToolDeps {
   fest: FestCli;
@@ -99,6 +102,8 @@ function textResult(payload: unknown): ToolResult {
     ],
   };
 }
+
+const READONLY_RAW_COMMANDS: Record<string, true> = { list: true, show: true, status: true, rules: true, context: true, markers: true, version: true, types: true, chain: true, feedback: true, links: true, watch: true, deps: true, parse: true, tokens: true, "--help": true };
 function compactBlockedUnit(unit: Extract<NextUnit, { kind: "blocked" }>): ToolResult {
   const issues = unit.errors.slice(0, 12).map((issue) => ({
     file: issue.file,
@@ -248,7 +253,7 @@ async function dirOrResult(
   deps: ToolDeps,
   ctx: ToolContextLike,
   selector?: string,
-): Promise<{ dir: string } | { result: ToolResult }> {
+): Promise<{ dir: string; coordinator: boolean } | { result: ToolResult }> {
   const resolved = await festivalDirOf(deps, ctx, selector);
   if (resolved.error) {
     return { result: textResult(resolved.error) };
@@ -256,24 +261,34 @@ async function dirOrResult(
   if (!resolved.dir) {
     return { result: await idleResult(deps, ctx) };
   }
-  const ownership = await claimFestivalOwnership(resolved.dir, sessionIdOf(ctx));
-  if (ownership.kind !== "claimed") {
-    return {
-      result: textResult({
-        kind: "festival_owned",
-        festival: basename(resolved.dir),
-        owner: ownership.owner?.sessionId,
-        hint: "This festival belongs to another omp session. Use /fest select <id> and confirm ownership transfer; no work was started.",
-      }),
-    };
+  if (resolved.campRoot) {
+    const festivalDir = resolved.dir;
+    const pending = (await listFestivalCreationOrphans(resolved.campRoot)).find((item) => item.receipt.name === basename(festivalDir) || item.festivalDir === festivalDir);
+    if (pending) return { result: textResult({ kind: "creation_in_progress", festival: basename(resolved.dir), transaction: pending.receipt.id, nextAction: "Review and resolve this scaffold through /fest orphans before selecting or working on it." }) };
   }
-  // This session touched this festival — later digests/tracking key off it so
-  // parallel agents on different festivals don't see each other's pick.
-  if (deps.tracker.claimFestival(sessionIdOf(ctx), resolved.dir)) {
-    persistClaim(pi, resolved.dir, resolved.campRoot);
+  const sid = sessionIdOf(ctx);
+  const owner = await festivalOwner(resolved.dir);
+  if (!owner) {
+    return { result: textResult({ kind: "festival_unselected", festival: basename(resolved.dir), hint: `Use /fest select ${basename(resolved.dir)} to explicitly claim coordinator ownership; /fest join requires an existing coordinator.` }) };
   }
-  return { dir: resolved.dir };
+  if (owner.sessionId !== sid) {
+    const team = resolved.campRoot ? await readFestivalTeam(resolved.campRoot, resolved.dir) : undefined;
+    if (!team?.participants.some((participant) => participant.sessionId === sid)) {
+      return { result: textResult({ kind: "festival_owned", festival: basename(resolved.dir), owner: owner.sessionId, hint: `Use /fest join ${basename(resolved.dir)} to collaborate without transferring coordinator ownership.` }) };
+    }
+  } else if (resolved.campRoot) {
+    await joinFestivalTeam(resolved.campRoot, resolved.dir, sid, sid);
+  }
+  if (deps.tracker.claimFestival(sid, resolved.dir)) persistClaim(pi, resolved.dir, resolved.campRoot);
+  return { dir: resolved.dir, coordinator: owner.sessionId === sid };
 }
+async function coordinatorRequired(dir: string, sessionId: string): Promise<ToolResult | undefined> {
+  const owner = await festivalOwner(dir);
+  return owner?.sessionId === sessionId
+    ? undefined
+    : textResult({ kind: "coordinator_required", festival: basename(dir), coordinator: owner?.sessionId, hint: "Joined sessions may implement and submit claimed tasks. Only the coordinator integrates, changes task state, completes tasks, advances gates, promotes, or commits." });
+}
+
 
 async function campRootOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string | undefined> {
   const location = await deps.detect.locate(ctx.cwd);
@@ -289,7 +304,7 @@ async function idleResult(deps: ToolDeps, ctx: ToolContextLike) {
     ...(location.campRoot ? { campRoot: location.campRoot } : {}),
     festivals: festivals.map((f) => ({ id: f.id, status: f.status, path: f.path })),
     hint: festivals.length > 0
-      ? "Select a festival first with /fest select <id> (ownership transfer requires confirmation), or use festival:<id> explicitly. For brand-new work, use /fest idea → /fest plan. Never run `fest`/`camp` via shell — use the fest_*/camp_* tools."
+      ? "This session is explicitly unselected. Use /fest select <id> to coordinate or /fest join <id> to collaborate without transferring ownership. Explicit festival:<id> operations do not join or transfer a session. For brand-new work, use /fest idea → /fest plan. Never run `fest`/`camp` via shell — use the fest_*/camp_* tools."
       : "No festival exists in this camp yet — brand-new work starts with the planning flow (/fest idea → /fest plan <goal>). Never run `fest`/`camp` via shell — use the fest_*/camp_* tools.",
   });
 }
@@ -309,6 +324,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const supervisor = deps.supervisor ?? new Supervisor();
   registerSupervisorTools(pi, deps, supervisor);
   registerQualityTools(pi, { ...deps, supervisor });
+  registerFestivalTeamTools(pi, deps, supervisor);
 
 
   pi.registerTool({
@@ -322,6 +338,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if ("result" in r) {
         return r.result;
       }
+      if (!r.coordinator) return textResult({ kind: "team_assignment_required", festival: basename(r.dir), nextAction: "Use fest_team action queue, then claim one exact eligible task. Do not start an unclaimed task from fest_next." });
       const dir = r.dir;
       const unit: NextUnit = await deps.fest.next(dir);
       if (unit.kind === "task") {
@@ -375,6 +392,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if ("result" in r) {
         return r.result;
       }
+      if (!r.coordinator) return await coordinatorRequired(r.dir, sessionIdOf(ctx));
       const dir = r.dir;
       const sid = sessionIdOf(ctx);
       const opened = deps.tracker.openTaskPathFor(sid);
@@ -423,6 +441,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         worker.festival === basename(dir) && worker.task === (task?.path ?? taskPath));
       if (assignments.some((worker) => worker.status !== "accepted")) {
         return textResult({ kind: "completion_blocked", hint: "Worker submission requires independent supervisor review and acceptance before festival completion." });
+      }
+      const campRoot = await campRootOf(deps, ctx);
+      const team = campRoot ? await readFestivalTeam(campRoot, dir) : undefined;
+      if (team?.assignments.some((assignment) =>
+        assignment.task === (task?.path ?? taskPath) && assignment.status !== "accepted")) {
+        return textResult({ kind: "completion_blocked", hint: "A joined session still owns or has submitted this task. Review or release its shared team assignment before completing it." });
       }
       const completion = await deps.fest.taskComplete(dir, task?.path ?? taskPath ?? "", params.evidence);
       if (!completion.ok) {
@@ -476,6 +500,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if ("result" in r) {
         return r.result;
       }
+      if (!r.coordinator) return await coordinatorRequired(r.dir, sessionIdOf(ctx));
       await deps.fest.taskMutate(r.dir, params.action, params);
       return textResult({ status: "ok", action: params.action });
     },
@@ -494,6 +519,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
+      }
+      if (!r.coordinator) return await coordinatorRequired(r.dir, sessionIdOf(ctx));
+      const campRoot = await campRootOf(deps, ctx);
+      const team = campRoot ? await readFestivalTeam(campRoot, r.dir) : undefined;
+      if (team?.assignments.some((assignment) => assignment.status !== "accepted")) {
+        return textResult({ kind: "commit_blocked", hint: "Other omp sessions still own claimed or submitted work. Review or release every shared team assignment before committing." });
       }
       if (supervisor.state(sessionIdOf(ctx)).workers.some((worker) => worker.status !== "accepted")) {
         return textResult({ kind: "commit_blocked", hint: "Outstanding workers may have unfinished shared-checkout changes. Review and settle all assignments before committing." });
@@ -517,6 +548,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if ("result" in r) {
         return r.result;
       }
+      if (params.fix && !r.coordinator) return await coordinatorRequired(r.dir, sessionIdOf(ctx));
       const structure = await deps.fest.validate(r.dir, params.fix);
       const visual = await validateVisualReferences(r.dir, deps.detect);
       const verification = visual.issues.length ? undefined : await visualEvidenceStatus(r.dir, deps.detect);
@@ -539,6 +571,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if ("result" in r) {
         return r.result;
       }
+      if (params.action === "advance" && !r.coordinator) return await coordinatorRequired(r.dir, sessionIdOf(ctx));
       const output =
         params.action === "advance"
           ? await deps.fest.workflowAdvance(r.dir)
@@ -576,6 +609,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if ("result" in r) {
         return r.result;
       }
+      if (!r.coordinator) return await coordinatorRequired(r.dir, sessionIdOf(ctx));
       const dir = r.dir;
       const visual = await validateVisualReferences(dir, deps.detect);
       if (visual.issues.length > 0) {
@@ -863,94 +897,87 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!matchesApproved(previewResult)) {
         return textResult({ kind: "plan_failed", error: "Parser output differs from the approved plan; no festival was created.", expected: approved.counts, actual: { phases: previewResult.phases_created, sequences: previewResult.sequences_created, tasks: previewResult.tasks_created }, output: previewOutput });
       }
-      const output = await deps.fest.scaffoldFromPlan(root, { plan: planPath, name: params.name, dest: "planning" });
-      deps.detect.bustCache?.();
-      const parsed = parseScaffoldPlanResult(output);
-      if (parsed?.ok !== true || !hasCounts(parsed) || !matchesApproved(parsed)) {
-        return textResult({ kind: "plan_failed", error: parsed?.error ?? "Scaffold differs from the approved plan. Files retained; do not promote.", expected: approved.counts, output });
+      const beforeFestivals = await deps.detect.listFestivals(root);
+      if (beforeFestivals.some((festival) => festival.id === params.name || basename(festival.path) === params.name)) {
+        return textResult({ kind: "plan_failed", code: "FESTIVAL_ALREADY_EXISTS", error: `Festival ${params.name} already exists. Choose a new plan name; existing festivals are never overwritten.` });
       }
-      const festId = parsed.festival_dir ? basename(parsed.festival_dir) : params.name;
-      const festivalDir = parsed.festival_dir;
-      if (!festivalDir) {
-        return textResult({ kind: "plan_failed", error: "Scaffold did not report a festival directory; generated files were retained.", output });
-      }
-      const { dir: workingDir, candidates: projectCandidates } = await resolveWorkingDir(
-        root,
-        deps.camp,
-        targetWorkingDir,
-      );
-      let stamped = 0;
-      let gateRules = 0;
+      const creation = await beginFestivalCreation(root, params.name, planPath, sessionIdOf(ctx));
+      let festivalDir: string | undefined;
+      let planMarked = false;
       try {
-        await finalizeApprovedScaffold(root, festivalDir, approved.artifact);
-      } catch (error) {
-        return textResult({ kind: "plan_failed", error: String(error), festivalDir, hint: "Scaffold differs from the approved structure. Files retained; repair before promotion." });
-      }
-      if (bundle) {
-        try {
-          await installVisualReferences(festivalDir, bundle);
-        } catch (error) {
-          return textResult({ kind: "plan_failed", festivalDir, error: String(error), hint: "The festival was scaffolded but references were not installed. Repair its references before validation or promotion." });
+        const output = await deps.fest.scaffoldFromPlan(root, { plan: planPath, name: params.name, dest: "planning" });
+        deps.detect.bustCache?.();
+        const parsed = parseScaffoldPlanResult(output);
+        if (parsed?.ok !== true || !hasCounts(parsed) || !matchesApproved(parsed)) {
+          throw new Error(parsed?.error ?? "Scaffold differs from the approved plan.");
         }
-      }
-      if (workingDir) {
-        stamped = await stampWorkingDir(festivalDir, workingDir);
-      }
-      // FESTIVAL_RULES.md: `fest rules` reads it, validate recommends it,
-      // and scaffold never writes it — the human's constraints live here.
-      const rulesSeed = await seedFestivalRules(root, festivalDir, agreedRules);
-      const gates = await deps.fest
-        .gatesApply(root, festivalDir)
-        .catch((err: unknown) => ({ created: 0, output: `gates apply failed: ${String(err)}` }));
-      if (rulesSeed.constraints) {
-        gateRules = await stampGateRules(festivalDir);
-      }
-      const scaffoldValidation = await deps.fest.validate(festivalDir);
-      if (scaffoldValidation.score !== 100) {
-        return planFailure("Generated scaffold did not pass validation; retained for repair, not activation", { festivalDir, score: scaffoldValidation.score, validation: scaffoldValidation.output.slice(0, 2000) });
-      }
-      try {
+        if (!parsed.festival_dir) throw new Error("Scaffold did not report a festival directory.");
+        festivalDir = isAbsolute(parsed.festival_dir) ? parsed.festival_dir : resolve(root, parsed.festival_dir);
+        await recordFestivalCreation(creation, festivalDir);
+        const festId = basename(festivalDir);
+        const { dir: workingDir, candidates: projectCandidates } = await resolveWorkingDir(root, deps.camp, targetWorkingDir);
+        await finalizeApprovedScaffold(root, festivalDir, approved.artifact);
+        if (bundle) await installVisualReferences(festivalDir, bundle);
+        const stamped = workingDir ? await stampWorkingDir(festivalDir, workingDir) : 0;
+        const rulesSeed = await seedFestivalRules(root, festivalDir, agreedRules);
+        const gates = await deps.fest.gatesApply(root, festivalDir).catch((err: unknown) => ({ created: 0, output: `gates apply failed: ${String(err)}` }));
+        const gateRules = rulesSeed.constraints ? await stampGateRules(festivalDir) : 0;
+        const scaffoldValidation = await deps.fest.validate(festivalDir);
+        if (scaffoldValidation.score !== 100) {
+          throw new Error(`Generated scaffold did not pass validation (${scaffoldValidation.score}/100): ${scaffoldValidation.output.slice(0, 2000)}`);
+        }
         await markPlanScaffolded(root, planPath, params.name, approved.planRevision, festivalDir, bundle?.files);
+        planMarked = true;
+        await completeFestivalCreation(creation);
+        const skipped = gates.output.match(/Skipping sequence "[^"]+"/g) ?? [];
+        const needsWorkingDir = !workingDir;
+        return textResult({
+          kind: "plan_scaffolded",
+          planRevision: approved.planRevision,
+          counts: { phases: parsed.phases_created, sequences: parsed.sequences_created, tasks: parsed.tasks_created },
+          festivalDir,
+          ...(bundle ? { visualReferences: bundle.pages.map((page) => `references/pages/${page}/PAGE.md`) } : {}),
+          rules: { ...rulesSeed, gateFilesStamped: gateRules },
+          ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
+          qualityGates: gates,
+          validation: { score: scaffoldValidation.score },
+          ...(skipped.length > 0 ? {
+            gateSkippedSequences: skipped,
+            gateSkippedHint: "fest excludes sequences named *_planning/*_research/*_requirements/*_docs from quality gates. If these sequences do real implementation work, rename the sequence dirs (and their fest_id/fest_name frontmatter) — otherwise the skip is intentional.",
+          } : {}),
+          ...(needsWorkingDir ? {
+            needsWorkingDir: true, projects: projectCandidates,
+            hint: "Multiple projects in this camp — no workingDir given, so sequences have NO fest_working_dir and fest_next will fail validation. Ask the human which project this festival targets, then set fest_working_dir before activation.",
+          } : {}),
+          nextSteps: [
+            ...(bundle ? ["Link each relevant task doc with 'Visual reference: references/pages/<page>/PAGE.md' and component-level Done-When checks; fest_validate will reject unlinked pages."] : []),
+            `Run fest_validate {festival:"${festId}"} — generated contract documents must contain zero template markers and valid camp-relative working directories`,
+            "Generated documents have already been validated. If scope or acceptance changes, obtain new approval before promotion.",
+            `fest_promote {festival:"${festId}"} twice: planning -> ready -> active`,
+          ],
+        });
       } catch (error) {
-        return textResult({ kind: "plan_failed", error: `Festival scaffold passed validation, but plan lifecycle state could not be recorded: ${String(error)}`, festivalDir, hint: "The festival exists. Preserve it and inspect .ompfest/plans status before retrying." });
+        deps.detect.bustCache?.();
+        let candidate = festivalDir;
+        if (!candidate) {
+          const after = await deps.detect.listFestivals(root).catch(() => []);
+          const previous = new Set(beforeFestivals.map((festival) => resolve(festival.path)));
+          const created = after.filter((festival) => !previous.has(resolve(festival.path)));
+          if (created.length === 1) candidate = created[0]?.path;
+        }
+        const orphan = planMarked
+          ? undefined
+          : candidate
+            ? await rollbackFestivalCreation(creation, candidate).catch(() => ({ receipt: creation, festivalDir: candidate }))
+            : { receipt: creation };
+        return textResult({
+          kind: "plan_failed",
+          error: String(error),
+          ...(planMarked ? { festivalDir, hint: "The validated festival and approved plan lifecycle are preserved; inspect the creation journal before retrying." } : {}),
+          ...(orphan ? { orphanedCreation: orphan, hint: "The failed creation could not be safely removed. It remains marked and must be reviewed with /fest orphans; it was not selected." } : {}),
+          ...(!orphan && !planMarked ? { cleanup: "The partial festival directory was removed when created; the approved plan remains available to retry." } : {}),
+        });
       }
-      const skipped = gates.output.match(/Skipping sequence "[^"]+"/g) ?? [];
-      const needsWorkingDir = !workingDir;
-      return textResult({
-        kind: "plan_scaffolded",
-        planRevision: approved.planRevision,
-        counts: {
-          phases: parsed.phases_created,
-          sequences: parsed.sequences_created,
-          tasks: parsed.tasks_created,
-        },
-        festivalDir,
-        ...(bundle ? { visualReferences: bundle.pages.map((page) => `references/pages/${page}/PAGE.md`) } : {}),
-        rules: { ...rulesSeed, gateFilesStamped: gateRules },
-        ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
-        qualityGates: gates,
-        validation: { score: scaffoldValidation.score },
-        ...(skipped.length > 0
-          ? {
-              gateSkippedSequences: skipped,
-              gateSkippedHint:
-                "fest excludes sequences named *_planning/*_research/*_requirements/*_docs from quality gates. If these sequences do real implementation work, rename the sequence dirs (and their fest_id/fest_name frontmatter) — otherwise the skip is intentional.",
-            }
-          : {}),
-        ...(needsWorkingDir
-          ? {
-              needsWorkingDir: true,
-              projects: projectCandidates,
-              hint: "Multiple projects in this camp — no workingDir given, so sequences have NO fest_working_dir and fest_next will fail validation. Ask the human which project this festival targets, then run fest_raw {args:['scaffold'], festival:<id>} — or write fest_working_dir: \"projects/<name>\" into each sequence's SEQUENCE_GOAL.md frontmatter.",
-            }
-          : {}),
-        nextSteps: [
-          ...(bundle ? ["Link each relevant task doc with 'Visual reference: references/pages/<page>/PAGE.md' and component-level Done-When checks; fest_validate will reject unlinked pages."] : []),
-          `Run fest_validate {festival:"${festId}"} — generated contract documents must contain zero template markers and valid camp-relative working directories`,
-          "Generated documents have already been validated. If scope or acceptance changes, obtain new approval before promotion.",
-          `fest_promote {festival:"${festId}"} twice: planning -> ready -> active`,
-        ],
-      });
     },
   });
   pi.registerTool({
@@ -1052,9 +1079,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         }
         const candidate = matchFestival(await deps.detect.listFestivals(location.campRoot), params.festival);
         if (candidate.kind === "match") {
-          const ownership = await claimFestivalOwnership(candidate.festival.path, sid);
-          if (ownership.kind !== "claimed") {
-            return textResult({ kind: "festival_owned", festival: candidate.festival.id, owner: ownership.owner?.sessionId, hint: "Select and explicitly transfer this festival before promoting it." });
+          const ownership = await festivalOwner(candidate.festival.path);
+          if (ownership?.sessionId !== sid) {
+            return textResult({ kind: "coordinator_required", festival: candidate.festival.id, coordinator: ownership?.sessionId, hint: `Use /fest select ${candidate.festival.id} to explicitly claim it before promoting.` });
           }
           const visual = await validateVisualReferences(candidate.festival.path, deps.detect);
           if (visual.issues.length > 0) {
@@ -1070,18 +1097,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         }
         return textResult({ kind: "promoted", output, nextSteps: SUPERVISOR_POLICY });
       }
-      const dir =
-        location.festivalDir ??
-        (location.campRoot
-          ? await claimedFestivalDir(deps.tracker, deps.detect, sid, location.campRoot)
-          : undefined) ??
-        (location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined);
-      if (!dir) {
-        return await idleResult(deps, ctx);
-      }
-      const ownership = await claimFestivalOwnership(dir, sid);
-      if (ownership.kind !== "claimed") {
-        return textResult({ kind: "festival_owned", festival: basename(dir), owner: ownership.owner?.sessionId, hint: "Select and explicitly transfer this festival before promoting it." });
+      const dir = location.festivalDir ??
+        (location.campRoot ? await claimedFestivalDir(deps.tracker, deps.detect, sid, location.campRoot) : undefined);
+      if (!dir) return await idleResult(deps, ctx);
+      const owner = await festivalOwner(dir);
+      if (owner?.sessionId !== sid) {
+        return textResult({ kind: "festival_owned", festival: basename(dir), owner: owner?.sessionId, hint: "Promotion is coordinator-only; join with /fest join to contribute without ownership transfer." });
       }
       const visual = await validateVisualReferences(dir, deps.detect);
       if (visual.issues.length > 0) {
@@ -1208,10 +1229,15 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       cwd ??= location.campRoot
         ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)
         : undefined;
-      cwd ??= location.campRoot ? await deps.detect.activeFestival(location.campRoot) : undefined;
       cwd ??= location.campRoot;
       if (!cwd) {
         return await idleResult(deps, ctx);
+      }
+      if (location.campRoot && resolve(cwd) !== resolve(location.campRoot)) {
+        const blocked = await coordinatorRequired(cwd, sessionIdOf(ctx));
+        if (blocked) return blocked;
+      } else if (!READONLY_RAW_COMMANDS[params.args[0] ?? ""]) {
+        return textResult({ kind: "coordinator_required", hint: "Mutating raw fest commands require an explicitly selected festival. Use /fest select <festival> first." });
       }
       const result = await deps.fest.raw(cwd, params.args);
       return textResult(result);

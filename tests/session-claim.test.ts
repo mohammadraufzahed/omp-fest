@@ -12,6 +12,8 @@ import { describe, expect, it } from "vitest";
 import { CampFsDetect } from "../src/adapters/fs/camp-fs.js";
 import { registerTools, type PiLike } from "../src/adapters/omp/tools.js";
 import { claimedFestivalDir } from "../src/application/fest-resolve.js";
+import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
+import { joinFestivalTeam } from "../src/application/festival-team.js";
 import { LoopTracker } from "../src/application/loop-tracker.js";
 import {
   FESTIVAL_CLAIM_ENTRY,
@@ -77,6 +79,13 @@ async function makeFestival(root: string, id: string, taskFile: string, status =
   return dir;
 }
 
+async function selectFestival(root: string, dir: string, sessionId: string, tracker: LoopTracker): Promise<void> {
+  const ownership = await claimFestivalOwnership(dir, sessionId);
+  if (ownership.kind !== "claimed") throw new Error(`Cannot select test festival: ${ownership.kind}`);
+  await joinFestivalTeam(root, dir, sessionId, sessionId);
+  tracker.claimFestival(sessionId, dir);
+}
+
 function laneTasks(result: ToolResultShape): string[] {
   const parsed = JSON.parse(result.content[0]?.text ?? "{}") as {
     lanes?: { tasks: string[] }[];
@@ -101,10 +110,11 @@ describe("session festival claim", () => {
     const s1 = ctxFor(root, "s1");
     const s2 = ctxFor(root, "s2");
 
-    // s1 picks fest-b, s2 picks fest-a.
-    const picked = await parallel?.("t", { festival: "fest-b" }, undefined, undefined, s1);
+    await selectFestival(root, join(root, "festivals", "active", "fest-b"), "s1", tracker);
+    await selectFestival(root, join(root, "festivals", "active", "fest-a"), "s2", tracker);
+    const picked = await parallel?.("t", {}, undefined, undefined, s1);
     expect(laneTasks(picked!)).toEqual(["001_IMPLEMENT/01_seq/01_task-b.md"]);
-    await parallel?.("t", { festival: "fest-a" }, undefined, undefined, s2);
+    await parallel?.("t", {}, undefined, undefined, s2);
 
     // The next selector-less call on s1 must still target fest-b — before the
     // fix it re-resolved to the camp-wide pick (fest-a, first alphabetically).
@@ -140,7 +150,8 @@ describe("session festival claim", () => {
     registerTools(pi, { fest: {} as FestCli, camp: {} as CampCli, detect, tracker });
     const parallel = tools.get("fest_parallel")?.execute;
     const s1 = ctxFor(root, "s1");
-    await parallel?.("t", { festival: "fest-b" }, undefined, undefined, s1);
+    await selectFestival(root, oldDir, "s1", tracker);
+    await parallel?.("t", {}, undefined, undefined, s1);
 
     // `fest promote` moves festivals/<status>/<id> — the stored dir goes stale.
     await mkdir(join(root, "festivals", "ready"), { recursive: true });
@@ -163,27 +174,6 @@ describe("session festival claim", () => {
     expect(tracker.claimedFestivalIdFor("s1")).toBeUndefined();
   });
 
-  it("appends one transcript entry per claim change, none for repeats", async () => {
-    const root = await makeCamp();
-    await makeFestival(root, "fest-a", "01_task-a.md");
-    const bDir = await makeFestival(root, "fest-b", "01_task-b.md");
-    const tracker = new LoopTracker();
-    const { pi, tools, appended } = makePi();
-    registerTools(pi, {
-      fest: {} as FestCli,
-      camp: {} as CampCli,
-      detect: new CampFsDetect(),
-      tracker,
-    });
-    const parallel = tools.get("fest_parallel")?.execute;
-    const s1 = ctxFor(root, "s1");
-
-    await parallel?.("t", { festival: "fest-b" }, undefined, undefined, s1);
-    await parallel?.("t", {}, undefined, undefined, s1);
-    const claims = appended.filter((e) => e.customType === FESTIVAL_CLAIM_ENTRY);
-    expect(claims).toHaveLength(1);
-    expect(claims[0]?.data).toMatchObject({ festivalId: "fest-b", festivalDir: bDir, campRoot: root });
-  });
 
   it("restores a claimed festival from the transcript branch, stale dir and all", async () => {
     const root = await makeCamp();

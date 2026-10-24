@@ -16,7 +16,7 @@ export interface WriteLockOwner {
 export interface DispatchQueue {
   kind: "dispatch_queue";
   paused: boolean;
-  capacity: number;
+  capacity: number | "host-managed";
   candidates: DispatchCandidate[];
   waiting: { task: string; reason: string; writeLocks?: WriteLockOwner[] }[];
   barrier?: string;
@@ -32,8 +32,12 @@ export function dispatchQueue(input: {
   workers: WorkerAssignment[]; paused: boolean; limit?: number;
 }): DispatchQueue {
   const outstanding = input.workers.filter((worker) => worker.status !== "accepted");
-  const capacity = Math.max(0, (input.limit ?? 3) - outstanding.length);
+  const capacity = input.limit === undefined ? "host-managed" : Math.max(0, input.limit - outstanding.length);
   const queue: DispatchQueue = { kind: "dispatch_queue", paused: input.paused, capacity, candidates: [], waiting: [] };
+  if (input.paused) {
+    queue.barrier = "Dispatch is paused; resume explicitly before assigning new work.";
+    return queue;
+  }
   if (input.current.kind !== "task") {
     queue.barrier = `Current festival unit is ${input.current.kind}; resolve it before implementation dispatch.`;
     return queue;
@@ -58,8 +62,7 @@ export function dispatchQueue(input: {
     if (!reason && dependencies.some((id) => !completed.has(id))) reason = "Task dependencies are not completed.";
     if (!reason && outstanding.some((worker) => worker.festival === input.festival && worker.task === task.path)) reason = "An unfinished assignment already owns this task; reconcile it, never relaunch.";
     if (!reason && input.workers.some((worker) => worker.status === "accepted" && worker.festival === input.festival && worker.task === task.path)) reason = "Accepted submission awaits festival task completion; do not repeat implementation.";
-    if (!reason && input.paused) reason = "Dispatch is paused.";
-    if (!reason && queue.candidates.length >= capacity) reason = "Outstanding assignment limit reached.";
+    if (!reason && typeof capacity === "number" && queue.candidates.length >= capacity) reason = "Outstanding assignment limit reached.";
     if (reason) queue.waiting.push({ task: task.path, reason });
     else queue.candidates.push({ task: task.path, sequence: task.sequence, files, dependencies, ...(task.workingDir ? { workingDir: task.workingDir } : {}) });
   }

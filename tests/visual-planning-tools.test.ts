@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -9,6 +9,8 @@ import { LoopTracker } from "../src/application/loop-tracker.js";
 import type { CampCli, FestCli } from "../src/ports.js";
 import { PAGE, SVG, TASK } from "./visual-fixture.js";
 import type { StructuredPlan } from "../src/application/structured-plan.js";
+import { listFestivalCreationOrphans } from "../src/application/festival-creation.js";
+import { festivalOwner } from "../src/application/festival-ownership.js";
 
 type Execute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<{ content: { text: string }[] }>;
 const schema = (): { optional(): unknown; describe(): unknown } => ({ optional: schema, describe: schema });
@@ -117,6 +119,13 @@ async function setup() {
 }
 
 describe("visual planning tool handoff", () => {
+  it("never claims an unowned festival from an explicit model tool override", async () => {
+    const { festival, call } = await setup();
+    await mkdir(festival, { recursive: true });
+    await writeFile(join(festival, "fest.yaml"), "id: feature\nname: Feature\n");
+    expect(await call("fest_next", { festival: "feature" })).toMatchObject({ kind: "festival_unselected" });
+    expect(await festivalOwner(festival)).toBeUndefined();
+  });
   it("refuses completion while the current task is paused by a project reservation", async () => {
     const { plan, taskPath, taskComplete, tracker, call, scaffold } = await setup();
     await scaffold({ name: "feature", plan });
@@ -209,6 +218,15 @@ describe("visual planning tool handoff", () => {
     expect(scaffoldFromPlan).toHaveBeenCalledTimes(1);
     expect(scaffoldFromPlan.mock.calls[0]?.[1].dryRun).toBe(true);
     expect(await readFile(existingFile, "utf8")).toBe("Keep existing plan data");
+  });
+
+  it("removes an invalid newly scaffolded festival and clears its creation journal", async () => {
+    const { festival, plan, fest, root, scaffold } = await setup();
+    vi.spyOn(fest, "validate").mockResolvedValue({ score: 80, output: "unfilled markers" });
+    const result = await scaffold({ name: "feature", plan });
+    expect(result.kind).toBe("plan_failed");
+    await expect(lstat(festival)).rejects.toThrow();
+    expect(await listFestivalCreationOrphans(root)).toEqual([]);
   });
 
   it("scaffolds references, validates task links and supplies page notes to next and parallel", async () => {
