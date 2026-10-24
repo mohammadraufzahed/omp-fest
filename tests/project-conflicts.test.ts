@@ -8,6 +8,7 @@ import {
   listProjectReservations,
   releaseProjectFiles,
   reserveProjectFiles,
+  reclaimProjectFiles,
 } from "../src/application/project-conflicts.js";
 
 const roots: string[] = [];
@@ -159,5 +160,16 @@ describe("project reservations", () => {
     expect(await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: [] })).toEqual({ kind: "busy" });
     expect((await stat(lock)).isDirectory()).toBe(true);
     expect(await readFile(join(lock, "owner"), "utf8")).toBe("another process");
+  });
+
+  it("reclaims only the exact reservation inspected by the human", async () => {
+    const project = await fixture();
+    const created = await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: ["src/a.ts"], worker: "A" });
+    expect(created.kind).toBe("reserved");
+    if (created.kind !== "reserved") return;
+    await expect(reclaimProjectFiles(project, { ...created.reservation, reservedAt: "stale" })).rejects.toThrow("changed since inspection");
+    expect(await listProjectReservations(project)).toEqual([created.reservation]);
+    expect(await reclaimProjectFiles(project, created.reservation)).toEqual({ kind: "released", released: true });
+    expect(await listProjectReservations(project)).toEqual([]);
   });
 });

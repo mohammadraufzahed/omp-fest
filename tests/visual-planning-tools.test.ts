@@ -12,6 +12,11 @@ import type { StructuredPlan } from "../src/application/structured-plan.js";
 
 type Execute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<{ content: { text: string }[] }>;
 const schema = (): { optional(): unknown; describe(): unknown } => ({ optional: schema, describe: schema });
+function jsonObject(text: string): Record<string, unknown> {
+  const value: unknown = JSON.parse(text);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected JSON object");
+  return value as Record<string, unknown>;
+}
 
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), "visual-tools-"));
@@ -91,9 +96,10 @@ async function setup() {
     return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
   }
   async function scaffold(params: Record<string, unknown>) {
-    const preview = await call("fest_plan", { ...params, action: "preview", spec });
+    const visual = params.referencesDir ? { visualIntent: "ui_visual", attachments: [{ name: "design-reference", description: "User-provided UI design reference", role: "ui_design" }] } : {};
+    const preview = await call("fest_plan", { ...params, ...visual, action: "preview", spec });
     expect(preview.kind).toBe("plan_preview");
-    const result = await call("fest_plan", { ...params, action: "scaffold", approvedRevision: preview.planRevision });
+    const result = await call("fest_plan", { ...params, ...visual, action: "scaffold", approvedRevision: preview.planRevision });
     await handler?.("select feature", { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
     return result;
   }
@@ -133,7 +139,7 @@ describe("visual planning tool handoff", () => {
   });
   it("previews persisted draft content without resending a spec and rejects stale revisions", async () => {
     const { call, plan } = await setup();
-    const draft = await call("fest_plan_draft", {
+    const draft = await call("fest_plan", { action: "create",
       name: "feature",
       goal: "Fix sidebar overflow",
       scope: ["Sidebar layout"],
@@ -144,7 +150,7 @@ describe("visual planning tool handoff", () => {
     const preview = await call("fest_plan", { action: "preview", draftId: draft.draftId, draftRevision: draft.revision });
     expect(preview.kind).toBe("plan_preview");
     expect(await readFile(plan, "utf8")).toContain("Sidebar remains usable");
-    const changed = await call("fest_plan_draft", { action: "update", draftId: draft.draftId, revision: draft.revision, goal: "Fix sidebar wrapping" });
+    const changed = await call("fest_plan", { action: "update", draftId: draft.draftId, draftRevision: draft.revision, goal: "Fix sidebar wrapping" });
     expect(changed.revision).not.toBe(draft.revision);
     const stale = await call("fest_plan", { action: "preview", draftId: draft.draftId, draftRevision: draft.revision });
     expect(stale.kind).toBe("plan_failed");
@@ -325,11 +331,35 @@ describe("visual planning tool handoff", () => {
     expect(scaffoldFromPlan).toHaveBeenCalledTimes(1);
   });
 
+
+  it("surfaces overlapping pending plans and leaves both untouched until the human chooses", async () => {
+    const { root, spec, call } = await setup();
+    const first = await call("fest_plan", { name: "plan-one", action: "preview", spec });
+    expect(first.kind).toBe("plan_preview");
+    const blocked = await call("fest_plan", { name: "plan-two", action: "preview", spec });
+    expect(blocked).toMatchObject({ kind: "planning_conflict", choices: ["sequence", "narrow", "worktree"] });
+    expect(await readFile(join(root, ".ompfest", "plans", "plan-one.STRUCTURE.md.json"), "utf8")).toContain('"name": "plan-one"');
+    await expect(readFile(join(root, ".ompfest", "plans", "plan-two.STRUCTURE.md"), "utf8")).rejects.toThrow();
+    const sequenced = await call("fest_plan", { name: "plan-two", action: "preview", spec, conflictChoice: "sequence" });
+    expect(sequenced.kind).toBe("plan_preview");
+    expect(jsonObject(await readFile(join(root, ".ompfest", "plans", "plan-two.STRUCTURE.md.json"), "utf8")).rules).toContain("Keep all plans");
+  });
+
+  it("does not treat a previously scaffolded plan artifact as pending work", async () => {
+    const { scaffold, call, root, spec } = await setup();
+    await scaffold({ name: "finished-plan" });
+    const next = await call("fest_plan", { name: "next-plan", action: "preview", spec });
+    expect(next.kind).toBe("plan_preview");
+    const status = jsonObject(await readFile(join(root, ".ompfest", "plans", "finished-plan.STRUCTURE.md.status.json"), "utf8"));
+    expect(status.state).toBe("scaffolded");
+    expect(typeof status.planRevision).toBe("string");
+  });
   it("invalidates approval when visual references change", async () => {
     const { plan, spec, referencesDir, call, scaffoldFromPlan } = await setup();
-    const preview = await call("fest_plan", { name: "feature", plan, spec, referencesDir, action: "preview" });
+    const visual = { visualIntent: "ui_visual", attachments: [{ name: "design-reference", description: "User-provided UI design reference", role: "ui_design" }] };
+    const preview = await call("fest_plan", { name: "feature", plan, spec, referencesDir, action: "preview", ...visual });
     await writeFile(join(referencesDir, "pages", "results", "wireframe.svg"), SVG.replace("Search</text>", "Find</text>"));
-    const result = await call("fest_plan", { name: "feature", plan, referencesDir, action: "scaffold", approvedRevision: preview.planRevision });
+    const result = await call("fest_plan", { name: "feature", plan, referencesDir, action: "scaffold", approvedRevision: preview.planRevision, ...visual });
     expect(result.kind).toBe("plan_failed");
     expect(result.error).toContain("changed since approval");
     expect(scaffoldFromPlan).not.toHaveBeenCalled();

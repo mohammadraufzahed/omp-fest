@@ -11,13 +11,12 @@ import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { PiLike, ToolDeps } from "./tools.js";
 
-interface SupervisorToolContext { cwd: string; sessionManager?: { getSessionId?(): string } }
+interface SupervisorToolContext { cwd: string; sessionManager?: { getSessionId?(): string }; getAsyncJobSnapshot?(): { running?: NativeJob[]; recent?: NativeJob[] } | null }
+interface NativeJob { id: string; type: string; status: string; label: string; agentId?: string }
 export interface SupervisorToolHooks {
   isMainSession?(ctx: SupervisorToolContext): boolean;
-  /** Persist long evidence and return a compact summary plus durable artifact path. */
   storeReport?(festivalDir: string, evidence: string): Promise<{ summary: string; path: string }>;
 }
-
 async function festivalLocation(deps: ToolDeps, sid: string, cwd: string, selector?: string) {
   const location = await deps.detect.locate(cwd);
   if (!location.campRoot) throw new Error("Select a festival inside a camp first.");
@@ -81,19 +80,18 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
   const z = pi.zod;
   pi.registerTool({
     name: "fest_supervisor",
-    label: "Supervise Festival Workers",
-    description: "Queue dependency-eligible tasks, reserve assignments, track supervisor reports separately from observed native lifecycle, reconcile resume, retain worker questions and independently review submissions. Never launches workers or completes tasks. Main session only.",
+    description: "Queue dependency-eligible tasks, reserve assignments, track supervisor reports separately from observed native lifecycle, reconcile resume, retain worker questions and independently review submissions. Status returns a compact delta for a known revision; omit since for full state. Never launches workers or completes tasks. Main session only.",
     parameters: z.object({
       action: z.enum(["status", "queue", "resume", "assign", "running", "submit", "block", "question", "accept", "revise"]),
       festival: z.string().optional(), task: z.string().optional(), worker: z.string().optional(),
-      assignment: z.string().optional(), evidence: z.string().optional(),
+      assignment: z.string().optional(), evidence: z.string().optional(), since: z.string().optional(), runtimeId: z.string().optional(),
     }),
-    async execute(_id: string, params: { action: "status" | "queue" | "resume" | "assign" | "running" | "submit" | "block" | "question" | "accept" | "revise"; festival?: string; task?: string; worker?: string; assignment?: string; evidence?: string }, _signal: unknown, _update: unknown, ctx: SupervisorToolContext) {
+    async execute(_id: string, params: { action: "status" | "queue" | "resume" | "assign" | "running" | "submit" | "block" | "question" | "accept" | "revise"; festival?: string; task?: string; worker?: string; assignment?: string; evidence?: string; since?: string; runtimeId?: string }, _signal: unknown, _update: unknown, ctx: SupervisorToolContext) {
       const sid = sessionIdOf(ctx);
       const output = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
       try {
         if (hooks.isMainSession && !hooks.isMainSession(ctx)) throw new Error("Festival supervision is main-session only; return your report through the native worker channel.");
-        if (params.action === "status") return output({ ...supervisor.state(sid), statusSource: "supervisor_reported", runtimeSource: "worker.runtime.source; absent means unverified" });
+        if (params.action === "status") return output({ ...supervisor.snapshot(sid, params.since), statusSource: "supervisor_reported", runtimeSource: "worker.runtime.source; absent means unverified" });
         if (params.action === "resume") {
           const reconciliation = supervisor.reconcile(sid);
           pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sid));
@@ -119,7 +117,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           try { row = supervisor.assign(sid, basename(dir), candidate.task, params.worker, candidate.files, { id, projectDir }); }
           catch (error) { await releaseProjectFiles(projectDir, sid, id); throw error; }
           deps.tracker.taskOpened(sid, candidate.task);
-          result = { assignment: row, contract: { festivalDir: dir, task: candidate.task, workingDir: projectDir, document, policy: SUPERVISOR_POLICY, browserVerification: BROWSER_VERIFICATION_POLICY }, nextSteps: "Launch this named worker using the exposed native omp subagent tool and contract, then mark running. No capability means blocked, not launched. Preserve native identity for reconciliation." };
+          result = { assignment: row, contract: { festivalDir: dir, task: candidate.task, workingDir: projectDir, document, policy: SUPERVISOR_POLICY, browserVerification: BROWSER_VERIFICATION_POLICY }, nextSteps: "Launch this named worker through the native omp agent tool. After host acceptance, call fest_capabilities and bind the exact running task job ID with fest_supervisor action running {assignment,runtimeId}; if no matching job is exposed, keep runtime unverified. Native async job snapshots reconcile running/completed/failed/cancelled states and surface completion for supervisor review; no duplicate launch or auto-accept." };
         } else {
           if (!params.assignment) throw new Error("Assignment id is required.");
           const assignment = supervisor.state(sid).workers.find((worker) => worker.id === params.assignment);
@@ -128,7 +126,12 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           const ownership = await festivalOwner(assignmentDir);
           if (ownership?.sessionId !== sid) throw new Error("Festival ownership changed; this session cannot mutate its worker assignment.");
           if (params.action === "question") result = supervisor.question(sid, params.assignment, params.evidence ?? "");
-          else {
+          else if (params.action === "running") {
+            const jobs = ctx.getAsyncJobSnapshot?.(), job = [...(jobs?.running ?? []), ...(jobs?.recent ?? [])].find((item) => item.id === params.runtimeId);
+            if (job?.type !== "task" || job.status !== "running" || (job.label !== assignment.worker && job.agentId !== assignment.worker)) throw new Error("Bind only a host-observed running task job whose label/agentId matches this assigned worker. Inspect fest_capabilities; do not invent runtime IDs.");
+            const row = supervisor.update(sid, params.assignment, "running", "");
+            result = supervisor.observeRuntime(sid, { assignmentId: row.id, runtimeId: job.id, status: "running" }, "native_runtime");
+          } else {
             let evidence = params.evidence ?? "", artifact: string | undefined;
             if (params.action === "submit") {
               const assignment = supervisor.state(sid).workers.find((worker) => worker.id === params.assignment);

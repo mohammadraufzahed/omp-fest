@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { previewPlan, type PlanArtifact } from "./plan-artifacts.js";
 import type { StructuredPlan } from "./structured-plan.js";
+import type { ClassifiedAttachment } from "../domain/reference-classification.js";
 
 /** Editable observations only. Missing verification is never invented to make a draft approvable. */
 export interface PlanDraftFields {
@@ -16,6 +17,7 @@ export interface PlanDraftFields {
   files?: string[];
   verification?: { command: string; cwd?: string; evidencePath: string; expected: string } | null;
   visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown";
+  attachments?: ClassifiedAttachment[];
   rules?: string;
   referencesDir?: string;
   spec?: StructuredPlan;
@@ -52,7 +54,10 @@ function validate(fields: PlanDraftFields, root: string): PlanDraftFields {
   if (result.workingDir) relativePath(result.workingDir, "workingDir");
   for (const path of result.files ?? []) relativePath(path, "File");
   for (const item of result.inspection ?? []) relativePath(item.path, "Inspection path");
-  if (result.referencesDir) relativePath(result.referencesDir, "referencesDir");
+  if (result.referencesDir) {
+    relativePath(result.referencesDir, "referencesDir");
+    if (result.visualIntent !== "ui_visual" || !result.attachments?.some((item) => item.role === "ui_design")) throw new Error("Wireframes require explicit ui_visual intent and at least one attachment classified as ui_design.");
+  }
   if (result.verification) {
     relativePath(result.verification.cwd ?? ".", "Verification cwd");
     relativePath(result.verification.evidencePath, "Verification evidencePath");
@@ -106,6 +111,7 @@ function build(root: string, draftId: string, fields: PlanDraftFields, previous?
     ...(!spec.acceptance.length ? ["acceptance"] : []), ...(!spec.inspection.length ? ["inspection"] : []),
     ...(!fields.workingDir ? ["workingDir"] : []),
     ...(!fields.spec && !fields.verification ? ["verification"] : []),
+    ...(fields.attachments ?? []).filter((item) => item.role === "unknown").map((item) => `attachment role: ${item.name}`),
   ];
   const revision = createHash("sha256").update(JSON.stringify({ draftId, fields, spec, previous: previous?.revision })).digest("hex");
   return { draftId, revision, fields, spec, missing, plan: join(root, ".ompfest", "plans", `${fields.name}.STRUCTURE.md`) };

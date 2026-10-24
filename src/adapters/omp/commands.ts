@@ -23,6 +23,7 @@ import { qualityCommands } from "./quality-commands.js";
 import { conflictCommands } from "./conflict-commands.js";
 import { draftCommands } from "./draft-commands.js";
 import { supervisorQueue } from "./supervisor-tools.js";
+import { flowCommands } from "./flow-commands.js";
 
 export interface CommandDeps {
   fest: FestCli;
@@ -255,6 +256,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     ...qualityCommands(pi, { ...deps, supervisor }),
     ...conflictCommands(pi, deps),
     ...draftCommands(pi, deps),
+    ...flowCommands(pi, deps.detect),
     "": {
       desc: "festival dashboard: camp, active festival, progress, gates",
       run: async (_args, ctx) => {
@@ -682,7 +684,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Guided festival control: /fest [draft|finish|conflicts|blockers|resume|release|workers|dispatch|pause|review|next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
+    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|dispatch|pause|review|next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")

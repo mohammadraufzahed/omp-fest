@@ -262,3 +262,21 @@ export async function checkProjectConflicts(projectDir: string, files: string[],
   });
   return result ?? { kind: "busy" };
 }
+/** Human-authorized reclaim is exact-token CAS: a renewed reservation is never removed. */
+export async function reclaimProjectFiles(projectDir: string, expected: ProjectReservation): Promise<ProjectReleaseResult> {
+  validateIdentity(expected);
+  const project = await canonicalProjectDirectory(projectDir);
+  if (expected.projectDir !== project) throw new Error("Reservation belongs to another checkout.");
+  const result = await withProjectLock(project, async () => {
+    const registry = await readRegistry(project);
+    const current = registry.reservations.find((row) => sameIdentity(row, expected));
+    if (!current) return { kind: "released" as const, released: false };
+    if (current.reservedAt !== expected.reservedAt || current.files.join("\0") !== expected.files.join("\0") ||
+        current.festival !== expected.festival || current.task !== expected.task || current.worker !== expected.worker) {
+      throw new Error("Reservation changed since inspection; reread conflicts before reclaiming.");
+    }
+    await writeRegistry(project, { ...registry, reservations: registry.reservations.filter((row) => !sameIdentity(row, expected)) });
+    return { kind: "released" as const, released: true };
+  });
+  return result ?? { kind: "busy" };
+}

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { filesOverlap } from "./supervisor-queue.js";
 
 export const SUPERVISOR_ENTRY = "com.github.mohammadraufzahed.omp-fest.supervisor";
@@ -54,6 +54,25 @@ const runtimeStatuses: readonly string[] = ["running", "completed", "failed", "e
 export class Supervisor {
   private readonly sessions = new Map<string, SupervisorState>();
   state(session: string): SupervisorState { return structuredClone(this.sessions.get(session) ?? { paused: false, workers: [] }); }
+  private readonly snapshots = new Map<string, Map<string, SupervisorState>>();
+  snapshot(session: string, since?: string) {
+    const state = this.state(session), revision = createHash("sha256").update(JSON.stringify(state)).digest("hex");
+    let history = this.snapshots.get(session); if (!history) { history = new Map(); this.snapshots.set(session, history); }
+    const previous = since ? history.get(since) : undefined;
+    history.set(revision, state);
+    while (history.size > 24) {
+      const oldest = history.keys().next();
+      if (!oldest.done) history.delete(oldest.value);
+    }
+    if (!since) return { revision, state, full: true };
+    if (!previous) return { revision, state, full: true, reset: true, reason: "Unknown or expired revision; this is a full snapshot." };
+    const oldWorkers = new Map(previous.workers.map((worker) => [worker.id, worker]));
+    const workers = state.workers.filter((worker) => JSON.stringify(oldWorkers.get(worker.id)) !== JSON.stringify(worker));
+    const currentIds = new Set(state.workers.map((worker) => worker.id));
+    const oldBlockers = new Map((previous.blockers ?? []).map((blocker) => [blocker.id, blocker]));
+    const blockers = (state.blockers ?? []).filter((blocker) => JSON.stringify(oldBlockers.get(blocker.id)) !== JSON.stringify(blocker));
+    return { revision, since, full: false, delta: { paused: previous.paused === state.paused ? undefined : state.paused, workers, removedWorkerIds: previous.workers.filter((worker) => !currentIds.has(worker.id)).map((worker) => worker.id), blockers } };
+  }
 
   restore(session: string, entries: unknown[]): void {
     this.sessions.delete(session);

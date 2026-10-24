@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, open, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { prepareStructuredPlan, type StructuredPlan, type PreparedStructuredPlan } from "./structured-plan.js";
 
@@ -42,7 +42,7 @@ async function artifactPath(root: string, plan: string, name: string): Promise<s
     const info = await lstat(current);
     if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`Unsafe plan directory: ${current}`);
   }
-  for (const target of [path, `${path}.json`, `${path}.preview.md`]) {
+  for (const target of [path, `${path}.json`, `${path}.preview.md`, `${path}.status.json`]) {
     const info = await lstat(target).catch((error: unknown) => {
       if (errorCode(error) === "ENOENT") return undefined;
       throw error;
@@ -76,5 +76,20 @@ export async function approvedPlan(root: string, plan: string, name: string, rev
     throw new Error("Plan or references changed since approval. Preview again and obtain approval for the new planRevision.");
   }
   return { ...prepared, artifact, plan: path, planRevision: revision };
+}
+
+/** Record completed scaffold state separately so the immutable approval digest remains valid. */
+export async function markPlanScaffolded(root: string, plan: string, name: string, revision: string, festivalDir: string, references: { path: string; content: string }[] = []): Promise<void> {
+  const approved = await approvedPlan(root, plan, name, revision, references);
+  const status = `${approved.plan}.status.json`, temp = `${status}.${randomUUID()}.tmp`;
+  await artifactPath(root, plan, name);
+  const existing = await lstat(status).catch((error: unknown) => { if (errorCode(error) === "ENOENT") return undefined; throw error; });
+  if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error("Unsafe plan status artifact.");
+  try {
+    const file = await open(temp, "wx", 0o600);
+    try { await file.writeFile(JSON.stringify({ state: "scaffolded", festivalDir, planRevision: revision, completedAt: new Date().toISOString() }) + "\n"); }
+    finally { await file.close(); }
+    await rename(temp, status);
+  } finally { await unlink(temp).catch(() => undefined); }
 }
 

@@ -23,10 +23,11 @@ import { installVisualReferences, prepareVisualReferences, referencesForTask, ta
 import { createWireframe, WireframeInputError, type WireframeSpec } from "../../application/visual-wireframe.js";
 import { structuredPlanSchema, type StructuredPlan } from "../../application/structured-plan.js";
 import { normalizePlanInput } from "../../application/plan-input.js";
-import { approvedPlan, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
+import { approvedPlan, markPlanScaffolded, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
 import { finalizeApprovedScaffold } from "../../application/plan-scaffold.js";
-import { readPlanDraft } from "../../application/plan-drafts.js";
-import { registerDraftTools } from "./draft-tools.js";
+import { createPlanDraft, readPlanDraft, updatePlanDraft, listPlanDrafts, type PlanDraftFields } from "../../application/plan-drafts.js";
+import { findPlanningConflicts } from "../../application/planning-conflicts.js";
+import { classifyAttachment, type AttachmentRole } from "../../domain/reference-classification.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
@@ -35,6 +36,8 @@ import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { registerSupervisorTools } from "./supervisor-tools.js";
 import { registerQualityTools } from "./quality-tools.js";
 import { INTEGRATION_GUIDE, integrationReviewStatus } from "../../application/integration-review.js";
+import { planningDiagnostic } from "../../application/planning-errors.js";
+import { registerFlowTools, type FlowHost } from "./flow-tools.js";
 
 export interface ToolDeps {
   fest: FestCli;
@@ -44,6 +47,7 @@ export interface ToolDeps {
   supervisor?: Supervisor;
   /** Per-project .ompfest.json — gate behavior honors pauseAtGates/evidenceRequiredOnGates. */
   config?: () => Promise<OmpFestConfig>;
+  host?: Pick<FlowHost, "getAllTools" | "getActiveTools">;
 }
 
 export interface PiLike {
@@ -52,10 +56,12 @@ export interface PiLike {
   /** Persists a custom session entry — the claim survives resume/branch/tree. */
   appendEntry?(customType: string, data: unknown): void;
 }
-
+interface NativeJobSnapshot { running?: { id: string; type: string; status: string; label: string; agentId?: string }[]; recent?: { id: string; type: string; status: string; label: string; agentId?: string }[] }
 interface ToolContextLike {
   cwd: string;
   sessionManager?: { getSessionId?(): string };
+  agent?: { kind?: string };
+  getAsyncJobSnapshot?(): NativeJobSnapshot | null;
   ui?: OverlayUiLike & {
     notify?(message: string, type?: string): void;
     select?(title: string, options: (string | { label: string; description?: string })[], opts?: Record<string, unknown>): Promise<string | undefined>;
@@ -108,22 +114,16 @@ function compactBlockedUnit(unit: Extract<NextUnit, { kind: "blocked" }>): ToolR
   });
 }
 function planFailure(error: unknown, extra: Record<string, unknown> = {}): ToolResult {
-  const raw = String(error).replace(/^Error:\s*/, "");
-  const message = raw.length > 600 ? `${raw.slice(0, 600)}…` : raw;
-  const field = /^([^\s]+)\s/.exec(message)?.[1];
-  const code =
-    message.includes("must be project-relative") ? "PROJECT_RELATIVE_PATH_REQUIRED"
-      : message.includes("does not exist") ? "PATH_NOT_FOUND"
-        : message.includes("stable identifier") ? "INVALID_IDENTIFIER"
-          : message.includes("Plan must be") ? "INVALID_PLAN_PATH"
-            : message.includes("Verification cwd") ? "INVALID_VERIFICATION_CWD"
-              : "PLAN_VALIDATION_FAILED";
+  const diagnostic = planningDiagnostic(error, typeof extra.field === "string" ? extra.field : undefined);
   return textResult({
     kind: "plan_failed",
-    code,
-    ...(field ? { field } : {}),
-    error: message,
-    diagnostics: [{ code, ...(field ? { field } : {}), message }],
+    code: diagnostic.code,
+    ...(diagnostic.field ? { field: diagnostic.field } : {}),
+    ...(diagnostic.expected ? { expected: diagnostic.expected } : {}),
+    received: diagnostic.message,
+    error: diagnostic.message,
+    diagnostics: [diagnostic],
+    nextAction: diagnostic.nextAction,
     ...extra,
   });
 }
@@ -309,7 +309,6 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const supervisor = deps.supervisor ?? new Supervisor();
   registerSupervisorTools(pi, deps, supervisor);
   registerQualityTools(pi, { ...deps, supervisor });
-  registerDraftTools(pi, deps);
 
 
   pi.registerTool({
@@ -656,34 +655,53 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_plan",
     label: "Fest Plan (Scaffold From Plan)",
     description:
-      "Inspect the project first, then preview a typed spec to generate deterministic STRUCTURE.md and an approval summary. " +
-      "For fast, low-error planning, call fest_plan_draft first; it generates stable IDs and the canonical plan path. " +
-      "New plans do not require an existing festival selection or ownership; only existing-festival tasks, promotion, and reference revisions do. " +
-      "Preview validates acceptance coverage, dependencies, existing/proposed paths and verification evidence. " +
-      "After human approval, scaffold using the returned approvedRevision; changed plans or references require new approval. " +
-      "The parser and generated tree must match the approved counts. One phase and sequence are valid for simple tasks. " +
-      "Visual references are optional; referenceAction handles existing visual reference revisions.",
+      "Single stateful planning API. Use action create/update/read/list for persisted incremental drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
     parameters: z.object({
-      name: z.string().optional().describe("Festival slug; omitted when using draftId"),
-      plan: z.string().optional().describe("Canonical plan path; generated from draftId or name when omitted"),
-      draftId: z.string().optional().describe("Persisted draft id returned by fest_plan_draft"),
-      draftRevision: z.string().optional().describe("Exact persisted draft revision to preview"),
-      action: z.enum(["preview", "scaffold"]).optional().describe("preview validates and writes planning artifacts only; scaffold consumes an approved preview"),
-      spec: structuredPlanSchema(z).optional().describe("Direct structured spec for preview; omit when consuming draftId/draftRevision and during scaffold"),
-      approvedRevision: z.string().optional().describe("planRevision from the preview the human approved; required for scaffold"),
-      workingDir: z.string().optional().describe("Camp-relative project dir or an absolute path to a linked checkout; required when the camp has multiple projects"),
-      rules: z.string().optional().describe("Constraints/rules the human agreed to during planning, as bullet lines — written verbatim into FESTIVAL_RULES.md so fest rules shows them"),
-      referencesDir: z.string().optional().describe("Absolute <camp>/.ompfest/plans/<name>.references directory containing pages/<slug>/PAGE.md and wireframe.svg; only for explicit UI-visual plans"),
-      visualIntent: z.enum(["ui_visual", "document_or_pdf", "backend_or_api", "bug_diagnostic", "mixed", "unknown"]).optional().describe("Classified request intent; wireframes are allowed only for ui_visual"),
-      referenceAction: z.enum(["preview", "revise"]).optional().describe("preview renders the approved wireframe/notes and revision impact without scaffolding; revise updates an existing festival's references only after human approval"),
-      festival: z.string().optional().describe("Existing festival selector for reference previews/revisions; omit for an initial plan preview"),
-      baseRevision: z.string().optional().describe("Original reference digest from the approved revision preview"),
-      proposalRevision: z.string().optional().describe("Proposed reference digest from the approved revision preview"),
+      action: z.enum(["create", "read", "update", "list", "preview", "scaffold"]).optional(),
+      name: z.string().optional(), plan: z.string().optional(), draftId: z.string().optional(), draftRevision: z.string().optional(),
+      goal: z.string().optional(), scope: z.array(z.string()).optional(), exclusions: z.array(z.string()).optional(),
+      acceptance: z.array(z.string()).optional(), inspection: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
+      workingDir: z.string().optional(), files: z.array(z.string()).optional(), rules: z.string().optional(),
+      verification: z.object({ command: z.string(), cwd: z.string().optional(), evidencePath: z.string(), expected: z.string() }).optional(),
+      attachments: z.array(z.object({ name: z.string(), description: z.string(), role: z.enum(["ui_design", "error_screenshot", "document_pdf", "context", "unknown"]).optional() })).optional(),
+      spec: structuredPlanSchema(z).optional(), approvedRevision: z.string().optional(), referencesDir: z.string().optional(),
+      visualIntent: z.enum(["ui_visual", "document_or_pdf", "backend_or_api", "bug_diagnostic", "mixed", "unknown"]).optional(),
+      referenceAction: z.enum(["preview", "revise"]).optional(), festival: z.string().optional(),
+      baseRevision: z.string().optional(), proposalRevision: z.string().optional(),
+      conflictChoice: z.enum(["sequence", "narrow", "worktree"]).optional().describe("Human-selected resolution after planning_conflict: sequence overlapping tasks, narrow one scope, or use a separate worktree"),
     }),
-    async execute(_id: string, params: { name: string; plan: string; draftId?: string; draftRevision?: string; action?: "preview" | "scaffold"; spec?: StructuredPlan; approvedRevision?: string; workingDir?: string; rules?: string; referencesDir?: string; visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown"; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { action?: "create" | "read" | "update" | "list" | "preview" | "scaffold"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
+      }
+      const draftAction = params.action;
+      if (draftAction === "list") {
+        return textResult({ kind: "plan_drafts", drafts: (await listPlanDrafts(root)).map(({ draftId, revision, fields, missing }) => ({ draftId, revision, name: fields.name, goal: fields.goal, missing })) });
+      }
+      if (draftAction === "read") {
+        try { return textResult({ kind: "plan_draft", ...await readPlanDraft(root, params.draftId ?? "") }); }
+        catch (error) { return planFailure(error, { field: "draftId" }); }
+      }
+      if (draftAction === "create" || draftAction === "update") {
+        try {
+          const attachments = params.attachments?.map((item) => classifyAttachment(item.name, item.description, item.role));
+          let patch: Partial<PlanDraftFields> = {
+            ...(params.name ? { name: params.name } : {}), ...(params.goal !== undefined ? { goal: params.goal } : {}),
+            ...(params.scope ? { scope: params.scope } : {}), ...(params.exclusions ? { exclusions: params.exclusions } : {}),
+            ...(params.acceptance ? { acceptance: params.acceptance } : {}), ...(params.inspection ? { inspection: params.inspection } : {}),
+            ...(params.workingDir ? { workingDir: params.workingDir } : {}), ...(params.files ? { files: params.files } : {}),
+            ...(params.verification ? { verification: params.verification } : {}), ...(params.rules !== undefined ? { rules: params.rules } : {}),
+            ...(params.referencesDir ? { referencesDir: params.referencesDir } : {}), ...(params.visualIntent ? { visualIntent: params.visualIntent } : {}),
+            ...(attachments ? { attachments } : {}),
+          } satisfies Partial<PlanDraftFields>;
+          const project = patch.workingDir || draftAction === "create" ? await resolveWorkingDir(root, deps.camp, patch.workingDir) : undefined;
+          if (project?.dir) patch = { ...patch, workingDir: project.dir };
+          const draft = draftAction === "create"
+            ? await createPlanDraft(root, { ...patch, name: params.name ?? "" })
+            : await updatePlanDraft(root, params.draftId ?? "", params.draftRevision ?? "", patch);
+          return textResult({ kind: draft.missing.length ? "plan_draft_incomplete" : "plan_draft", draftId: draft.draftId, revision: draft.revision, name: draft.fields.name, goal: draft.spec.goal, missing: draft.missing, attachments: draft.fields.attachments, nextAction: draft.missing.length ? "Ask only for listed missing decisions, then update this draft with its current revision." : `Call fest_plan {action:"preview",draftId:"${draft.draftId}",draftRevision:"${draft.revision}"}.` });
+        } catch (error) { return planFailure(error); }
       }
       if (params.draftId) {
         try {
@@ -691,11 +709,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           const draft = await readPlanDraft(root, params.draftId);
           if (draft.revision !== params.draftRevision) throw new Error("Draft changed; read current draft and approve the new revision");
           if (draft.missing.length) throw new Error(`Draft is incomplete: ${draft.missing.join(", ")}`);
-          params = { ...params, name: draft.fields.name, plan: draft.plan, spec: draft.spec, workingDir: draft.fields.workingDir, rules: draft.fields.rules, referencesDir: draft.fields.referencesDir ? resolve(root, draft.fields.referencesDir) : undefined, visualIntent: draft.fields.visualIntent };
+          params = { ...params, name: draft.fields.name, plan: draft.plan, spec: draft.spec, workingDir: draft.fields.workingDir, rules: draft.fields.rules, referencesDir: draft.fields.referencesDir ? resolve(root, draft.fields.referencesDir) : undefined, visualIntent: draft.fields.visualIntent, attachments: draft.fields.attachments?.map((item) => ({ name: item.name, description: item.reason, role: item.role })) };
         } catch (error) { return planFailure(error); }
       }
       if (!params.name || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(params.name)) return planFailure("name must be a lowercase festival slug", { field: "name" });
-      if (!params.plan) params.plan = join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
+      params.plan ??= join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
       const canonicalPlan = join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
       const planPath = resolve(params.plan) === resolve(canonicalPlan) ? params.plan : canonicalPlan;
       const planWarnings = params.plan === planPath ? [] : [`plan was normalized to ${planPath}`];
@@ -703,10 +721,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!params.action && !params.referenceAction) return planFailure("Choose action:'preview' with a structured spec, then action:'scaffold' with the human-approved planRevision.");
       if (params.action === "preview" && !params.spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
       if (params.action === "scaffold" && (!params.approvedRevision || params.spec)) return planFailure("Scaffolding requires the human-approved planRevision and must omit spec.", { code: "INVALID_SCAFFOLD_INPUT" });
-      if (params.referencesDir && params.visualIntent && params.visualIntent !== "ui_visual") {
+      if (params.action && params.referencesDir && (params.visualIntent !== "ui_visual" || !params.attachments?.some((item) => item.role === "ui_design"))) {
         return textResult({
-          kind: "plan_failed",
-          error: "Wireframes are allowed only for visualIntent:'ui_visual'. Keep PDF, document, backend, API and error images as evidence without referencesDir.",
+          kind: "plan_failed", code: "VISUAL_REFERENCE_NOT_CONFIRMED", field: "attachments",
+          expected: "explicit ui_visual intent and at least one attachment classified ui_design",
+          received: params.attachments?.map((item) => item.role) ?? [],
+          nextAction: "Keep error screenshots, PDFs, documents, and ambiguous attachments as evidence. Ask one focused role question before creating visual references.",
         });
       }
       let approved: ApprovedPlan | undefined;
@@ -727,8 +747,22 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           const spec = params.spec;
           if (!spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
           const normalized = normalizePlanInput(spec, resolve(root, project.dir));
+          const conflicts = await findPlanningConflicts(root, params.name, project.dir, normalized.spec);
+          let conflictChoice = params.conflictChoice;
+          if (conflicts.length && !conflictChoice && ctx.ui?.select) {
+            const answer = await ctx.ui.select("Overlapping festival plans", [
+              "sequence — keep both plans; execute overlapping files one at a time",
+              "narrow — revise file scope, then preview again",
+              "worktree — target an isolated project worktree and preview again",
+            ]);
+            conflictChoice = answer?.startsWith("sequence") ? "sequence" : answer?.startsWith("narrow") ? "narrow" : answer?.startsWith("worktree") ? "worktree" : undefined;
+          }
+          if (conflicts.length && !conflictChoice) return textResult({ kind: "planning_conflict", conflicts, choices: ["sequence", "narrow", "worktree"], nextAction: "Ask the human to choose; no plan artifact was written and no existing plan was changed or cancelled. Retry preview with conflictChoice." });
+          if (conflicts.length && conflictChoice === "narrow") return textResult({ kind: "planning_conflict", conflicts, resolution: "narrow", nextAction: "Revise the draft/spec to remove overlapping files, then preview again. Existing plans remain unchanged." });
+          if (conflicts.length && conflictChoice === "worktree") return textResult({ kind: "planning_conflict", conflicts, resolution: "worktree", nextAction: "Choose an isolated worktree as workingDir, then preview again. This tool does not create or transfer a worktree." });
+          const rules = conflicts.length ? [params.rules?.trim(), `Planning conflict decision: sequence overlapping files ${conflicts.map((conflict) => `${conflict.name} (${conflict.files.join(", ")})`).join("; ")} one at a time. Keep all plans; never cancel another plan.`].filter(Boolean).join("\n") : params.rules ?? "";
           const prepared = await previewPlan(root, planPath, {
-            name: params.name, workingDir: project.dir, rules: params.rules ?? "",
+            name: params.name, workingDir: project.dir, rules,
             ...(params.referencesDir ? { referencesDir: params.referencesDir } : {}), spec: normalized.spec,
           }, bundle?.files);
           const visual = bundle ? await renderPlanPreview(prepared.plan, bundle) : undefined;
@@ -864,6 +898,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (scaffoldValidation.score !== 100) {
         return planFailure("Generated scaffold did not pass validation; retained for repair, not activation", { festivalDir, score: scaffoldValidation.score, validation: scaffoldValidation.output.slice(0, 2000) });
       }
+      try {
+        await markPlanScaffolded(root, planPath, params.name, approved.planRevision, festivalDir, bundle?.files);
+      } catch (error) {
+        return textResult({ kind: "plan_failed", error: `Festival scaffold passed validation, but plan lifecycle state could not be recorded: ${String(error)}`, festivalDir, hint: "The festival exists. Preserve it and inspect .ompfest/plans status before retrying." });
+      }
       const skipped = gates.output.match(/Skipping sequence "[^"]+"/g) ?? [];
       const needsWorkingDir = !workingDir;
       return textResult({
@@ -907,11 +946,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_wireframe_create",
     label: "Create Screenshot Wireframe",
     description:
-      "Deterministically create a categorized wireframe.svg and AI-ready PAGE.md for one page from structured screenshot observations. " +
-      "Call once per page into a unique page-slug directory; components use open-ended semantic kinds and categories, with renderAs reserved for safe SVG primitives. " +
-      "Inspect reusable project UI and styles first; include only existing source paths in audit evidence, all node bounds and repeated instances, confidence-tagged styles, states, measurements, and unresolved questions. " +
-      "The overview stays compact while PAGE.md contains the full categorized hierarchy and implementation evidence; missing audit paths are returned as warnings and marked unverified rather than blocking wireframe creation.",
+      "Create a categorized wireframe.svg and PAGE.md only for an explicitly classified UI design reference. " +
+      "Never use error screenshots, PDFs/documents, backend evidence, context, or unknown-role images as wireframe input. " +
+      "If the attachment role is ambiguous, ask the user before calling this tool.",
     parameters: z.object({
+      attachmentRole: z.enum(["ui_design", "error_screenshot", "document_pdf", "context", "unknown"]).describe("Role explicitly classified from the user's request; only ui_design may generate a wireframe"),
       outputDirectory: z.string().describe("Path inside the current project working directory; do not use ../ traversal, e.g. .ompfest/plans/page.references/pages/results"),
       spec: z.object({
         title: z.string().describe("Short page or screen title"),
@@ -967,7 +1006,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         openQuestions: z.array(z.string()).describe("Focused unresolved questions that could change structure or styling; empty when none"),
       }),
     }),
-    async execute(_id: string, params: { outputDirectory: string; spec: WireframeSpec }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { outputDirectory: string; attachmentRole: "ui_design" | "error_screenshot" | "document_pdf" | "context" | "unknown"; spec: WireframeSpec }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      if (params.attachmentRole !== "ui_design") return textResult({ kind: "wireframe_blocked", code: "NOT_UI_DESIGN", field: "attachmentRole", expected: "ui_design", received: params.attachmentRole, nextAction: "Keep this attachment as evidence; ask the user if the attachment role is ambiguous. Do not produce a wireframe." });
       try {
         const result = await createWireframe(params.outputDirectory, ctx.cwd, params.spec);
         return textResult({ kind: "wireframe_created", ...result });
@@ -1200,4 +1240,5 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       return textResult(await deps.camp.ideaAdd(root, params.text));
     },
   });
+  registerFlowTools(pi, { detect: deps.detect, host: deps.host });
 }

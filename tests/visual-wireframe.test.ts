@@ -35,6 +35,7 @@ describe("fest_wireframe_create", () => {
     const call = tools.get("fest_wireframe_create");
     expect(call).toBeDefined();
     const params = {
+      attachmentRole: "ui_design",
       outputDirectory: ".ompfest/plans/page.references/pages/staff-selection",
       spec: {
         title: "Staff selection",
@@ -100,7 +101,8 @@ describe("fest_wireframe_create", () => {
     } satisfies PiLike, { fest: {} as FestCli, camp: {} as CampCli, detect: new CampFsDetect(), tracker: new LoopTracker() });
     const call = tools.get("fest_wireframe_create")!;
     const result = JSON.parse((await call("test", {
-      outputDirectory: "../outside",
+      attachmentRole: "ui_design",
+      outputDirectory: ".wireframe",
       spec: {
         title: "Broken", slug: "broken", direction: "ltr",
         source: { width: 100, height: 100, displayWidth: 100, displayHeight: 100 },
@@ -111,6 +113,7 @@ describe("fest_wireframe_create", () => {
     expect(result.kind).toBe("wireframe_failed");
     expect(result.error).toContain("bounds");
     const escaped = JSON.parse((await call("test", {
+      attachmentRole: "ui_design",
       outputDirectory: "../outside",
       spec: {
         title: "Valid", slug: "valid", direction: "ltr",
@@ -122,6 +125,7 @@ describe("fest_wireframe_create", () => {
     expect(escaped.kind).toBe("wireframe_failed");
     expect(escaped.error).toContain("outputDirectory");
     const missingAudit = JSON.parse((await call("test", {
+      attachmentRole: "ui_design",
       outputDirectory: ".wireframe",
       spec: {
         title: "Audit path", slug: "audit-path", direction: "ltr",
@@ -144,6 +148,7 @@ describe("fest_wireframe_create", () => {
     expect(auditPage).toContain("paths not found and not counted as evidence");
     expect(auditSvg).toContain("inside");
     const invalidAudit = await call("test", {
+      attachmentRole: "ui_design",
       outputDirectory: "audit-errors",
       spec: {
         title: "Audit diagnostics", slug: "audit-errors", direction: "ltr",
@@ -166,5 +171,8 @@ describe("fest_wireframe_create", () => {
       ],
     });
     expect(invalidAudit.content[0]!.text).toContain("301 characters; maximum is 300");
+    const rejected: unknown = JSON.parse((await call("test", { attachmentRole: "error_screenshot", outputDirectory: "must-not-write", spec: {} }, undefined, undefined, { cwd: root })).content[0]!.text);
+    expect(rejected).toMatchObject({ kind: "wireframe_blocked", code: "NOT_UI_DESIGN", received: "error_screenshot" });
+    await expect(readFile(join(root, "must-not-write", "PAGE.md"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

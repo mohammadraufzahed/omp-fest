@@ -38,11 +38,15 @@ import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
 
 interface ExtensionContextLike {
   cwd: string;
+  agent?: { kind: "main" | "sub"; id: string; name: string };
   sessionManager?: { getSessionId?(): string; getBranch?(): unknown[] };
+  getAsyncJobSnapshot?(): { running?: { id: string; type: string; status: string; label: string; agentId?: string }[]; recent?: { id: string; type: string; status: string; label: string; agentId?: string }[] } | null;
   ui: {
     notify(message: string, type?: "info" | "warning" | "error"): void;
     setStatus(key: string, text: string | undefined): void;
     setWidget?(key: string, content: string[] | undefined, options?: { placement?: string }): void;
+    input?(title: string, placeholder?: string, options?: Record<string, unknown>): Promise<string | undefined>;
+    confirm?(title: string, message: string, options?: Record<string, unknown>): Promise<boolean>;
   };
 }
 
@@ -108,6 +112,8 @@ type HandlerResult =
 interface ExtensionApiLike {
   zod: unknown;
   logger?: { warn(message: string): void };
+  getAllTools?(): { name: string; description: string; sourceInfo?: { type?: string; name?: string } }[];
+  getActiveTools?(): string[];
   on<K extends keyof FestEventMap>(
     event: K,
     handler: (event: FestEventMap[K], ctx: ExtensionContextLike) => HandlerResult | Promise<HandlerResult>,
@@ -115,6 +121,7 @@ interface ExtensionApiLike {
   registerTool(tool: Record<string, unknown>): void;
   registerCommand(name: string, options: Record<string, unknown>): void;
   sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>): void;
+  sendUserMessage?(text: string, options?: { deliverAs?: "steer" | "followUp" | "aside" }): void;
   setLabel(label: string): void;
   /** Persists a custom entry into the session transcript (durable per-session state). */
   appendEntry?(customType: string, data: unknown): void;
@@ -152,7 +159,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const supervisor = new Supervisor();
 
   const cwd = process.cwd();
-  const deps = { fest, camp, detect, tracker, supervisor, config: () => loadConfig(cwd) };
+  const deps = { fest, camp, detect, tracker, supervisor, config: () => loadConfig(cwd), host: { getAllTools: pi.getAllTools?.bind(pi), getActiveTools: pi.getActiveTools?.bind(pi) } };
 
   registerTools(pi as unknown as PiLike, deps);
   registerCommands(pi, deps);
@@ -261,6 +268,19 @@ export default function ompFest(pi: ExtensionApiLike): void {
   // never goes stale, replacing the old one-shot orientation/compaction
   // re-inject.
   pi.on("before_agent_start", async (_event, ctx) => {
+    const sid = sessionIdOf(ctx);
+    const snapshot = ctx.getAsyncJobSnapshot?.();
+    const jobs = [...(snapshot?.running ?? []), ...(snapshot?.recent ?? [])].filter((job) => job.type === "task");
+    const updates: string[] = [];
+    for (const assignment of supervisor.state(sid).workers) {
+      if (!assignment.runtime?.runtimeId) continue;
+      const job = jobs.find((item) => item.id === assignment.runtime?.runtimeId);
+      const status = job?.status === "completed" ? "completed" : job?.status === "failed" ? "failed" : job?.status === "cancelled" ? "exited" : job?.status === "running" ? "running" : undefined;
+      if (!job || !status || assignment.runtime.status === status) continue;
+      supervisor.observeRuntime(sid, { assignmentId: assignment.id, runtimeId: job.id, status, detail: `Native omp async task ${job.status}; ${job.label}` });
+      updates.push(`${assignment.task}: native worker ${job.status}`);
+    }
+    if (updates.length) pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sid));
     const digest = await buildStateDigest(deps, ctx.cwd, sessionIdOf(ctx));
     const config = await configFor();
     ctx.ui.setWidget?.(
@@ -273,11 +293,9 @@ export default function ompFest(pi: ExtensionApiLike): void {
         : undefined,
       { placement: "aboveEditor" },
     );
-    if (!digest) {
-      return undefined;
-    }
-    const state = supervisor.state(sessionIdOf(ctx));
-    return { message: { customType: "fest-state", content: `${digest}\n${SUPERVISOR_POLICY}\n${INTEGRATION_GUIDE}\nDispatch: ${state.paused ? "paused" : "enabled"}; workers: ${state.workers.filter((worker) => worker.status !== "accepted").length} outstanding.`, display: false } };
+    if (!digest) return updates.length ? { message: { customType: "fest-state", content: `Native omp worker lifecycle: ${updates.join("; ")}. Review the existing worker result through fest_supervisor; do not relaunch or auto-accept.`, display: false } } : undefined;
+    const state = supervisor.state(sid);
+    return { message: { customType: "fest-state", content: `${updates.length ? `Native omp worker lifecycle: ${updates.join("; ")}. Review the existing result; never relaunch or auto-accept.\n` : ""}${digest}\n${SUPERVISOR_POLICY}\n${INTEGRATION_GUIDE}\nDispatch: ${state.paused ? "paused" : "enabled"}; workers: ${state.workers.filter((worker) => worker.status !== "accepted").length} outstanding.`, display: false } };
   });
 
   // Pre-execution nudges for bypass paths (raw fest/camp, ad hoc todos,

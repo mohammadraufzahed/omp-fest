@@ -26,6 +26,16 @@ describe("festival supervisor", () => {
     expect(() => supervisor.update("s", row.id, "running", "")).toThrow("cannot be changed");
   });
 
+  it("returns compact status deltas for known revisions and a full reset for expired revisions", () => {
+    const supervisor = new Supervisor();
+    const row = supervisor.assign("s", "festival", "task.md", "A", ["src/a.ts"]);
+    const first = supervisor.snapshot("s");
+    supervisor.update("s", row.id, "running", "");
+    const delta = supervisor.snapshot("s", first.revision);
+    expect(delta).toMatchObject({ full: false, delta: { workers: [{ id: row.id, status: "running" }] } });
+    expect(supervisor.snapshot("s", "expired")).toMatchObject({ full: true, reset: true });
+  });
+
   it("bounds independent work, prevents overlap and preserves running work on pause", () => {
     const supervisor = new Supervisor();
     const row = supervisor.assign("s", "festival", "a.md", "A", ["src/a"]);
@@ -208,7 +218,7 @@ describe("festival supervisor", () => {
       } satisfies PiLike;
       const supervisor = new Supervisor();
       registerSupervisorTools(pi, deps, supervisor);
-      const ctx = { cwd: root, sessionManager: { getSessionId: () => "s" } };
+      const ctx = { cwd: root, sessionManager: { getSessionId: () => "s" }, getAsyncJobSnapshot: () => ({ running: [{ id: "native-a", type: "task", status: "running", label: "task", agentId: "A" }] }) };
       const call = async (params: Record<string, unknown>) => {
         const result = await tools.get("fest_supervisor")!("id", { festival: "festival", ...params }, undefined, undefined, ctx);
         return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
@@ -217,7 +227,10 @@ describe("festival supervisor", () => {
       const assignment = supervisor.state("s").workers[0]!;
       expect(assignment).toMatchObject({ worker: "A", status: "assigned" });
       expect(await listProjectReservations(project)).toHaveLength(1);
-      await call({ action: "running", assignment: assignment.id });
+      expect(await call({ action: "running", assignment: assignment.id })).toMatchObject({ kind: "supervisor_blocked" });
+      expect(supervisor.state("s").workers[0]?.status).toBe("assigned");
+      await call({ action: "running", assignment: assignment.id, runtimeId: "native-a" });
+      expect(supervisor.state("s").workers[0]?.runtime).toMatchObject({ runtimeId: "native-a", status: "running" });
       const details = "Worker implementation evidence ".repeat(100);
       await call({ action: "submit", assignment: assignment.id, evidence: details });
       const submitted = supervisor.state("s").workers[0]!;

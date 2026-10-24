@@ -53,7 +53,7 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
  - 🧰 **repair-friendly plan inputs** — plan paths, project-relative inspection/verification paths, and common unstable IDs are normalized before validation. Failures return compact field-level diagnostics instead of dumping the fest CLI transcript.
  - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
  - 🎯 **session festival selection** — `/fest select [festival]` lists available festivals, claims one for the current omp session, persists the selection through resume/branch/tree, and requires explicit confirmation before transferring ownership from another session. Claims use an atomic ownership record.
- - **20 tools + one native command family** — `/fest` includes `draft`, `finish`, `conflicts`, `blockers`, `resume`, and `release` alongside planning, task, approval, and worker controls. `fest_plan_draft` persists editable revisions; `fest_integration` and `fest_evidence` retain verification with compact summaries.
+- **native `/fest` flow** — planning, selection, approval, blockers, conflict handling, workers, evidence, login flows and release use omp tools/UI. `fest_plan` owns editable draft revisions and structured preview/scaffold; `fest_capabilities` reports actual host support.
  - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
 
 ### Supervisor execution
@@ -117,6 +117,35 @@ assignments are settled to avoid committing unfinished shared-checkout work.
 Acceptance does not automatically complete tasks, commit changes or approve gates.
 Human approvals remain separate. The spawn boundary is agent guidance; it is not
 a filesystem sandbox for subagents.
+
+### Reusable website login flows
+
+`fest_flow` stores named, revisioned HTTPS-origin-bound browser procedures under
+the camp's private `.ompfest/flows` directory. `/fest flows` lists, runs or removes
+them; it also supports explicit keyring-credential deletion by opaque reference.
+`fest_flow` supports create/read/update/list/delete/run/resume and confirmed
+credential deletion. Flow definitions contain selectors and field metadata only,
+never usernames, passwords or OTP values.
+
+Credentials and OTPs are requested through the interactive omp terminal's masked
+input. The browser receives them directly; they are not sent as tool arguments or
+returned to the model. Optional password persistence uses the operating system's
+`secret-tool` keyring provider. Without it, credentials can be entered for a run
+but are not persisted. OTPs are requested only when the configured challenge
+appears. CAPTCHA/MFA bypass is not supported.
+
+Each run starts an isolated local Playwright browser context and closes it on
+completion. Cookies and authenticated browser state are not persisted or reused.
+An uncertain submission requires manual inspection and explicit confirmation
+before retry; the extension never blindly repeats login or OTP submission.
+Discovered Playwright MCP tools are reported by `fest_capabilities`, but omp
+currently exposes no supported secure secret-injection contract for invoking them;
+login credentials are never sent through MCP.
+
+Before planning, pending plan artifacts with overlapping file boundaries are
+reported. Native UI offers sequential execution, narrower scope, or a separate
+worktree. Choosing sequential preserves both plans and records the decision in
+the approved plan; neither plan is cancelled automatically.
 
 ### Final integration, evidence and release
 
