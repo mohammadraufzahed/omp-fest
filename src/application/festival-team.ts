@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep, join } from "node:path";
 
 export interface FestivalTeamParticipant { sessionId: string; joinedAt: string; label?: string }
 export interface FestivalTeamAssignment {
   id: string; task: string; workingDir: string; sessionId: string; label?: string;
-  status: "claimed" | "submitted" | "accepted"; createdAt: string; updatedAt: string;
+  status: "claimed" | "submitted" | "accepted" | "released"; createdAt: string; updatedAt: string;
   report?: string; review?: string;
 }
 export interface FestivalTeamMessage { id: string; fromSession: string; toSession?: string; body: string; task?: string; createdAt: string; readAt?: string }
@@ -15,7 +16,6 @@ export interface FestivalTeam {
 }
 
 const BUSY_MS = 2_000;
-const STALE_LOCK_MS = 30_000;
 const sleep = (ms: number) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 const required = (value: string, name: string) => { if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`); };
 const timestamp = () => new Date().toISOString();
@@ -64,7 +64,7 @@ function validTeam(value: unknown): value is FestivalTeam {
     if (!isRecord(assignment) || typeof assignment.id !== "string" || !assignment.id ||
         typeof assignment.task !== "string" || !assignment.task || typeof assignment.workingDir !== "string" || !assignment.workingDir ||
         typeof assignment.sessionId !== "string" || !assignment.sessionId ||
-        !["claimed", "submitted", "accepted"].includes(String(assignment.status)) ||
+        !["claimed", "submitted", "accepted", "released"].includes(String(assignment.status)) ||
         typeof assignment.createdAt !== "string" || !Number.isFinite(Date.parse(assignment.createdAt)) ||
         typeof assignment.updatedAt !== "string" || !Number.isFinite(Date.parse(assignment.updatedAt)) ||
         (assignment.label !== undefined && typeof assignment.label !== "string") ||
@@ -92,11 +92,36 @@ async function readFileTeam(file: string): Promise<FestivalTeam | undefined> {
   if (!validTeam(parsed)) throw new Error("Festival team record is invalid; refusing to overwrite it.");
   return parsed;
 }
+interface LockOwner { token: string; pid: number; host: string }
+async function readLockOwner(lock: string): Promise<LockOwner | undefined> {
+  try {
+    const owner: unknown = JSON.parse(await readFile(join(lock, "owner.json"), "utf8"));
+    if (!isRecord(owner) || typeof owner.token !== "string" || !owner.token || typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || typeof owner.host !== "string") return undefined;
+    return { token: owner.token, pid: owner.pid, host: owner.host };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
 async function locked<T>(paths: { file: string; lock: string }, operation: (team: FestivalTeam | undefined) => { team: FestivalTeam; result: T } | Promise<{ team: FestivalTeam; result: T }>): Promise<T> {
   const start = Date.now();
+  const token = randomUUID();
   for (;;) {
-    try { await mkdir(paths.lock); break; }
-    catch (error) {
+    let acquired = false;
+    try {
+      await mkdir(paths.lock, { mode: 0o700 });
+      acquired = true;
+      await writeFile(join(paths.lock, "owner.json"), JSON.stringify({ token, pid: process.pid, host: hostname() }), { encoding: "utf8", mode: 0o600, flag: "wx" });
+      break;
+    } catch (error) {
+      if (acquired) {
+        await rm(paths.lock, { recursive: true, force: true });
+        throw error;
+      }
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const info = await lstat(paths.lock).catch((statError: unknown) => {
         if ((statError as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -104,11 +129,22 @@ async function locked<T>(paths: { file: string; lock: string }, operation: (team
       });
       if (!info) continue;
       if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Festival team lock is unsafe", { cause: error });
-      if (Date.now() - info.mtimeMs > STALE_LOCK_MS) {
+      const owner = await readLockOwner(paths.lock);
+      if (owner?.host === hostname() && !processIsAlive(owner.pid)) {
         const stale = `${paths.lock}.stale-${randomUUID()}`;
-        try { await rename(paths.lock, stale); }
-        catch (renameError) { if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError; }
-        await rm(stale, { recursive: true, force: true });
+        try {
+          await rename(paths.lock, stale);
+          const movedOwner = await readLockOwner(stale);
+          if (movedOwner?.token === owner.token && movedOwner.pid === owner.pid && movedOwner.host === owner.host) {
+            await rm(stale, { recursive: true, force: true });
+          } else {
+            try { await rename(stale, paths.lock); } catch (restoreError) {
+              if ((restoreError as NodeJS.ErrnoException).code !== "EEXIST") throw restoreError;
+            }
+          }
+        } catch (renameError) {
+          if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError;
+        }
         continue;
       }
       if (Date.now() - start >= BUSY_MS) throw new Error("Festival team is busy; retry later.", { cause: error });
@@ -122,7 +158,9 @@ async function locked<T>(paths: { file: string; lock: string }, operation: (team
     await writeFile(temp, JSON.stringify(changed.team, null, 2), { encoding: "utf8", mode: 0o600, flag: "wx" });
     await rename(temp, paths.file);
     return changed.result;
-  } finally { await rm(paths.lock, { recursive: true, force: true }); }
+  } finally {
+    if ((await readLockOwner(paths.lock))?.token === token) await rm(paths.lock, { recursive: true, force: true });
+  }
 }
 function freshTeam(festivalDir: string, coordinator: string): FestivalTeam {
   return { version: 1, festivalId: basename(resolve(festivalDir)), coordinatorSessionId: coordinator, participants: [], assignments: [], messages: [] };
@@ -149,7 +187,11 @@ export async function claimFestivalTask(campRoot: string, festivalDir: string, s
   return locked(paths, (team) => {
     if (!team) throw new Error("Join the festival team before claiming a task.");
     if (!team.participants.some((p) => p.sessionId === sessionId)) throw new Error("Only team members may claim tasks.");
-    if (team.assignments.some((a) => a.task === task && a.status !== "accepted")) throw new Error("This task already has an active assignment.");
+    const active = team.assignments.find((a) => a.task === task && a.status !== "accepted" && a.status !== "released");
+    if (active) {
+      if (active.sessionId === sessionId && active.workingDir === resolve(workingDir)) return { team, result: active };
+      throw new Error("This task already has an active assignment.");
+    }
     const now = timestamp(); const assignment: FestivalTeamAssignment = { id: randomUUID(), task, workingDir: resolve(workingDir), sessionId, status: "claimed", createdAt: now, updatedAt: now, ...(label ? { label } : {}) };
     team.assignments.push(assignment); return { team, result: assignment };
   });
@@ -161,6 +203,7 @@ export async function submitFestivalTask(campRoot: string, festivalDir: string, 
     const assignment = team.assignments.find((item) => item.id === assignmentId);
     if (!assignment) throw new Error("Festival assignment not found.");
     if (assignment.sessionId !== sessionId) throw new Error("Only the claimant may submit this task.");
+    if (assignment.status === "submitted" && assignment.report === report) return { team, result: assignment };
     if (assignment.status !== "claimed") throw new Error("Only claimed assignments may be submitted.");
     assignment.status = "submitted";
     assignment.report = report;
@@ -194,7 +237,9 @@ export async function releaseFestivalTask(campRoot: string, festivalDir: string,
     if (!assignment) throw new Error("Festival assignment not found.");
     if (assignment.sessionId !== sessionId && team.coordinatorSessionId !== sessionId) throw new Error("Only the claimant or coordinator may release this task.");
     if (assignment.status === "accepted") throw new Error("Accepted assignments cannot be released.");
-    team.assignments = team.assignments.filter((item) => item.id !== assignmentId);
+    if (assignment.status === "released") return { team, result: assignment };
+    assignment.status = "released";
+    assignment.updatedAt = timestamp();
     team.messages.push({ id: randomUUID(), fromSession: sessionId, body: `Assignment released: ${reason}`, task: assignment.task, createdAt: timestamp() });
     team.messages = team.messages.slice(-100);
     return { team, result: assignment };

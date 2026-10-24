@@ -83,6 +83,27 @@ export function buildPortfolioQueue(input: {
     if (index >= 0 && festivals.length) start = (index + 1) % festivals.length;
   }
   const order = festivals.map((_, i) => (start + i) % festivals.length);
+  const selectedFiles: PortfolioCandidate[] = [];
+  for (const index of order) {
+    const list = lists[index];
+    if (!list) continue;
+    for (let index = 0; index < list.length; ) {
+      const candidate = list[index];
+      if (!candidate) { index++; continue; }
+      const overlapping = selectedFiles.find((prior) => prior.workingDir === candidate.workingDir &&
+        prior.files.some((left) => candidate.files.some((right) => {
+          const a = left.replaceAll("\\", "/").replace(/\/+$/, "");
+          const b = right.replaceAll("\\", "/").replace(/\/+$/, "");
+          return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+        })));
+      if (!overlapping) { selectedFiles.push(candidate); index++; continue; }
+      result.waiting.push({
+        festival: candidate.festival, task: candidate.task,
+        reason: `Candidate file set overlaps ${overlapping.festival}/${overlapping.task}; dispatch one task, then refresh the portfolio.`,
+      });
+      list.splice(index, 1);
+    }
+  }
   const positions = lists.map(() => 0);
   while (result.candidates.length < availableSlots) {
     let moved = false;

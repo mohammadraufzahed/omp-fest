@@ -56,87 +56,109 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
 - **native `/fest` flow** — planning, selection, approval, blockers, conflict handling, workers, evidence, login flows and release use omp tools/UI. `fest_plan` owns editable draft revisions and structured preview/scaffold; `fest_capabilities` reports actual host support.
  - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
 
+### Session identity and authority
+
+The selected main session is the festival supervisor. Ownership is per festival
+and per omp session: `/fest select <festival>` explicitly claims coordinator
+ownership; `/fest join <festival>` joins the team without transfer. New sessions
+are unselected. A join never grants coordinator authority or expands the
+supervisor's portfolio; a confirmed transfer is required to change owners.
+Only the owning main session selects tasks, changes festival state, records final
+integration, accepts worker reports, completes tasks, commits, submits gates,
+and operates credential-backed browser flows. Subagents do scoped implementation
+and return evidence or blockers through their native worker channel.
+
+### The lifecycle path
+
+Use one task loop: `fest_next` → implement the returned unit → `fest_task_complete`
+with observed evidence → `fest_commit` → `fest_next`. Continue until `fest_next`
+returns `complete`; for a gate, submit evidence and stop for human approval; for a
+blocker, resolve it before continuing. `/fest next` and `/fest task done ...`
+are native command alternatives for these steps, not a separate lifecycle.
+`/fest workflow status|advance`, `/fest promote`, `/fest approve`, and
+`/fest reject` expose lifecycle controls; mutation remains coordinator-only and
+approval/rejection remains a human attestation. Planned checks are not results:
+report only checks actually exercised.
+
 ### Supervisor execution
 
-The main agent is the portfolio supervisor. After human-authorized activation,
-it immediately queries all festivals explicitly owned by this session and
-dispatches eligible work through omp's native parallel/subagent tools in the
-same turn. It owns scope, integration, review, task completion, commits and human
-gate submission; the extension never launches an external agent runtime.
-Subagents cannot select work, change festival task state, commit, submit gates,
-mutate plans, or operate credential-backed browser flows; they return evidence
-to the supervisor instead.
-
+After human-authorized activation, the main agent immediately queries every
+festival explicitly owned by this session and dispatches eligible work through
+omp's native parallel/subagent tools in the same turn. The extension does not
+launch an external runtime or run an autonomous background scheduler. The main
+agent owns scope, integration, independent review, task completion, commits and
+gate submission. Subagents cannot select or claim supervisor work, change
+festival state, commit, approve gates, mutate plans, or operate
+credential-backed browser flows; they return evidence and blockers instead.
 
 | Command | Behavior |
 | --- | --- |
-| `/fest portfolio` | Inspect owned festivals, fair task candidates, active/failed work, write conflicts and stale recovery candidates. Stale recovery is advisory; nothing is auto-released or relaunched. |
-| `/fest portfolio limit N` | Set the camp-wide active worker limit from 1 to 20 (default 20). |
+| `/fest portfolio` | Inspect owned festivals, fair task candidates, active/failed work, live write conflicts and advisory stale recovery candidates. No automatic release or relaunch. |
+| `/fest portfolio limit N` | Set the camp-wide worker limit from 1 to 20 (default 20), only while owning at least one festival. |
 | `/fest join <festival>` | Join an explicitly chosen festival team without changing its coordinator. |
 | `/fest team [festival]` | Inspect shared participants, task claims, submissions and messages. |
 | `/fest orphans` | Review incomplete scaffold transactions and legacy planning debris; rollback or quarantine only after confirmation, with quarantine reversible. |
-| `/fest workers` | Show assignments, status, worker reports and review evidence. |
-| `/fest dispatch` | Explicitly resume portfolio dispatch across festivals owned by this session. Activation dispatches immediately by default. |
-| `/fest pause` | Pause new portfolio assignments across sessions; existing workers continue and are not cancelled. |
-| `/fest review [assignment-id]` | Select a submission, inspect its report, then accept with independent verification evidence or request changes. Escape/cancel preserves pending review. |
-| `/fest resume` | Reconcile unfinished assignments without unpausing or relaunching uncertain workers. |
-| `/fest blockers` | Select a retained worker question, record an answer, and hand it to the supervisor for native delivery. |
-| `/fest conflicts` | Inspect active per-file write locks and reclaim one only after its write process is confirmed stopped. |
+| `/fest workers` | Show reported assignments separately from observed native lifecycle and review evidence. |
+| `/fest dispatch` | Explicitly unpause portfolio dispatch for festivals owned by this session. Activation dispatches immediately by default. |
+| `/fest pause` | Pause new portfolio assignments; existing workers continue and are not cancelled. |
+| `/fest review [assignment-id]` | Independently inspect a submission, then accept with verification evidence or request changes. |
+| `/fest resume` | Reconcile existing worker state without unpausing or relaunching an unfinished/unverified worker. |
+| `/fest blockers` | Answer a retained worker question and hand the answer to the supervisor. |
+| `/fest conflicts` | Inspect live per-file write locks; reclaim only after confirming the write process stopped. |
 | `/fest finish` | Start the final integration/visual comparison pass; record actual results before the completion gate. |
-| `/fest draft [draftId]` | Inspect and incrementally edit persisted planning fields, then request native preview approval. |
-| `/fest release [patch\|minor\|major]` | Preview exact release files/version/checks and request explicit authorization before version, verification, fest commit, and push. |
+| `/fest draft [draftId]` | Inspect and edit persisted planning fields, then request native preview approval. |
+| `/fest release [patch\|minor\|major]` | Preview exact changed files, semantic version, branch and checks; request explicit authorization before versioning, verification, commit and push. |
 
-`fest_supervisor` exposes the shared portfolio queue. The main agent calls it
-with `action=portfolio` to gather dependency- and gate-eligible candidates from
-all owned festivals; it checks current write locks and round-robins fairly.
-Selected tasks are reserved with `action=assign` before native omp workers
-start. Workers return through their native result channel; the supervisor
-independently verifies and records each report. Optional task
-`Priority: urgent|high|normal|low` metadata orders work within each festival;
-unspecified priority defaults to `normal`. The durable camp-wide ledger enforces
-the configured 20-worker maximum across sessions and preserves assignments and
-native lifecycle observations across restarts. Each festival's planning or task
-failure stays local; it never cancels another festival's work.
+`fest_supervisor` reports the dependency- and gate-eligible portfolio for owned
+festivals. The main agent assigns exact candidates before starting native omp
+workers. Selection is fair across owned festivals and respects file conflicts
+and the durable camp-wide 20-worker maximum. Task priority metadata orders
+eligible work within a festival; it does not bypass dependencies. Each
+festival's task or planning failure stays local rather than cancelling unrelated
+work.
 
-The queue reports candidates; the main agent invokes omp's native subagent tools
-and launches up to the available slots. This is not an autonomous background
-scheduler. Only festivals explicitly owned by the supervisor session enter its
-portfolio; joined-only festivals remain collaborator work through `fest_team`.
-New sessions are unselected, and ownership is never transferred implicitly.
+The queue reports candidates; the main agent invokes omp's native subagent tools.
+Only explicitly owned festivals enter its portfolio; joined-only festivals are
+collaborator work through `fest_team`. Ownership is never inferred from an active
+festival or transferred implicitly.
 
-`/fest portfolio` displays owned-festival progress, fair candidates, active and
-failed assignments, current write locks, isolated errors, and advisory stale
-work. `/fest portfolio limit N` sets the camp-wide cap from 1 to 20; only a
-session owning at least one festival can change it. The dashboard never
-automatically releases or relaunches stale assignments.
+`/fest portfolio` displays owned-festival progress, candidates, active and failed
+assignments, write locks, isolated errors and advisory stale work. The ledger is
+private at `.ompfest/portfolio.json`. `/fest pause` blocks new reservations
+portfolio-wide without cancelling current workers; `/fest resume` reconciles but
+preserves pause; `/fest dispatch` explicitly unpauses. Reconciliation records
+native observations and preserves uncertain assignments. A failed/exited
+runtime is terminal and releases its task claim and capacity, but it must not be
+relaunched; assign replacement work only after confirming the old runtime stopped.
+Stale assignments are never automatically released or relaunched.
 
-The camp ledger is stored privately at `.ompfest/portfolio.json`. `/fest pause`
-blocks new task reservations portfolio-wide without cancelling existing workers.
-`/fest resume` reconciles but preserves pause; `/fest dispatch` explicitly
-unpauses. Stale assignments are surfaced for human recovery, never automatically
-released or relaunched. Failures release worker capacity without stopping other
-festivals.
+Cross-session team claims, submissions, reviews and messages persist under
+`.ompfest/teams`. Native completion is not supervisor acceptance. Acceptance
+does not complete the Festival task, commit changes or approve a gate.
 
-Cross-session team claims, submissions, reviews and messages persist under the
-camp's private `.ompfest/teams` state. Native completion never implies
-coordinator acceptance. The main agent retains independent review and
-integration; acceptance does not automatically complete tasks, commit changes
-or approve gates.
+Exact-file locks are acquired only while native `write`/`edit` calls execute and
+released when the call returns, including failed calls. Idle workers and
+different files hold no lock; overlapping writes serialize at the write
+boundary. `/fest conflicts` identifies live owners and paths. If a write process
+stopped without returning, reclaim requires native confirmation and an exact
+lock-token match; this releases the reservation but does not stop a worker.
+Refresh the queue before retrying. Locks live in private per-checkout Git
+metadata.
 
-Exact-file locks are acquired only immediately before native `write`/`edit`
-tool calls and released when the call returns. Different files and idle workers
-never hold locks; overlapping assignments may proceed while conflicting writes
-serialize at the write boundary. `/fest conflicts` shows live write-lock owners
-and paths. If a write process stopped without returning, reclaim requires native
-confirmation and an exact-token match; never reclaim while a write is active.
-Locks live in private per-checkout Git metadata.
+Shell file mutations are blocked except for one parsed install form:
+`corepack pnpm install --filter <package>... --frozen-lockfile`, optionally
+preceded by `cd <checkout-relative-path> &&`. The working directory must resolve
+inside a real Git checkout; no extra command, pipeline, redirection, interpreter
+or shell effect is accepted. The install holds a transient whole-checkout
+reservation only while that bash invocation runs, conflicting with all native
+writes and other installs; its result, including an error result, releases the
+reservation. This is an omp tool-level guard, not an OS sandbox: external
+processes can still modify files. Workers use path-bearing native write/edit
+tools for other changes and return changed files, actual verification and
+blockers through native results.
+The supervisor independently reviews and verifies submissions; human gates
+remain human-only.
 
-Common shell file mutations are blocked because their targets cannot be locked
-reliably. This is an omp tool-level guard, not an OS sandbox: arbitrary external
-processes can still modify files outside omp's tools. Workers receive only their
-task contract, must use path-bearing native write/edit tools, and return changed
-files, actual verification and blockers through their native subagent result.
-The supervisor reviews and verifies submissions; human gates remain human-only.
 
 ### Reusable website login flows
 
@@ -144,23 +166,25 @@ The supervisor reviews and verifies submissions; human gates remain human-only.
 the camp's private `.ompfest/flows` directory. `/fest flows` lists, runs or removes
 them; it also supports explicit keyring-credential deletion by opaque reference.
 `fest_flow` supports create/read/update/list/delete/run/resume and confirmed
-credential deletion. Flow definitions contain selectors and field metadata only,
-never usernames, passwords or OTP values.
+credential deletion. Subagents may only list or read; the main supervisor owns
+flow mutation, execution and saved-credential deletion. Flow definitions contain
+selectors and field metadata only, never usernames, passwords or OTP values.
 
-Credentials and OTPs are requested through the interactive omp terminal's masked
-input. The browser receives them directly; they are not sent as tool arguments or
-returned to the model. Optional password persistence uses the operating system's
-`secret-tool` keyring provider. Without it, credentials can be entered for a run
-but are not persisted. OTPs are requested only when the configured challenge
-appears. CAPTCHA/MFA bypass is not supported.
+Credentials and OTPs are requested through interactive omp native UI; secret and
+OTP fields use masked terminal input. The browser receives these values directly;
+they are not tool arguments or returned to the model. Optional password persistence
+uses the operating system's `secret-tool` keyring provider. Without it, credentials
+can be entered for a run but are not persisted. OTPs are requested only when the
+configured challenge appears. CAPTCHA/MFA bypass is not supported.
 
 Each run starts an isolated local Playwright browser context and closes it on
 completion. Cookies and authenticated browser state are not persisted or reused.
 An uncertain submission requires manual inspection and explicit confirmation
 before retry; the extension never blindly repeats login or OTP submission.
-Discovered Playwright MCP tools are reported by `fest_capabilities`, but omp
-currently exposes no supported secure secret-injection contract for invoking them;
-login credentials are never sent through MCP.
+`fest_capabilities` reports discovered browser/MCP tools and whether they are
+active, but discovery is not execution permission. omp exposes no supported
+secure secret-injection contract for MCP; login credentials are never sent
+through MCP.
 
 Before planning, pending plan artifacts with overlapping file boundaries are
 reported as a conversational choice: sequence both plans, narrow one scope, or
@@ -184,13 +208,17 @@ are rejected. Integration reviews become stale when approved task/source evidenc
 changes; failed/stale reviews block gate submission.
 
 `/fest release` requires an owning selected festival, settled workers and a current
-verified final review. For a package at its Git checkout root, it previews the
-semantic bump, exact changed files, existing verification scripts and upstream
-branch, then asks for confirmation and a commit message. Approval is revision-bound.
-It updates npm version metadata, runs test/typecheck/lint/build scripts that exist,
-commits through fest and pushes without force. Check failure stops before commit;
-push failure preserves the local commit. Monorepos must use root release scripts,
-not release from a nested package. No unattended release is authorized by a plan.
+verified final integration review. For a package at the Git checkout root, the
+preview checks that the current branch has a configured upstream and shows the
+semantic bump, exact changed files, and available `test`, `typecheck`, `lint`
+and `build` scripts. It then requests explicit confirmation and a commit message;
+approval is bound to the preview revision, so changed inputs require a fresh
+preview. Execution updates npm version metadata, runs only those checks present in
+the package scripts, stages the previewed files plus package metadata, commits
+through fest and pushes normally without force. A failed check retains version
+changes and stops before commit; a push failure preserves the local commit for
+recovery. Monorepos must use root release scripts, not release from a nested
+package. No unattended release is authorized by a plan.
 
 ### Persisted planning
 
@@ -282,11 +310,20 @@ approval preview: goal, scope/exclusions, inspection evidence, observable accept
 task/dependency outline, verification plan, nonblocking unknowns and any visual links.
 The generated Markdown is an output, not a document to hand-patch.
 
-After the human approves, call `fest_plan` with `action: "scaffold"`, the same `name`,
-`plan`, `workingDir`, `rules` and optional `referencesDir`, and
-`approvedRevision: "<approved planRevision>"`. Scaffold uses the persisted spec and
-rejects changes to the approved plan. If it changed, preview and obtain approval
-again; do not bypass the digest check.
+After the human approves in the native review, the tool records an approval token
+bound to that exact `planRevision`. Call `fest_plan` with `action: "scaffold"`, the
+same `name`, `plan`, `workingDir`, `rules` and optional `referencesDir`, and
+`approvedRevision: "<approved planRevision>"`. Scaffold requires both the persisted
+approval token and a fresh digest match; edits, a new preview, or changed references
+invalidate it. A revision string by itself is never proof of approval.
+
+If a saved preview must be abandoned, a human can call
+`fest_plan({action:"cancel", name, plan, approvedRevision})` for its current exact
+revision. Human rejection during review records a rejected status automatically.
+Both states preserve the Markdown, JSON and preview artifacts for inspection and
+stop contributing to planning conflicts; cancellation cannot affect a newer or
+different plan revision. Legacy previews without status remain active, and corrupt
+status/artifact data fails closed rather than silently removing a conflict.
 
 Compare the scaffold's phases, sequences, tasks, dependencies, acceptance coverage
 and verification with the approved contract. Empty or mismatching output is a
@@ -295,13 +332,10 @@ autoactivate it. Fill remaining markers from known context, run `fest_validate`,
 promote only a matching, valid festival with human authorization to activate.
 Authorization to activate does not approve later execution gates.
 
-Implementation then runs continuously through the festival:
-`fest_next` → the returned unit → `fest_task_complete` with evidence →
-`fest_commit` → `fest_next` again. Keep going until `fest_next` returns
-`complete`; pause only for a human gate or a real blocker. A planned
-verification command is not a passing result: report only exercised checks,
-retain evidence, and make failed or untested checks explicit.
-`fest_gate_submit` always stops for the human; the agent never approves its own gate.
+After activation, follow the single lifecycle path described above. Planned
+verification commands are not passing results: report only exercised checks,
+retain evidence, and make failed or untested checks explicit. Gate submission
+always stops for the human; the agent never approves its own gate.
 
 ### Plan a page from a screenshot
 
@@ -347,7 +381,7 @@ installed binaries to repair an audit; fix only the fields named in diagnostics.
 
 ### Browser verification
 
-Planning, task handoffs (`/fest next` and `fest_next`), and parallel lanes
+Planning, task handoffs (`/fest next` and `fest_next`), and supervisor dispatch
 instruct agents to discover exposed browser tools once per session and attempt
 Playwright MCP first for browser-relevant verification. Reuse the browser session.
 If those tools are absent or fail to connect/start, record the limitation and use
@@ -418,8 +452,9 @@ it never edits project files. The preview is not copied into the Festival and
 does not introduce a separate approval step.
 
 `fest_next` returns linked page paths, notes and wireframe paths with the task;
-`fest_parallel` includes the relevant pages for each lane. `fest_validate`
-checks reference coverage and completed-task verification. For visual tasks,
+`fest_supervisor` assignment contracts include only references linked to that
+task. `fest_validate` checks reference coverage and completed-task verification.
+For visual tasks,
 `fest_task_complete` requires one `visualEvidence` item per acceptance ID:
 `{page:"results", check:"AC-01", status:"verified", proof:"search test log",
 route:"/results", viewport:"1280x800", state:"initial"}`. Use `untested`
@@ -450,9 +485,10 @@ production UI code and never embedded copies of the source screenshot.
 - 🛑 **gates actually stop** — `fest_gate_submit` freezes and waits for YOU.
   `/fest approve` / `/fest reject` run the real attestation. the model can
   *never* approve itself. your gates, your call. period. 🔒
-- 🚄 **parallel lanes** — `fest_parallel` groups pending tasks by sequence so
-  your agent spawns one subagent per lane and tasks grind concurrently.
-  festivals finish in a fraction of the time.
+- 🚄 **supervised parallel work** — `fest_supervisor` queues dependency-ready
+  tasks across explicitly owned festivals, reserves exact task claims and
+  coordinates omp-native workers within the camp-wide limit. The coordinator
+  owns integration, review, completion, commits and human gates.
 - 🧘 **zero babysitting** — outside a camp? tools return `idle` and shut up.
   no fest installed? everything still works. graceful like a swan 🦢
 - ⚙️ **`.ompfest.json`** — per-project knobs: gate notification channels

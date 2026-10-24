@@ -99,7 +99,7 @@ async function setup() {
   }
   async function scaffold(params: Record<string, unknown>) {
     const visual = params.referencesDir ? { visualIntent: "ui_visual", attachments: [{ name: "design-reference", description: "User-provided UI design reference", role: "ui_design" }] } : {};
-    const preview = await call("fest_plan", { ...params, ...visual, action: "preview", spec });
+    const preview = await call("fest_plan", { ...params, ...visual, action: "preview", spec }, { custom: () => Promise.resolve("closed"), confirm: () => Promise.resolve(true) });
     expect(preview.kind).toBe("plan_preview");
     const result = await call("fest_plan", { ...params, ...visual, action: "scaffold", approvedRevision: preview.planRevision });
     await handler?.("select feature", { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
@@ -250,13 +250,12 @@ describe("visual planning tool handoff", () => {
     const backend = join(festival, "001_BUILD", "02_api");
     await mkdir(backend);
     await writeFile(join(backend, "01_api.md"), "---\nfest_type: task\n---\n# Backend");
-    const lanes = (await call("fest_parallel")).lanes as { tasks: string[]; visualReferences: { page: string }[] }[];
-    expect(lanes[0]?.tasks).toEqual([taskPath]);
-    expect(lanes[0]?.visualReferences[0]?.page).toBe("results");
-    expect(lanes[1]?.visualReferences).toEqual([]);
+    const deprecatedParallel = await call("fest_parallel");
+    expect(deprecatedParallel).toMatchObject({ kind: "parallel_queue_deprecated" });
+    expect(deprecatedParallel.nextAction).toContain("fest_supervisor");
     expect(await command("next")).toContain("filters.search");
     expect(await command("validate")).toContain("Visual references: valid");
-    expect(await command("parallel")).toContain("wireframe.svg");
+    expect(await command("parallel")).toContain("fest_supervisor action:'queue'");
   });
 
   it("rejects invalid bundles before calling the scaffold and blocks missing links at promotion", async () => {
@@ -354,6 +353,43 @@ describe("visual planning tool handoff", () => {
     const result = await call("fest_plan", { name: "feature", plan, action: "scaffold", approvedRevision: preview.planRevision });
     expect(result.kind).toBe("plan_failed");
     expect(result.error).toContain("changed since approval");
+    expect(scaffoldFromPlan).not.toHaveBeenCalled();
+  });
+  it("blocks direct scaffold until the exact preview revision is human-approved", async () => {
+    const { plan, spec, call, scaffoldFromPlan } = await setup();
+    const preview = await call("fest_plan", { name: "feature", plan, action: "preview", spec });
+    const blocked = await call("fest_plan", { name: "feature", plan, action: "scaffold", approvedRevision: preview.planRevision });
+    expect(blocked.kind).toBe("plan_failed");
+    expect(String(blocked.error)).toContain("not been approved");
+    expect(scaffoldFromPlan).not.toHaveBeenCalled();
+    const approved = await call("fest_plan", { name: "feature", plan, action: "preview", spec }, { confirm: () => Promise.resolve(true) });
+    const result = await call("fest_plan", { name: "feature", plan, action: "scaffold", approvedRevision: approved.planRevision });
+    expect(result.kind).toBe("plan_scaffolded");
+  });
+
+  it("rejects and cancels only the matching plan revision while preserving artifacts", async () => {
+    const { root, plan, spec, call } = await setup();
+    const rejected = await call("fest_plan", { name: "feature", plan, action: "preview", spec }, { confirm: () => Promise.resolve(false), input: () => Promise.resolve("revise") });
+    const artifact = join(root, ".ompfest", "plans", "feature.STRUCTURE.md.json");
+    const overlap = await call("fest_plan", { name: "other-plan", action: "preview", spec });
+    expect(overlap.kind).toBe("plan_preview");
+    expect(await readFile(artifact, "utf8")).toContain('"name": "feature"');
+    const next = await call("fest_plan", { name: "feature", plan, action: "preview", spec, conflictChoice: "sequence" });
+    const wrongRevision = await call("fest_plan", { name: "feature", plan, action: "cancel", approvedRevision: rejected.planRevision });
+    expect(wrongRevision.kind).toBe("plan_failed");
+    const cancelled = await call("fest_plan", { name: "feature", plan, action: "cancel", approvedRevision: next.planRevision });
+    expect(cancelled).toMatchObject({ kind: "plan_cancelled", artifactsPreserved: true });
+    expect(await readFile(artifact, "utf8")).toContain('"name": "feature"');
+    const stillActive = await call("fest_plan", { name: "third-plan", action: "preview", spec });
+    expect(stillActive).toMatchObject({ kind: "planning_conflict", conflicts: [{ name: "other-plan" }] });
+  });
+  it("invalidates approval when a newer preview replaces the approved revision", async () => {
+    const { plan, spec, call, scaffoldFromPlan } = await setup();
+    const approved = await call("fest_plan", { name: "feature", plan, action: "preview", spec }, { confirm: () => Promise.resolve(true) });
+    const replacement = await call("fest_plan", { name: "feature", plan, action: "preview", spec });
+    expect(replacement.planRevision).not.toBe(approved.planRevision);
+    const stale = await call("fest_plan", { name: "feature", plan, action: "scaffold", approvedRevision: approved.planRevision });
+    expect(stale.kind).toBe("plan_failed");
     expect(scaffoldFromPlan).not.toHaveBeenCalled();
   });
 

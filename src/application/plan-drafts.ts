@@ -169,10 +169,42 @@ export async function createPlanDraft(root: string, fields: PlanDraftFields): Pr
 
 export async function readPlanDraft(root: string, draftId: string): Promise<PlanDraft> {
   const target = await location(root, draftId);
-  const draft = JSON.parse(await readFile(target.file, "utf8")) as PlanDraft;
-  if (draft.draftId !== draftId || !/^[a-f0-9]{64}$/.test(draft.revision)) throw new Error("Invalid persisted plan draft");
-  validate(draft.fields, target.root);
-  return draft;
+  try {
+    const draft: unknown = JSON.parse(await readFile(target.file, "utf8"));
+    if (!draft || typeof draft !== "object" || Array.isArray(draft)) throw new Error();
+    const value = draft as Partial<PlanDraft>;
+    if (value.draftId !== draftId || typeof value.revision !== "string" || !/^[a-f0-9]{64}$/.test(value.revision)
+      || !value.fields || typeof value.fields !== "object" || !value.spec || typeof value.spec !== "object"
+      || !Array.isArray(value.missing) || typeof value.plan !== "string") throw new Error();
+    validate(value.fields, target.root);
+    if (!Array.isArray(value.spec.phases) || !Array.isArray(value.spec.acceptance) || typeof value.spec.goal !== "string") throw new Error();
+    return value as PlanDraft;
+  } catch (error) {
+    throw new Error("Invalid persisted plan draft", { cause: error });
+  }
+}
+
+/** Preview under the same lock as edits so an older revision cannot save after a newer edit. */
+export async function previewPlanDraft(root: string, draftId: string, revision: string, references: { path: string; content: string }[] = []) {
+  const target = await location(root, draftId);
+  const lockPath = `${target.file}.lock`;
+  const lock = await open(lockPath, "wx", 0o600).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Draft is being edited; read its current revision before previewing");
+    throw error;
+  });
+  try {
+    const draft = await readPlanDraft(root, draftId);
+    if (draft.revision !== revision) throw new Error("Stale draft revision; read the current draft before previewing");
+    if (draft.missing.length || !draft.fields.workingDir) throw new Error(`Draft is incomplete: ${draft.missing.join(", ")}`);
+    const artifact: PlanArtifact = {
+      name: draft.fields.name, workingDir: draft.fields.workingDir, rules: draft.fields.rules ?? "", spec: draft.spec,
+      ...(draft.fields.referencesDir ? { referencesDir: draft.fields.referencesDir } : {}),
+    };
+    return { ...await previewPlan(root, draft.plan, artifact, references), draftId, draftRevision: revision };
+  } finally {
+    await lock.close();
+    await unlink(lockPath);
+  }
 }
 
 /** A field patch replaces only supplied fields; a stale revision never overwrites newer work. */
@@ -218,15 +250,4 @@ export async function listPlanDrafts(root: string): Promise<PlanDraft[]> {
   const target = await location(root, "draft-list");
   const entries = await readdir(join(target.root, ".ompfest", "plans"));
   return Promise.all(entries.filter((name) => name.endsWith(".draft.json")).sort().map((name) => readPlanDraft(root, name.slice(0, -".draft.json".length))));
-}
-
-export async function previewPlanDraft(root: string, draftId: string, revision: string, references: { path: string; content: string }[] = []) {
-  const draft = await readPlanDraft(root, draftId);
-  if (draft.revision !== revision) throw new Error("Stale draft revision; read the current draft before previewing");
-  if (draft.missing.length || !draft.fields.workingDir) throw new Error(`Draft is incomplete: ${draft.missing.join(", ")}`);
-  const artifact: PlanArtifact = {
-    name: draft.fields.name, workingDir: draft.fields.workingDir, rules: draft.fields.rules ?? "", spec: draft.spec,
-    ...(draft.fields.referencesDir ? { referencesDir: draft.fields.referencesDir } : {}),
-  };
-  return { ...await previewPlan(root, draft.plan, artifact, references), draftId, draftRevision: revision };
 }

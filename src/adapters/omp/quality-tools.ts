@@ -1,5 +1,5 @@
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
-import { claimFestivalOwnership } from "../../application/festival-ownership.js";
+import { festivalOwner } from "../../application/festival-ownership.js";
 import { readEvidenceBundle, storeEvidenceBundle } from "../../application/evidence-bundles.js";
 import { INTEGRATION_GUIDE, integrationReviewStatus, recordIntegrationReview, type IntegrationCheck, type VisualComparison } from "../../application/integration-review.js";
 import { sessionIdOf } from "../../application/session-id.js";
@@ -31,7 +31,7 @@ export function registerQualityTools(pi: PiLike, deps: ToolDeps) {
         if (ctx.agent?.kind === "sub" && params.action === "record") return output({ kind: "integration_blocked", error: "Only the main supervisor records final integration evidence." });
         const dir = await selected(ctx, params.festival);
         if (params.action === "status") return output(await integrationReviewStatus(dir, deps.detect));
-        if ((await claimFestivalOwnership(dir, sessionIdOf(ctx))).kind !== "claimed") throw new Error("Only the owning supervisor can record integration");
+        if ((await festivalOwner(dir))?.sessionId !== sessionIdOf(ctx)) throw new Error("Only the owning supervisor can record integration; select/confirm ownership first.");
         if (deps.supervisor?.state(sessionIdOf(ctx)).workers.some((worker) => worker.status !== "accepted")) throw new Error("Review outstanding worker submissions before final integration");
         return output(await recordIntegrationReview(dir, deps.detect, { sessionId: sessionIdOf(ctx), checks: params.checks ?? [], comparisons: params.comparisons ?? [], summary: params.summary ?? "", details: params.details ?? "" }));
       } catch (error) { return output({ kind: "integration_blocked", error: String(error) }); }
@@ -46,8 +46,8 @@ export function registerQualityTools(pi: PiLike, deps: ToolDeps) {
         if (ctx.agent?.kind === "sub" && params.action === "store") return output({ kind: "evidence_failed", error: "Only the main supervisor stores festival evidence; return worker evidence through the native result." });
         const dir = await selected(ctx, params.festival);
         if (params.action === "read") return output(await readEvidenceBundle(dir, params.id ?? ""));
-        if ((await claimFestivalOwnership(dir, sessionIdOf(ctx))).kind !== "claimed") throw new Error("Only festival owner may store evidence");
-        return output(await storeEvidenceBundle(dir, { kind: params.kind ?? "worker", summary: params.summary ?? "", details: params.details ?? "", attachments: params.attachments }));
+        if ((await festivalOwner(dir))?.sessionId !== sessionIdOf(ctx)) throw new Error("Only the owning supervisor may store evidence; select/confirm ownership first.");
+        return output(await storeEvidenceBundle(dir, { kind: params.kind ?? "worker", summary: params.summary ?? "", details: params.details ?? "", attachments: params.attachments, ownerSessionId: sessionIdOf(ctx) }));
       } catch (error) { return output({ kind: "evidence_failed", error: String(error) }); }
     },
   });

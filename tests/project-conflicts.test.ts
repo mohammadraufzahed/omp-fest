@@ -3,10 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  NativeWriteLockInvocations,
   canonicalProjectDirectory,
   checkProjectConflicts,
   listProjectReservations,
+  packageInstallCheckout,
+  parseSupportedPackageInstall,
   releaseProjectFiles,
+  reserveProjectCheckout,
   reserveProjectFiles,
   reclaimProjectFiles,
 } from "../src/application/project-conflicts.js";
@@ -23,6 +27,51 @@ afterEach(async () => {
 });
 
 describe("project reservations", () => {
+  it("parses only the bounded corepack pnpm install command", () => {
+    const command = "cd projects/worktrees/modules-monorepo/employee-health-mock-contract-cleanup && corepack pnpm install --filter employee-health-client... --frozen-lockfile";
+    expect(parseSupportedPackageInstall(command)).toEqual({
+      workingDirectory: "projects/worktrees/modules-monorepo/employee-health-mock-contract-cleanup",
+    });
+    expect(parseSupportedPackageInstall("corepack pnpm install --filter employee-health-client... --frozen-lockfile")).toEqual({});
+    for (const mutation of [
+      `${command} && touch owned.ts`,
+      command.replace("corepack pnpm", "npm"),
+      command.replace("--frozen-lockfile", "--frozen-lockfile > install.log"),
+      `python -c 'import os; os.remove("owned.ts")'`,
+      "corepack pnpm install --filter employee-health-client... --frozen-lockfile | cat",
+    ]) expect(parseSupportedPackageInstall(mutation)).toBeUndefined();
+  });
+
+  it("resolves the selected install cwd to its owning checkout", async () => {
+    const project = await fixture();
+    const nested = join(project, "projects/worktrees/modules-monorepo/employee-health-mock-contract-cleanup");
+    await mkdir(join(project, ".git"));
+    await mkdir(nested, { recursive: true });
+    expect(await packageInstallCheckout(nested)).toBe(project);
+    await expect(packageInstallCheckout(join(project, "missing"))).rejects.toThrow();
+  });
+
+  it("whole-checkout install reservations conflict with native writes and release on either result", async () => {
+    const project = await fixture();
+    await mkdir(join(project, ".git"));
+    const first = await reserveProjectCheckout(project, { sessionId: "installer", assignmentId: "install", worker: "pnpm" });
+    expect(first.kind).toBe("reserved");
+    expect(await listProjectReservations(project)).toMatchObject([{ files: [], worker: "pnpm" }]);
+    expect((await reserveProjectFiles(project, { sessionId: "writer", assignmentId: "write", files: ["node_modules/.modules.yaml"] })).kind).toBe("conflict");
+    expect(await releaseProjectFiles(project, "installer", "install")).toEqual({ kind: "released", released: true });
+
+    const invocations = new NativeWriteLockInvocations();
+    for (const [toolCallId, assignmentId] of [["install-success", "success"], ["install-error", "error"]] as const) {
+      expect((await reserveProjectCheckout(project, { sessionId: "installer", assignmentId })).kind).toBe("reserved");
+      const lock = { projectDir: project, sessionId: "installer", assignmentId };
+      invocations.reserve(toolCallId, [lock]);
+      const settled = invocations.settle(toolCallId);
+      expect(settled).toEqual([lock]);
+      if (settled) await Promise.all(settled.map((row) => releaseProjectFiles(row.projectDir, row.sessionId, row.assignmentId)));
+      expect(await listProjectReservations(project)).toEqual([]);
+    }
+    expect(await listProjectReservations(project)).toEqual([]);
+  });
   it("allows only one of two concurrent sessions to reserve the same path", async () => {
     const project = await fixture();
     const results = await Promise.all([
@@ -110,6 +159,40 @@ describe("project reservations", () => {
     expect(await listProjectReservations(project)).toEqual([]);
   });
 
+
+  it("settles only the matching repeated-payload native invocation, including errors out of order", async () => {
+    const project = await fixture();
+    const first = await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "first", files: ["first.ts"] });
+    const second = await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "second", files: ["second.ts"] });
+    expect(first.kind).toBe("reserved");
+    expect(second.kind).toBe("reserved");
+    if (first.kind !== "reserved" || second.kind !== "reserved") return;
+
+    const invocations = new NativeWriteLockInvocations();
+    const firstLock = { projectDir: project, sessionId: "session-a", assignmentId: "first" };
+    const secondLock = { projectDir: project, sessionId: "session-a", assignmentId: "second" };
+    invocations.reserve("tool-call-1", [firstLock]);
+    invocations.reserve("tool-call-2", [secondLock]);
+    expect(() => {
+      invocations.reserve("tool-call-2", [firstLock]);
+    }).toThrow("already belong");
+
+    const failedResultLocks = invocations.settle("tool-call-2");
+    expect(failedResultLocks).toEqual([secondLock]);
+    if (failedResultLocks) {
+      await Promise.all(failedResultLocks.map((lock) => releaseProjectFiles(lock.projectDir, lock.sessionId, lock.assignmentId)));
+    }
+    expect(await listProjectReservations(project)).toEqual([first.reservation]);
+    expect(invocations.settle("tool-call-2")).toBeUndefined();
+
+    const completedResultLocks = invocations.settle("tool-call-1");
+    expect(completedResultLocks).toEqual([firstLock]);
+    if (completedResultLocks) {
+      await Promise.all(completedResultLocks.map((lock) => releaseProjectFiles(lock.projectDir, lock.sessionId, lock.assignmentId)));
+    }
+    expect(invocations.settle("tool-call-1")).toBeUndefined();
+    expect(await listProjectReservations(project)).toEqual([]);
+  });
   it("keeps durable reservations until their exact session releases them", async () => {
     const project = await fixture();
     const request = { sessionId: "session-a", assignmentId: "same-id", files: ["file.ts"], festival: "festival-a", task: "task-a", worker: "worker-a" };

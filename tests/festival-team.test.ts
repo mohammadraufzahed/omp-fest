@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { claimFestivalTask, joinFestivalTeam, readFestivalTeam, readFestivalTeamInbox, reviewFestivalTask, sendFestivalTeamMessage, submitFestivalTask, transferFestivalTeamCoordinator } from "../src/application/festival-team.js";
+import { claimFestivalTask, joinFestivalTeam, readFestivalTeam, readFestivalTeamInbox, releaseFestivalTask, reviewFestivalTask, sendFestivalTeamMessage, submitFestivalTask, transferFestivalTeamCoordinator } from "../src/application/festival-team.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -49,16 +49,59 @@ describe("festival team store", () => {
       participants: [{ sessionId: "owner" }, { sessionId: "worker" }],
     });
   });
-  it("recovers a stale crashed team-state lock instead of hanging future sessions", async () => {
+  it("recovers a crashed lock only after verifying its owner token and dead process", async () => {
     const { root, festival } = await fixture();
     await joinFestivalTeam(root, festival, "owner", "owner");
     const key = createHash("sha256").update(`${await realpath(root)}\0${basename(festival)}`).digest("hex");
     const lock = join(root, ".ompfest", "teams", key, "team.lock");
     await mkdir(lock);
+    await writeFile(join(lock, "owner.json"), JSON.stringify({ token: "crashed-owner", pid: 2147483647, host: hostname() }));
     const stale = new Date(Date.now() - 60_000);
     await utimes(lock, stale, stale);
     await joinFestivalTeam(root, festival, "recovered-session", "owner");
     expect((await readFestivalTeam(root, festival))?.participants.map((row) => row.sessionId)).toContain("recovered-session");
+  });
+
+  it("does not reclaim an old lock while its owning process is alive", async () => {
+    const { root, festival } = await fixture();
+    await joinFestivalTeam(root, festival, "owner", "owner");
+    const key = createHash("sha256").update(`${await realpath(root)}\0${basename(festival)}`).digest("hex");
+    const lock = join(root, ".ompfest", "teams", key, "team.lock");
+    await mkdir(lock);
+    await writeFile(join(lock, "owner.json"), JSON.stringify({ token: "live-owner", pid: process.pid, host: hostname() }));
+    const stale = new Date(Date.now() - 60_000);
+    await utimes(lock, stale, stale);
+    await expect(joinFestivalTeam(root, festival, "waiting-session", "owner")).rejects.toThrow("busy");
+    expect(await readFile(join(lock, "owner.json"), "utf8")).toContain("live-owner");
+  });
+
+  it("makes claim, submission, and release retries idempotent and permits redispatch after release", async () => {
+    const { root, festival } = await fixture();
+    await joinFestivalTeam(root, festival, "owner", "owner");
+    const claimed = await claimFestivalTask(root, festival, "owner", "retryable-task", festival);
+    expect(await claimFestivalTask(root, festival, "owner", "retryable-task", festival)).toEqual(claimed);
+    const submitted = await submitFestivalTask(root, festival, "owner", claimed.id, "proof");
+    expect(await submitFestivalTask(root, festival, "owner", claimed.id, "proof")).toEqual(submitted);
+    const released = await releaseFestivalTask(root, festival, "owner", claimed.id, "retry");
+    expect(released.status).toBe("released");
+    expect(await releaseFestivalTask(root, festival, "owner", claimed.id, "retry")).toEqual(released);
+    const redispatched = await claimFestivalTask(root, festival, "owner", "retryable-task", festival);
+    expect(redispatched.id).not.toBe(claimed.id);
+  });
+
+  it("preserves concurrent participant joins, claims, and messages", async () => {
+    const { root, festival } = await fixture();
+    await joinFestivalTeam(root, festival, "owner", "owner");
+    const sessions = Array.from({ length: 12 }, (_, index) => `worker-${index}`);
+    await Promise.all(sessions.map((session) => joinFestivalTeam(root, festival, session, "owner")));
+    await Promise.all(sessions.flatMap((session, index) => [
+      claimFestivalTask(root, festival, session, `task-${index}`, festival),
+      sendFestivalTeamMessage(root, festival, session, `message-${index}`),
+    ]));
+    const team = await readFestivalTeam(root, festival);
+    expect(team?.participants).toHaveLength(13);
+    expect(team?.assignments.map((assignment) => assignment.task).sort()).toEqual(sessions.map((_, index) => `task-${index}`).sort());
+    expect(team?.messages.map((message) => message.body).sort()).toEqual(sessions.map((_, index) => `message-${index}`).sort());
   });
 
   it("enforces claimant and coordinator permissions and submission/review transitions", async () => {

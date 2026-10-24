@@ -5,6 +5,7 @@
  * branch on session lifecycle events. In-memory tracking lives in LoopTracker;
  * this module is only the transcript seam.
  */
+import type { FestivalResolutionSource } from "./fest-resolve.js";
 import type { LoopTracker } from "./loop-tracker.js";
 
 /** customType of the transcript entry — package-qualified per omp convention. */
@@ -14,6 +15,8 @@ export interface FestivalClaimData {
   festivalId?: string;
   festivalDir?: string;
   campRoot?: string;
+  /** Origin of the persisted selection; absent on historical branch entries. */
+  source?: FestivalResolutionSource;
 }
 
 /** Entries from ctx.sessionManager.getBranch(), loosely typed at the seam. */
@@ -31,10 +34,28 @@ function claimDataOf(entry: unknown): FestivalClaimData | undefined {
   if (type !== "custom" || customType !== FESTIVAL_CLAIM_ENTRY) {
     return undefined;
   }
-  if (typeof data !== "object" || data === null) {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
     return undefined;
   }
-  return data;
+  const claim = data as FestivalClaimData;
+  return {
+    ...(typeof claim.festivalId === "string" ? { festivalId: claim.festivalId } : {}),
+    ...(typeof claim.festivalDir === "string" ? { festivalDir: claim.festivalDir } : {}),
+    ...(typeof claim.campRoot === "string" ? { campRoot: claim.campRoot } : {}),
+    ...(claim.source === "explicit-selector" || claim.source === "session-claim" ? { source: claim.source } : {}),
+  };
+}
+
+/** Return the latest usable selection record, retaining its explicit origin metadata. */
+export function claimDataFromBranch(entries: unknown[]): FestivalClaimData | undefined {
+  let latest: FestivalClaimData | undefined;
+  for (const entry of entries) {
+    const data = claimDataOf(entry);
+    if (data && (data.festivalId !== undefined || data.festivalDir !== undefined)) {
+      latest = data;
+    }
+  }
+  return latest;
 }
 
 /**
@@ -47,13 +68,7 @@ export function restoreClaimFromBranch(
   sessionId: string,
   entries: unknown[],
 ): string | undefined {
-  let latest: FestivalClaimData | undefined;
-  for (const entry of entries) {
-    const data = claimDataOf(entry);
-    if (data && (data.festivalId !== undefined || data.festivalDir !== undefined)) {
-      latest = data;
-    }
-  }
+  const latest = claimDataFromBranch(entries);
   if (!latest) {
     return undefined;
   }

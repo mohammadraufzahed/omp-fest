@@ -1,7 +1,8 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ExecRunner } from "../ports.js";
+import { releaseProjectFiles, reserveProjectCheckout } from "./project-conflicts.js";
 
 export interface ReleasePreview { cwd: string; branch: string; currentVersion: string; nextVersion: string; files: string[]; checks: string[]; revision: string }
 
@@ -37,26 +38,45 @@ export async function previewRelease(cwd: string, bump: "patch" | "minor" | "maj
   return { cwd: root, branch: branch.stdout.trim(), currentVersion: manifest.version, nextVersion, files, checks, revision: hash.digest("hex") };
 }
 
-export async function executeRelease(preview: ReleasePreview, bump: "patch" | "minor" | "major", message: string, exec: ExecRunner, commit?: (message: string) => Promise<string>) {
-  const current = await previewRelease(preview.cwd, bump, exec);
-  if (current.revision !== preview.revision) throw new Error("Release inputs changed during approval; preview and approve again");
+export async function executeRelease(preview: ReleasePreview, bump: "patch" | "minor" | "major", message: string, exec: ExecRunner) {
   if (!message.trim()) throw new Error("Commit message required");
+  const identity = { sessionId: "omp-release", assignmentId: randomUUID() };
+  const reservation = await reserveProjectCheckout(preview.cwd, identity);
+  if (reservation.kind !== "reserved") return { status: "failed", failedStage: "write-locks", log: [], hint: reservation.kind === "conflict" ? "Active project writes remain; no version, commit or push performed." : "Project write-lock registry is busy; no version, commit or push performed." };
   const log: { step: string; code: number; stdout: string; stderr: string }[] = [];
-  const run = async (step: string, command: string, args: string[]) => {
-    const result = await exec.run(command, args, preview.cwd);
-    log.push({ step, ...result });
-    return result.code === 0;
-  };
-  if (!await run("version", "npm", ["version", preview.nextVersion, "--no-git-tag-version", "--ignore-scripts"])) return { status: "failed", log, hint: "Version step failed; changes retained, nothing committed or pushed." };
-  for (const check of preview.checks) if (!await run(check, "npm", ["run", check])) return { status: "failed", log, hint: "Verification failed; version/files retained. No commit or push." };
-  const files = [...new Set([...preview.files, "package.json", "package-lock.json"])];
-  const lock = await lstat(join(preview.cwd, "package-lock.json")).catch(() => undefined);
-  const stage = files.filter((file) => file !== "package-lock.json" || lock);
-  if (!await run("stage", "git", ["add", "--", ...stage])) return { status: "failed", log };
-  if (commit) {
-    try { log.push({ step: "fest_commit", code: 0, stdout: await commit(message), stderr: "" }); }
-    catch (error) { log.push({ step: "fest_commit", code: 1, stdout: "", stderr: String(error) }); return { status: "failed", log }; }
-  } else if (!await run("commit", "git", ["commit", "-m", message])) return { status: "failed", log };
-  if (!await run("push", "git", ["push"])) return { status: "push_failed", log, hint: "Local commit retained; fix remote/authentication and retry push, never force." };
-  return { status: "pushed", version: preview.nextVersion, log };
+  let releaseFailure: string | undefined;
+  const outcome = await (async () => {
+    try {
+      const current = await previewRelease(preview.cwd, bump, exec);
+      if (current.cwd !== preview.cwd || current.revision !== preview.revision) throw new Error("Release inputs changed during approval; preview and approve again");
+      const run = async (step: string, command: string, args: string[]) => {
+        try {
+          const result = await exec.run(command, args, preview.cwd);
+          log.push({ step, ...result });
+          return result.code === 0;
+        } catch (error) {
+          log.push({ step, code: 1, stdout: "", stderr: String(error) });
+          return false;
+        }
+      };
+      if (!await run("version", "npm", ["version", preview.nextVersion, "--no-git-tag-version", "--ignore-scripts"])) return { status: "failed", failedStage: "version", log, hint: "Version step failed; changes retained, nothing committed or pushed." };
+      for (const check of preview.checks) if (!await run(check, "npm", ["run", check])) return { status: "failed", failedStage: check, log, hint: "Verification failed; version/files retained. No commit or push." };
+      const files = [...new Set([...preview.files, "package.json", "package-lock.json"])];
+      const lock = await lstat(join(preview.cwd, "package-lock.json")).catch(() => undefined);
+      const stage = files.filter((file) => file !== "package-lock.json" || lock);
+      if (!await run("stage", "git", ["add", "--", ...stage])) return { status: "failed", failedStage: "stage", log, hint: "Staging failed; no commit or push." };
+      if (!await run("commit", "git", ["commit", "-m", message])) return { status: "failed", failedStage: "commit", log, hint: "Commit failed; no push." };
+      if (!await run("push", "git", ["push"])) return { status: "push_failed", failedStage: "push", log, hint: "Local commit retained; fix remote/authentication and retry push, never force." };
+      return { status: "pushed", version: preview.nextVersion, log };
+    } finally {
+      try {
+        const released = await releaseProjectFiles(preview.cwd, identity.sessionId, identity.assignmentId);
+        if (released.kind !== "released" || !released.released) releaseFailure = "Project reservation could not be confirmed released.";
+      } catch (error) {
+        releaseFailure = String(error);
+      }
+    }
+  })();
+  if (releaseFailure) return { status: "failed", failedStage: "reservation-release", log, hint: `${releaseFailure} Inspect the project write-lock registry before another release.` };
+  return outcome;
 }

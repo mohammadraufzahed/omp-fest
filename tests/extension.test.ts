@@ -3,17 +3,19 @@
  * ExtensionAPI matching @oh-my-pi/pi-coding-agent's actual signatures
  * (verified against upstream types), so API drift is caught here.
  */
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import ompFest from "../index.js";
 import { festivalOwner } from "../src/application/festival-ownership.js";
 import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
-import { claimFestivalTask, joinFestivalTeam, readFestivalTeam } from "../src/application/festival-team.js";
+import { claimFestivalTask, joinFestivalTeam, readFestivalTeam, releaseFestivalTask, reviewFestivalTask, submitFestivalTask } from "../src/application/festival-team.js";
 import { listProjectReservations } from "../src/application/project-conflicts.js";
+import { integrationReviewStatus } from "../src/application/integration-review.js";
 import { readPortfolioState, reservePortfolioAssignment, updatePortfolioAssignment } from "../src/application/portfolio-state.js";
 import { SUPERVISOR_ENTRY } from "../src/application/supervisor.js";
+import { beginFestivalCreation, listQuarantinedFestivals, recordFestivalCreation, rollbackFestivalCreation } from "../src/application/festival-creation.js";
 
 interface AutocompleteItem {
   value: string;
@@ -124,6 +126,51 @@ async function makeCamp(): Promise<string> {
 }
 
 describe("ompFest extension", () => {
+
+  it("/fest orphans lists and restores quarantined failed creations", async () => {
+    const root = await makeCamp(), planning = join(root, "festivals", "planning");
+    await mkdir(planning, { recursive: true });
+    const receipt = await beginFestivalCreation(root, "failed-scaffold", "plan.md", "session-1");
+    const festival = join(planning, receipt.name);
+    await mkdir(festival);
+    await writeFile(join(festival, "fest.yaml"), "id: failed-scaffold\n");
+    await recordFestivalCreation(receipt, festival);
+    await writeFile(join(festival, "user.txt"), "preserved");
+    await expect(rollbackFestivalCreation(receipt, festival)).resolves.toBeUndefined();
+    const [archive] = await listQuarantinedFestivals(root);
+    expect(archive?.name).toBe(receipt.name);
+    const { pi, commands, sent, ctx } = mockPi(root);
+    Object.assign(ctx.ui, { confirm: vi.fn(() => Promise.resolve(true)) });
+    ompFest(pi as never);
+    await commands.get("fest")?.handler("orphans", ctx);
+    expect(sent.at(-1)?.message.content).toContain(`${archive!.id} · failed-scaffold`);
+    await commands.get("fest")?.handler(`orphans restore ${archive!.id}`, ctx);
+    expect(sent.at(-1)?.message.content).toContain("Restored failed-scaffold.");
+    expect(await readFile(join(festival, "user.txt"), "utf8")).toBe("preserved");
+  });
+
+  it("/fest orphans finalizes a validated creation without quarantining its festival", async () => {
+    const root = await makeCamp(), planning = join(root, "festivals", "planning");
+    await mkdir(planning, { recursive: true });
+    const planPath = ".ompfest/plans/finalized.STRUCTURE.md";
+    const receipt = await beginFestivalCreation(root, "finalized", planPath, "session-1");
+    const festival = join(planning, receipt.name);
+    await mkdir(festival);
+    await writeFile(join(festival, "fest.yaml"), "id: finalized\n");
+    await recordFestivalCreation(receipt, festival);
+    await mkdir(join(root, ".ompfest", "plans"), { recursive: true });
+    await writeFile(join(root, planPath), "# Approved plan\n");
+    await writeFile(join(root, `${planPath}.status.json`), JSON.stringify({ state: "scaffolded", festivalDir: festival }));
+    const { pi, commands, sent, ctx } = mockPi(root);
+    Object.assign(ctx.ui, { confirm: vi.fn(() => Promise.resolve(true)) });
+    ompFest(pi as never);
+    await commands.get("fest")?.handler(`orphans rollback ${receipt.id}`, ctx);
+    expect(sent.at(-1)?.message.content).toContain("Finalized validated festival finalized");
+    expect(await readFile(join(festival, "fest.yaml"), "utf8")).toBe("id: finalized\n");
+    await expect(readFile(join(festival, ".omp-fest-creation.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(receipt.journalPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await listQuarantinedFestivals(root)).toEqual([]);
+  });
 
   it("keeps a new omp session unselected even when the camp contains an active festival", async () => {
     const root = await makeCamp();
@@ -369,7 +416,43 @@ describe("ompFest extension", () => {
     expect(assignment?.runtimeId).toBe("native-job-a");
     expect(assignment?.runtimeStatus).toBe("failed");
     expect(assignment?.runtimeObservedAt).not.toBe("2026-01-01T00:00:00.000Z");
-    expect((await readFestivalTeam(root, festival))?.assignments).toEqual([]);
+    expect((await readFestivalTeam(root, festival))?.assignments.every((row) => row.status === "released")).toBe(true);
+  });
+
+  it.each([
+    ["claimed", true],
+    ["submitted", true],
+    ["released", false],
+    ["accepted", false],
+  ] as const)("/fest task done gates only active team assignments (%s)", async (status, blocked) => {
+    const root = await makeCamp();
+    const festival = join(root, "festivals", "active", "team-completion");
+    await mkdir(festival, { recursive: true });
+    await writeFile(join(festival, "fest.yaml"), "id: team-completion\n");
+    const coordinator = "team-coordinator";
+    const owner = await claimFestivalOwnership(festival, coordinator);
+    if (owner.kind !== "claimed") throw new Error(`Cannot claim test festival: ${owner.kind}`);
+    await joinFestivalTeam(root, festival, coordinator, coordinator);
+    const assignment = await claimFestivalTask(root, festival, coordinator, "task-a", root, "worker-a");
+    if (status === "submitted" || status === "accepted") {
+      await submitFestivalTask(root, festival, coordinator, assignment.id, "verified worker evidence");
+    }
+    if (status === "accepted") await reviewFestivalTask(root, festival, coordinator, assignment.id, "accept", "reviewed evidence");
+    if (status === "released") await releaseFestivalTask(root, festival, coordinator, assignment.id, "no longer needed");
+    const { pi, commands, toolExecutors, sent, ctx } = mockPi(root);
+    (ctx as Record<string, unknown>).agent = { kind: "main" };
+    (ctx as Record<string, unknown>).sessionManager = { getSessionId: () => coordinator };
+    ompFest(pi as never);
+    await commands.get("fest")?.handler("select team-completion", ctx);
+    await commands.get("fest")?.handler("task done --evidence verified", ctx);
+    const message = sent.at(-1)?.message.content ?? "";
+    expect(message.includes("a joined worker still owns or has submitted this task")).toBe(blocked);
+    const complete = toolExecutors.get("fest_task_complete");
+    if (!complete) throw new Error("Missing fest_task_complete tool");
+    const result = await complete("test", { task: "task-a", evidence: "verified" }, undefined, undefined, ctx);
+    const payload = JSON.parse(result.content[0]!.text) as { kind?: string; hint?: string };
+    expect(payload.kind === "completion_blocked" && payload.hint?.includes("joined session still owns")).toBe(blocked);
+    expect((await readFestivalTeam(root, festival))?.assignments[0]?.status).toBe(status);
   });
 
   it("/fest reports dormant state when no festival exists", async () => {
@@ -477,12 +560,12 @@ it("locks exact files only during native write tool execution", async () => {
   const after = handlers.get("tool_result") as (event: unknown, ctx: unknown) => Promise<unknown>;
   let session = "writer-a";
   const context = { ...ctx, sessionManager: { getSessionId: () => session } };
-  const write = { toolName: "edit", input: { path: target } };
+  const write = { toolName: "edit", toolCallId: "write-a", input: { path: target } };
 
   expect(await before(write, context)).toBeUndefined();
   expect(await listProjectReservations(project)).toHaveLength(1);
   session = "writer-b";
-  const different = { toolName: "edit", input: { path: join(project, "src", "other.ts") } };
+  const different = { toolName: "edit", toolCallId: "write-b", input: { path: join(project, "src", "other.ts") } };
   expect(await before(different, context)).toBeUndefined();
   await after({ ...different, isError: false }, context);
   const blocked = await before(write, context);
@@ -497,6 +580,29 @@ it("locks exact files only during native write tool execution", async () => {
   await after({ ...write, isError: false }, context);
   expect(await listProjectReservations(project)).toEqual([]);
 });
+it("allows the supported frozen pnpm install under a transient checkout lock", async () => {
+  const root = await makeCamp();
+  const project = join(root, "projects", "worktrees", "modules-monorepo");
+  const workingDir = join(project, "employee-health-mock-contract-cleanup");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await mkdir(workingDir, { recursive: true });
+  await writeFile(join(workingDir, "package.json"), JSON.stringify({ name: "employee-health-client" }));
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const before = handlers.get("tool_call") as (event: unknown, ctx: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>;
+  const after = handlers.get("tool_result") as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const event = {
+    toolName: "bash",
+    toolCallId: "pnpm-install",
+    input: { command: "cd projects/worktrees/modules-monorepo/employee-health-mock-contract-cleanup && corepack pnpm install --filter employee-health-client... --frozen-lockfile" },
+  };
+
+  expect(await before(event, ctx)).toBeUndefined();
+  expect(await listProjectReservations(project)).toMatchObject([{ files: [], worker: "bash" }]);
+  await after({ ...event, isError: false }, ctx);
+  expect(await listProjectReservations(project)).toEqual([]);
+});
+
 
 it("tool_call hook nudges raw fest bash + ad hoc todos inside a camp", async () => {
   const root = await makeCamp();
@@ -527,3 +633,124 @@ it("tool_call hook stays silent outside a camp", async () => {
   expect(await hook({ toolName: "todo", input: {} }, ctx)).toBeUndefined();
 });
 
+it("advertises lifecycle controls and requires explicit selection before approval", async () => {
+  const root = await makeCamp();
+  const { pi, commands, sent, ctx } = mockPi(root);
+  ompFest(pi as never);
+
+  await commands.get("fest")?.handler("help", ctx);
+  const help = sent.at(-1)?.message.content ?? "";
+  for (const action of ["next", "task", "promote", "workflow", "approve", "reject"]) {
+    expect(help).toContain(`/fest ${action}`);
+  }
+  await commands.get("fest")?.handler("approve", ctx);
+  expect(sent.at(-1)?.message.content).toContain("No festival selected");
+});
+
+it("restores terminal native failure without making the failed runtime retryable", async () => {
+  const root = await makeCamp();
+  const festival = join(root, "festivals", "active", "festival-restore");
+  await mkdir(festival, { recursive: true });
+  await writeFile(join(festival, "fest.yaml"), "id: festival-restore\n");
+  await claimFestivalOwnership(festival, "restore-session");
+  await joinFestivalTeam(root, festival, "restore-session", "restore-session");
+  const first = await claimFestivalTask(root, festival, "restore-session", "task-a", root, "worker-a");
+  const second = await claimFestivalTask(root, festival, "restore-session", "task-b", root, "worker-b");
+  const { pi, handlers, ctx } = mockPi(root);
+  (ctx as Record<string, unknown>).sessionManager = {
+    getSessionId: () => "restore-session",
+    getBranch: () => [{
+      type: "custom",
+      customType: SUPERVISOR_ENTRY,
+      data: {
+        paused: true,
+        workers: [{
+          id: first.id, festival: "festival-restore", task: "task-a", worker: "worker-a", files: [],
+          status: "running", report: "", review: "",
+          runtime: { status: "running", source: "native_runtime", runtimeId: "failed-runtime", observedAt: "2026-01-01T00:00:00.000Z" },
+        }],
+      },
+    }],
+  };
+  (ctx as Record<string, unknown>).getAsyncJobSnapshot = () => ({
+    running: [],
+    recent: [{ id: "failed-runtime", type: "task", status: "failed", label: "worker-a" }],
+  });
+  await reservePortfolioAssignment(root, {
+    id: first.id, festival: "festival-restore", task: "task-a", sessionId: "restore-session",
+    worker: "worker-a", workingDir: root, files: [],
+  });
+  await updatePortfolioAssignment(root, first.id, "running");
+  ompFest(pi as never);
+  await handlers.get("session_tree")?.({}, ctx);
+  await handlers.get("before_agent_start")?.({}, ctx);
+
+  const state = await readPortfolioState(root);
+  expect(state.assignments.find((row) => row.id === first.id)?.status).toBe("failed");
+  expect(state.assignments.find((row) => row.id === first.id)?.runtimeStatus).toBe("failed");
+  expect((await readFestivalTeam(root, festival))?.assignments.filter((row) => row.status !== "released").map((row) => row.id)).toEqual([second.id]);
+});
+
+it("serializes repeated native write events and releases each lock", async () => {
+  const root = await makeCamp();
+  const project = join(root, "projects", "repeat-write");
+  const target = join(project, "src", "feature.ts");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await mkdir(join(project, "src"), { recursive: true });
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const before = handlers.get("tool_call") as (event: unknown, ctx: unknown) => Promise<{ block?: boolean } | undefined>;
+  const after = handlers.get("tool_result") as (event: unknown, ctx: unknown) => Promise<unknown>;
+  const event = { toolName: "edit", toolCallId: "repeat-write", input: { path: target } };
+
+  expect(await before(event, ctx)).toBeUndefined();
+  expect((await before(event, ctx))?.block).toBe(true);
+  expect(await listProjectReservations(project)).toHaveLength(1);
+  await after({ ...event, isError: false }, ctx);
+  expect(await listProjectReservations(project)).toEqual([]);
+  expect(await before(event, ctx)).toBeUndefined();
+  expect(await listProjectReservations(project)).toHaveLength(1);
+  await after({ ...event, isError: true }, ctx);
+  expect(await listProjectReservations(project)).toEqual([]);
+});
+
+it("keeps final quality evidence with the owning supervisor", async () => {
+  const root = await makeCamp();
+  const festival = join(root, "festivals", "active", "quality-owned");
+  await mkdir(festival, { recursive: true });
+  await writeFile(join(festival, "fest.yaml"), "id: quality-owned\n");
+  await claimFestivalOwnership(festival, "owner-session");
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const record = toolExecutors.get("fest_integration");
+  if (!record) throw new Error("Missing fest_integration tool");
+  const result = await record("test", {
+    action: "record", festival: "quality-owned", summary: "worker attempt",
+    checks: [{ id: "integration", status: "verified", proof: "worker ran it" }],
+  }, undefined, undefined, {
+    cwd: root, agent: { kind: "main" }, sessionManager: { getSessionId: () => "worker-session" },
+  });
+  expect(JSON.parse(result.content[0]!.text) as unknown).toMatchObject({ kind: "integration_blocked" });
+  const detect = { pendingTasks: () => Promise.resolve([]), listFestivals: () => Promise.resolve([]) };
+  expect(await integrationReviewStatus(festival, detect as never)).toMatchObject({ status: "missing" });
+  expect(await festivalOwner(festival)).toMatchObject({ sessionId: "owner-session" });
+});
+
+it("does not treat discovered browser tools as permission to expose credentials", async () => {
+  const root = await makeCamp();
+  const { pi, toolExecutors } = mockPi(root);
+  (pi as Record<string, unknown>).getAllTools = () => [{ name: "browser_login", sourceInfo: { source: "mcp", name: "Playwright MCP" } }];
+  (pi as Record<string, unknown>).getActiveTools = () => ["browser_login"];
+  ompFest(pi as never);
+  const capabilities = toolExecutors.get("fest_capabilities");
+  const flow = toolExecutors.get("fest_flow");
+  if (!capabilities || !flow) throw new Error("Missing browser flow adapter tools");
+  const ctx = { cwd: root, agent: { kind: "sub" }, sessionManager: { getSessionId: () => "worker-session" } };
+  const discovery: unknown = JSON.parse((await capabilities("test", {}, undefined, undefined, ctx)).content[0]!.text);
+  expect(discovery).toMatchObject({ browserMcp: [{ name: "browser_login", active: true }] });
+  if (discovery && typeof discovery === "object" && "secretInjection" in discovery) {
+    expect(discovery.secretInjection).toEqual(expect.stringContaining("no MCP secret injection"));
+  }
+  const denied: unknown = JSON.parse((await flow("test", { action: "run", id: "login" }, undefined, undefined, ctx)).content[0]!.text);
+  expect(denied).toMatchObject({ kind: "flow_blocked", code: "MAIN_AGENT_REQUIRED" });
+});

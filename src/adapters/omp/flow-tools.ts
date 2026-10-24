@@ -4,17 +4,16 @@ import { openIsolatedBrowser, playwrightAvailable } from "./playwright-browser.j
 import type { CampDetect } from "../../ports.js";
 import { clearFlowCheckpoint, flowSubmissionCheckpoint, markFlowSubmitted } from "../../application/browser-flow-state.js";
 import type { ZodLike } from "./zod-types.js";
-
-interface Ui { input?(title: string, placeholder?: string, options?: Record<string, unknown>): Promise<string | undefined>; confirm?(title: string, message: string, options?: Record<string, unknown>): Promise<boolean>; select?(title: string, options: (string | { label: string; description?: string })[], opts?: Record<string, unknown>): Promise<string | undefined>; notify?(message: string, type?: string): void; setWidget?(key: string, content: string[] | undefined, options?: { placement?: string }): void; onTerminalInput?(handler: (data: string) => { consume?: boolean; data?: string } | undefined): () => void }
-interface FlowContext { cwd: string; ui?: Ui; sessionManager?: { getSessionId?(): string }; agent?: { kind?: string }; getAsyncJobSnapshot?(): { running?: { id: string; type: string; status: string; label: string; agentId?: string }[]; recent?: { id: string; type: string; status: string; label: string; agentId?: string }[] } | null }
-export interface FlowHost { zod: ZodLike; registerTool(tool: Record<string, unknown>): void; getAllTools?(): { name: string; description: string; sourceInfo?: { type?: string; name?: string } }[]; getActiveTools?(): string[] }
+import { discoverHostCapabilities, inspectFlowUi, type FlowUi, type HostToolMetadata } from "../../application/host-capabilities.js";
+interface FlowContext { cwd: string; ui?: FlowUi; sessionManager?: { getSessionId?(): string }; agent?: { kind?: string }; getAsyncJobSnapshot?(): { running?: { id: string; type: string; status: string; label: string; agentId?: string }[]; recent?: { id: string; type: string; status: string; label: string; agentId?: string }[] } | null }
+export interface FlowHost { zod: ZodLike; registerTool(tool: Record<string, unknown>): void; getAllTools?(): HostToolMetadata[]; getActiveTools?(): string[] }
 interface FlowDeps { detect: CampDetect; host?: Pick<FlowHost, "getAllTools" | "getActiveTools"> }
 function out(value: unknown) { return { content: [{ type: "text", text: JSON.stringify(value) }] }; }
 function hasControl(value: string): boolean {
   for (let index = 0; index < value.length; index++) if (value.charCodeAt(index) < 32 || value.charCodeAt(index) === 127) return true;
   return false;
 }
-function maskedInput(ui: Ui, label: string): Promise<string | undefined> {
+function maskedInput(ui: FlowUi, label: string): Promise<string | undefined> {
   const onTerminalInput = ui.onTerminalInput?.bind(ui), setWidget = ui.setWidget?.bind(ui);
   if (!onTerminalInput || !setWidget) return Promise.resolve(undefined);
   return new Promise((resolve) => {
@@ -42,10 +41,9 @@ function schema(z: ZodLike) {
 export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
   const z = pi.zod;
   pi.registerTool({ name: "fest_capabilities", label: "Discover Fest Capabilities", description: "Report actual omp host UI, active browser MCP, native agent identity/lifecycle and secure credential-store capabilities. Does not claim unsupported tool execution or secret injection.", parameters: z.object({}), async execute(_id: string, _params: unknown, _signal: unknown, _update: unknown, ctx: FlowContext) {
-    const all = deps.host?.getAllTools?.() ?? [], active = new Set(deps.host?.getActiveTools?.() ?? []);
-    const browserMcp = all.filter((tool) => /playwright|browser/i.test(`${tool.name} ${tool.sourceInfo?.name ?? ""}`)).map((tool) => ({ name: tool.name, active: active.has(tool.name) }));
+    const hostCapabilities = discoverHostCapabilities(deps.host), ui = inspectFlowUi(ctx.ui);
     const jobs = ctx.getAsyncJobSnapshot?.();
-    return out({ kind: "host_capabilities", uiInput: typeof ctx.ui?.input === "function", uiConfirm: typeof ctx.ui?.confirm === "function", maskedInput: typeof ctx.ui?.onTerminalInput === "function" && typeof ctx.ui.setWidget === "function", nativeMainAgent: ctx.agent?.kind === "main", nativeSubagent: ctx.agent?.kind === "sub", browserMcp, nativeAgentJobs: jobs ? [...(jobs.running ?? []), ...(jobs.recent ?? [])].map(({ id, type, status, label, agentId }) => ({ id, type, status, label, agentId })) : null, localPlaywright: await playwrightAvailable(), secureCredentialStore: await secureCredentialStoreAvailable(), secretInjection: "host-local Playwright only; no MCP secret injection claimed", limitations: ["Secret/OTP values are captured by a native masked terminal handler and never returned in tool results.", "Persistent browser cookies/session state are not stored.", "Keyring save requires secret-tool; without it credentials are run-only."] });
+    return out({ kind: "host_capabilities", metadataAvailable: hostCapabilities.metadataAvailable, uiInput: ui.input, uiConfirm: ui.confirm, maskedInput: ui.maskedInput, nativeMainAgent: ctx.agent?.kind === "main", nativeSubagent: ctx.agent?.kind === "sub", browserMcp: hostCapabilities.browserTools.map(({ name, active }) => ({ name, active })), nativeAgentJobs: jobs ? [...(jobs.running ?? []), ...(jobs.recent ?? [])].map(({ id, type, status, label, agentId }) => ({ id, type, status, label, agentId })) : null, localPlaywright: await playwrightAvailable(), secureCredentialStore: await secureCredentialStoreAvailable(), secretInjection: "host-local Playwright only; no MCP secret injection claimed", limitations: ["Secret/OTP values are captured by a native masked terminal handler and never returned in tool results.", "Persistent browser cookies/session state are not stored.", "Keyring save requires secret-tool; without it credentials are run-only."] });
   } });
   pi.registerTool({ name: "fest_flow", label: "Reusable Secure Browser Flow", description: "Persist HTTPS-origin-bound browser procedures, manage revisions and credential references, run with native UI prompts for credentials/OTP, or resume after explicit verification. Secrets never belong in tool arguments or results. Uses isolated Playwright browser, never reuses cookies. No CAPTCHA/security challenge bypass.", parameters: schema(z), async execute(_id: string, raw: unknown, _signal: unknown, _update: unknown, ctx: FlowContext) {
     const params = raw as { action: string; id?: string; revision?: string; name?: string; origin?: string; path?: string; fields?: BrowserFlowField[]; selectors?: BrowserFlowInput["selectors"]; credentialRef?: string };
@@ -73,10 +71,10 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
       if (params.action === "delete") { await deleteBrowserFlow(root, params.id ?? "", params.revision ?? ""); return out({ kind: "browser_flow_deleted", id: params.id }); }
       const flow = await readBrowserFlow(root, params.id ?? "");
       const ui = ctx.ui;
-      if (typeof ui?.confirm !== "function" || typeof ui.input !== "function" || typeof ui.onTerminalInput !== "function" || typeof ui.setWidget !== "function") return out({ kind: "flow_blocked", code: "NATIVE_UI_REQUIRED", nextAction: "Run in interactive omp TUI with masked terminal input; this host cannot securely request credentials." });
+      if (!ui?.confirm || !ui.input || !ui.onTerminalInput || !ui.setWidget) return out({ kind: "flow_blocked", code: "NATIVE_UI_REQUIRED", nextAction: "Run in interactive omp TUI with masked terminal input; this host cannot securely request credentials." });
       const confirm = ui.confirm.bind(ui), input = ui.input.bind(ui);
       const resume = params.action === "resume", session = ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
-      let submitted = await flowSubmissionCheckpoint(root, flow.id, session);
+      let submitted = await flowSubmissionCheckpoint(root, flow.id, session, flow.revision);
       if (submitted && !resume) return out({ kind: "flow_resume_required", code: "SUBMISSION_UNCERTAIN", nextAction: "Call action resume. Never start a second submission automatically." });
       if (submitted && resume) {
         const confirmed = await confirm("Restart uncertain login?", "First inspect the website manually. Confirm only if the previous login/OTP was not accepted and retrying is safe.");
@@ -98,7 +96,7 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
             return answer;
           },
           getCredential: readCredential,
-        }, { submitted, onSubmitted: () => markFlowSubmitted(root, flow.id, session) });
+        }, { submitted, onSubmitted: () => markFlowSubmitted(root, flow.id, session, flow.revision) });
       } finally { await browser.close(); }
       if (result.status === "authenticated") await clearFlowCheckpoint(root, flow.id, session);
       if (savedSecretRef) {
@@ -106,6 +104,6 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
         await updateBrowserFlow(root, flow.id, current.revision, { credentialRef: savedSecretRef });
       }
       return out({ kind: "browser_flow_result", id: flow.id, status: result.status, reason: result.reason, secretValuesReturned: false, browserStatePersisted: false, ...(savedSecretRef ? { credentialSaved: true } : {}) });
-    } catch (error) { return out({ kind: "flow_failed", code: "FLOW_ERROR", nextAction: "Inspect the configuration and browser state; do not retry if submission may already have occurred.", error: error instanceof Error ? error.message.replace(/https?:\/\/[^\s]+/g, "[origin]") : "Unknown flow error", secretValuesReturned: false }); }
+    } catch { return out({ kind: "flow_failed", code: "FLOW_ERROR", nextAction: "Inspect the configuration and browser state; do not retry if submission may already have occurred.", error: "Browser flow failed; sensitive values and underlying errors are withheld.", secretValuesReturned: false }); }
   } });
 }

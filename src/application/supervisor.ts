@@ -86,7 +86,7 @@ export class Supervisor {
         const status = row.status;
         if (typeof row.id !== "string" || typeof row.festival !== "string" || typeof row.task !== "string" || typeof row.worker !== "string" ||
             !Array.isArray(row.files) || !row.files.every((path: unknown) => typeof path === "string") ||
-            !status || !["assigned", "running", "blocked", "ready_for_review", "accepted"].includes(status) || typeof row.report !== "string" || typeof row.review !== "string") continue;
+            !status || !["assigned", "running", "blocked", "ready_for_review", "accepted", "failed"].includes(status) || typeof row.report !== "string" || typeof row.review !== "string") continue;
         const worker: WorkerAssignment = { id: row.id, festival: row.festival, task: row.task, worker: row.worker, files: row.files, status, report: row.report, review: row.review };
         if (typeof row.reportArtifact === "string") worker.reportArtifact = row.reportArtifact;
         
@@ -109,6 +109,27 @@ export class Supervisor {
       });
       this.sessions.set(session, state);
     }
+  }
+
+  restoreAssignments(session: string, assignments: WorkerAssignment[]): SupervisorState {
+    const state = this.state(session);
+    const known = new Map(state.workers.map((worker) => [worker.id, worker]));
+    for (const row of assignments) {
+      const prior = known.get(row.id);
+      if (!prior) {
+        const copy = structuredClone(row);
+        state.workers.push(copy);
+        known.set(row.id, copy);
+        continue;
+      }
+      if (prior.status !== "failed" && prior.status !== "accepted" &&
+          (row.status === "failed" || row.status === "accepted" || row.status === "ready_for_review" || row.status === "blocked")) prior.status = row.status;
+      if (!prior.report && row.report) prior.report = row.report;
+      if (!prior.review && row.review) prior.review = row.review;
+      if (!prior.runtime && row.runtime) prior.runtime = structuredClone(row.runtime);
+    }
+    this.sessions.set(session, state);
+    return this.state(session);
   }
 
   pause(session: string, paused: boolean): SupervisorState {

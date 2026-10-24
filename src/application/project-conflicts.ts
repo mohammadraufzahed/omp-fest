@@ -28,6 +28,29 @@ export interface ProjectReservationIdentity {
   assignmentId: string;
 }
 
+export interface NativeWriteLock {
+  projectDir: string;
+  sessionId: string;
+  assignmentId: string;
+}
+
+/** Correlates a reservation set with one host tool execution. */
+export class NativeWriteLockInvocations {
+  private readonly pending = new Map<string, NativeWriteLock[]>();
+
+  reserve(toolCallId: string, locks: NativeWriteLock[]): void {
+    if (!toolCallId) throw new Error("A native tool invocation ID is required for write locks.");
+    if (this.pending.has(toolCallId)) throw new Error(`Write locks already belong to native invocation ${toolCallId}.`);
+    this.pending.set(toolCallId, locks);
+  }
+
+  settle(toolCallId: string): NativeWriteLock[] | undefined {
+    const locks = this.pending.get(toolCallId);
+    if (locks) this.pending.delete(toolCallId);
+    return locks;
+  }
+}
+
 export type ProjectConflictResult =
   | { kind: "clear" }
   | { kind: "conflict"; conflicts: ProjectReservation[] }
@@ -46,6 +69,13 @@ interface Registry {
   version: 1;
   projectDir: string;
   reservations: ProjectReservation[];
+}
+
+/** Parse only the supported package install shell form; every other shell effect remains guarded. */
+export function parseSupportedPackageInstall(command: string): { workingDirectory?: string } | undefined {
+  const match = /^\s*(?:cd\s+([A-Za-z0-9_./-]+)\s*&&\s*)?corepack\s+pnpm\s+install\s+--filter\s+([A-Za-z0-9@._/-]+\.\.\.)\s+--frozen-lockfile\s*$/.exec(command);
+  if (!match) return undefined;
+  return match[1] ? { workingDirectory: match[1] } : {};
 }
 
 function contains(root: string, path: string): boolean {
@@ -102,6 +132,12 @@ export async function projectRootForFile(filePath: string): Promise<string | und
     if (parent === candidate) return undefined;
     candidate = parent;
   }
+}
+
+/** Resolve an install working directory only when it belongs to a real Git checkout. */
+export async function packageInstallCheckout(workingDir: string): Promise<string | undefined> {
+  const actualWorkingDir = await realpath(workingDir);
+  return projectRootForFile(resolve(actualWorkingDir, "package.json"));
 }
 
 
@@ -215,6 +251,27 @@ async function withProjectLock<T>(project: string, action: () => Promise<T>): Pr
     }
   }
   return undefined;
+}
+
+/** Acquire a transient whole-checkout reservation for a bounded install operation. */
+export async function reserveProjectCheckout(projectDir: string, request: ProjectReservationIdentity & Omit<ProjectReservationRequest, "files">): Promise<ProjectReservationResult> {
+  validateIdentity(request);
+  const project = await canonicalProjectDirectory(projectDir);
+  const result = await withProjectLock(project, async (): Promise<ProjectReservationResult> => {
+    const registry = await readRegistry(project);
+    const conflicts = registry.reservations.filter((row) => !sameIdentity(row, request));
+    if (conflicts.length) return { kind: "conflict", conflicts };
+    const reservation: ProjectReservation = {
+      ...request,
+      files: [],
+      projectDir: project,
+      reservedAt: new Date().toISOString(),
+    };
+    registry.reservations.push(reservation);
+    await writeRegistry(project, registry);
+    return { kind: "reserved", reservation };
+  });
+  return result ?? { kind: "busy" };
 }
 
 /** Acquire exact file locks immediately before an omp write tool executes. */

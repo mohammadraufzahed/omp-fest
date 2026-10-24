@@ -67,10 +67,19 @@ export async function claimFestivalOwnership(
 ): Promise<OwnershipResult> {
   const result = await withLock(festivalDir, async () => {
     const current = await readOwner(festivalDir);
+    // Repeating a completed claim/transfer is a safe recovery path. It does
+    // not authorize a new transfer: only the already-installed target owner
+    // can match this branch; all other changes still require the exact CAS.
+    if (current?.sessionId === sessionId) {
+      return {
+        kind: "claimed" as const,
+        owner: current,
+        ...(expectedOwner && expectedOwner.sessionId !== sessionId ? { transferredFrom: expectedOwner } : {}),
+      };
+    }
     if (expectedOwner && (current?.sessionId !== expectedOwner.sessionId || current.claimedAt !== expectedOwner.claimedAt)) {
       return { kind: "changed" as const, ...(current ? { owner: current } : {}) };
     }
-    if (current?.sessionId === sessionId) return { kind: "claimed" as const, owner: current };
     if (current && !expectedOwner) return { kind: "owned" as const, owner: current };
     const previousTime = current ? Date.parse(current.claimedAt) : Number.NaN;
     const owner: FestivalOwner = {

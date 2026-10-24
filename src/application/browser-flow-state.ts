@@ -12,20 +12,20 @@ async function statePath(root: string, flow: string, session: string) {
   }
   return join(dir, `${flow}-${createHash("sha256").update(session).digest("hex")}.json`);
 }
-export async function flowSubmissionCheckpoint(root: string, flow: string, session: string): Promise<boolean> {
+export async function flowSubmissionCheckpoint(root: string, flow: string, session: string, revision: string): Promise<boolean> {
   const path = await statePath(root, flow, session);
   try {
     const info = await lstat(path); if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) throw new Error("Unsafe flow checkpoint.");
     const data: unknown = JSON.parse(await readFile(path, "utf8"));
-    if (!data || typeof data !== "object" || !("submitted" in data) || typeof data.submitted !== "boolean") throw new Error("Corrupt flow checkpoint; block automatic retry.");
-    return data.submitted;
+    if (!data || typeof data !== "object" || !("submitted" in data) || typeof data.submitted !== "boolean" || !("revision" in data) || typeof data.revision !== "string") throw new Error("Corrupt flow checkpoint; block automatic retry.");
+    return data.revision === revision && data.submitted;
   } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
-export async function markFlowSubmitted(root: string, flow: string, session: string): Promise<void> {
+export async function markFlowSubmitted(root: string, flow: string, session: string, revision: string): Promise<void> {
   const path = await statePath(root, flow, session), temp = `${path}.${randomUUID()}.tmp`;
   const existing = await lstat(path).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
   if (existing && (!existing.isFile() || existing.isSymbolicLink())) throw new Error("Unsafe flow checkpoint.");
-  try { const file = await open(temp, "wx", 0o600); try { await file.writeFile(JSON.stringify({ submitted: true, at: new Date().toISOString() })); } finally { await file.close(); } await rename(temp, path); }
+  try { const file = await open(temp, "wx", 0o600); try { await file.writeFile(JSON.stringify({ submitted: true, revision, at: new Date().toISOString() })); } finally { await file.close(); } await rename(temp, path); }
   finally { await unlink(temp).catch(() => undefined); }
 }
 export async function clearFlowCheckpoint(root: string, flow: string, session: string): Promise<void> {

@@ -70,6 +70,20 @@ describe("festival ownership", () => {
     expect(await claimFestivalOwnership(root, "session-a")).toEqual(first);
   });
 
+  it("recovers an already-completed transfer from its original confirmation snapshot", async () => {
+    const root = await fixture();
+    const first = await claimFestivalOwnership(root, "session-a");
+    if (first.kind !== "claimed") throw new Error("Initial claim failed.");
+    const transferred = await claimFestivalOwnership(root, "session-b", first.owner);
+    if (transferred.kind !== "claimed") throw new Error("Transfer failed.");
+    expect(await claimFestivalOwnership(root, "session-b", first.owner)).toEqual({
+      kind: "claimed",
+      owner: transferred.owner,
+      transferredFrom: first.owner,
+    });
+    expect(await festivalOwner(root)).toEqual(transferred.owner);
+  });
+
   it("does not claim an unowned festival using a disappeared owner's confirmation", async () => {
     const root = await fixture();
     expect(await claimFestivalOwnership(root, "session-b", { sessionId: "session-a", claimedAt: "old" })).toEqual({ kind: "changed" });

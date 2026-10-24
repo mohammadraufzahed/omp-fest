@@ -37,7 +37,7 @@ import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 import { planInterviewKickoff } from "./src/domain/orientation.js";
 import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
 import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
-import { projectRootForFile, reserveProjectFiles, releaseProjectFiles } from "./src/application/project-conflicts.js";
+import { NativeWriteLockInvocations, packageInstallCheckout, projectRootForFile, reserveProjectCheckout, reserveProjectFiles, releaseProjectFiles, parseSupportedPackageInstall } from "./src/application/project-conflicts.js";
 import { readPortfolioState, updatePortfolioAssignment, updatePortfolioAssignmentRuntime } from "./src/application/portfolio-state.js";
 import { releaseFestivalTask } from "./src/application/festival-team.js";
 import type { WorkerAssignment } from "./src/application/supervisor.js";
@@ -75,6 +75,7 @@ interface InputEventShape {
 
 interface ToolCallEvent {
   toolName?: string;
+  toolCallId: string;
   input?: Record<string, unknown>;
 }
 
@@ -118,7 +119,7 @@ type HandlerResult =
 interface ExtensionApiLike {
   zod: unknown;
   logger?: { warn(message: string): void };
-  getAllTools?(): { name: string; description: string; sourceInfo?: { type?: string; name?: string } }[];
+  getAllTools?(): { name: string; description: string; sourceInfo?: { source?: string; type?: string; name?: string } }[];
   getActiveTools?(): string[];
   on<K extends keyof FestEventMap>(
     event: K,
@@ -157,20 +158,21 @@ function targetPaths(input: Record<string, unknown> | undefined, cwd: string): s
 function writeTool(toolName: string): boolean {
   return ["write", "edit", "patch", "apply_patch", "write_file", "edit_file", "multiedit"].includes(toolName);
 }
-function writeCallKey(toolName: string, input: Record<string, unknown> | undefined, sessionId: string): string {
-  return JSON.stringify([sessionId, toolName, input ?? {}]);
-}
+
 function shellWritesFiles(command: string): boolean {
   return /\b(?:tee|cp|mv|rm|touch|mkdir|install|truncate|apply_patch)\b/.test(command) ||
     /\b(?:sed|perl)\b[^;\n]*\s-i(?:\s|$)/.test(command) ||
     /\bgit\s+apply\b/.test(command) ||
+    /\bdd\b[^;\n]*\bof=/.test(command) ||
+    /\bawk\b[^;\n]*\s-i\s+inplace\b/.test(command) ||
     /(?:^|[^<])>{1,2}\s*(?:\/|\.{0,2}\/|[A-Za-z0-9_.-])/.test(command) ||
-    /\b(?:python|node|ruby|php)\s+(?:-c|-e|-r)\b/.test(command);
+    /\b(?:python(?:\d+(?:\.\d+)*)?|node|ruby|php)\s+(?:-c|-e|-r)\b/.test(command);
 }
 
 
 
 export default function ompFest(pi: ExtensionApiLike): void {
+  const writeLocks = new NativeWriteLockInvocations();
   const releaseWriteLocks = async (locks: { projectDir: string; sessionId: string; assignmentId: string }[]) => {
     for (const lock of locks) {
       try {
@@ -189,7 +191,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const tracker = new LoopTracker();
   const supervisor = new Supervisor();
 
-  const writeLocks = new Map<string, { projectDir: string; sessionId: string; assignmentId: string }[]>();
+
 
   const cwd = process.cwd();
   const deps = { fest, camp, detect, tracker, supervisor, config: () => loadConfig(cwd), host: { getAllTools: pi.getAllTools?.bind(pi), getActiveTools: pi.getActiveTools?.bind(pi) } };
@@ -386,6 +388,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
   pi.on("tool_call", (event, ctx) => {
     return (async (): Promise<ToolCallResult | undefined> => {
       const toolName = event.toolName ?? "";
+      const command = typeof event.input?.command === "string" ? event.input.command : "";
       if (toolName.startsWith("fest_") || toolName.startsWith("camp_")) {
         return undefined;
       }
@@ -426,15 +429,41 @@ export default function ompFest(pi: ExtensionApiLike): void {
             }
             acquired.push({ projectDir, sessionId: sid, assignmentId });
           }
-          writeLocks.set(writeCallKey(toolName, event.input, sid), acquired);
+          writeLocks.reserve(event.toolCallId, acquired);
         } catch (error) {
           await releaseWriteLocks(acquired);
           return { block: true, reason: String(error) };
         }
       }
-      const command = typeof event.input?.command === "string" ? event.input.command : "";
-      if (toolName === "bash" && shellWritesFiles(command)) {
-        return { block: true, reason: "omp-fest blocks shell-based project file mutations because it cannot acquire exact per-file write locks. Use the native write/edit tool with explicit target paths." };
+      const supportedInstall = toolName === "bash" ? parseSupportedPackageInstall(command) : undefined;
+      if (supportedInstall) {
+        const sid = sessionIdOf(ctx);
+        const workingDir = resolve(ctx.cwd, supportedInstall.workingDirectory ?? ".");
+        let checkoutLock: { projectDir: string; sessionId: string; assignmentId: string } | undefined;
+        try {
+          const projectDir = await packageInstallCheckout(workingDir);
+          if (!projectDir) return { block: true, reason: `omp-fest cannot safely run package installs outside a real Git checkout: ${workingDir}.` };
+          const assignmentId = randomUUID();
+          const result = await reserveProjectCheckout(projectDir, {
+            sessionId: sid,
+            assignmentId,
+            worker: ctx.agent?.name ?? ctx.agent?.id ?? toolName,
+          });
+          if (result.kind !== "reserved") {
+            const owners = result.kind === "conflict"
+              ? result.conflicts.map((row) => `${row.worker ?? row.assignmentId} (${row.files.join(", ") || "whole checkout"})`).join("; ")
+              : "write-lock registry busy";
+            return { block: true, reason: `Package install checkout lock unavailable for ${projectDir}: ${owners}. Retry after the active write finishes.` };
+          }
+          checkoutLock = { projectDir, sessionId: sid, assignmentId };
+          writeLocks.reserve(event.toolCallId, [checkoutLock]);
+        } catch (error) {
+          if (checkoutLock) await releaseWriteLocks([checkoutLock]);
+          return { block: true, reason: `omp-fest cannot safely reserve package install checkout: ${String(error)}` };
+        }
+      }
+      if (toolName === "bash" && shellWritesFiles(command) && !supportedInstall) {
+        return { block: true, reason: "omp-fest blocks shell-based project file mutations because it cannot acquire exact per-file write locks. Use native write/edit tools with explicit target paths, or the supported corepack pnpm install command for a Git checkout." };
       }
       if (
         toolName === "bash" &&
@@ -470,17 +499,13 @@ export default function ompFest(pi: ExtensionApiLike): void {
   // pending work but no unit was opened via fest_next — the exact "implemented
   // without fest_next" failure.
   pi.on("tool_result", async (event, ctx) => {
-      const observed = supervisor.observeNativeResult(sessionIdOf(ctx), event.result);
-      if (observed.observed.length) {
-        await mirrorPortfolioRuntime(ctx, observed.observed);
-        pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sessionIdOf(ctx)));
-      }
+    const pendingLocks = writeLocks.settle(event.toolCallId);
+    if (pendingLocks) await releaseWriteLocks(pendingLocks);
     const sid = sessionIdOf(ctx);
-    const writeKey = writeCallKey(event.toolName ?? "", event.input, sid);
-    const pendingLocks = writeLocks.get(writeKey);
-    if (pendingLocks) {
-      writeLocks.delete(writeKey);
-      await releaseWriteLocks(pendingLocks);
+    const observed = supervisor.observeNativeResult(sessionIdOf(ctx), event.result);
+    if (observed.observed.length) {
+      await mirrorPortfolioRuntime(ctx, observed.observed);
+      pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sessionIdOf(ctx)));
     }
     if (event.isError) {
       return undefined;

@@ -8,6 +8,7 @@ export interface EvidenceBundleInput {
   summary: string;
   details: string;
   attachments?: string[];
+  ownerSessionId?: string;
 }
 export interface EvidenceBundle {
   id: string;
@@ -36,6 +37,10 @@ export async function storeEvidenceBundle(festivalDir: string, input: EvidenceBu
   if (!input.summary.trim() || input.summary.length > 600) throw new Error("Evidence summary must contain 1–600 characters");
   if (!input.details.trim() || Buffer.byteLength(input.details) > 2 * 1024 * 1024) throw new Error("Evidence details must be nonempty and at most 2 MiB");
   const root = await realpath(festivalDir);
+  if (input.ownerSessionId !== undefined) {
+    const owner: unknown = JSON.parse(await readFile(join(root, ".omp-fest-owner.json"), "utf8").catch(() => "null"));
+    if (!owner || typeof owner !== "object" || !("sessionId" in owner) || owner.sessionId !== input.ownerSessionId) throw new Error("Evidence mutation requires explicit ownership by this session.");
+  }
   const attachments: EvidenceAttachment[] = [];
   for (const path of input.attachments ?? []) {
     if (isAbsolute(path)) throw new Error("Evidence attachment paths must be festival-relative");

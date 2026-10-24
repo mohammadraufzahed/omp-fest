@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -119,22 +120,55 @@ async function safeFile(file: string): Promise<void> {
   });
   if (info && (!info.isFile() || info.isSymbolicLink())) throw new Error("Portfolio state path must be a regular file, not a symlink or directory");
 }
+interface LockOwner { token: string; pid: number; host: string }
+async function readLockOwner(lock: string): Promise<LockOwner | undefined> {
+  try {
+    const owner: unknown = JSON.parse(await readFile(join(lock, "owner.json"), "utf8"));
+    if (!record(owner) || typeof owner.token !== "string" || !owner.token || typeof owner.pid !== "number" || !Number.isInteger(owner.pid) || typeof owner.host !== "string") return undefined;
+    return { token: owner.token, pid: owner.pid, host: owner.host };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
+  }
+}
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
 async function locked<T>(paths: { file: string; lock: string }, operation: (state: PortfolioState) => { state: PortfolioState; result: T }): Promise<T> {
   const started = Date.now();
+  const token = randomUUID();
   for (;;) {
-    try { await mkdir(paths.lock, { mode: 0o700 }); break; }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    try {
+      await mkdir(paths.lock, { mode: 0o700 });
+      await writeFile(join(paths.lock, "owner.json"), JSON.stringify({ token, pid: process.pid, host: hostname() }), { encoding: "utf8", mode: 0o600, flag: "wx" });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
       const lockInfo = await lstat(paths.lock).catch((statError: unknown) => {
         if ((statError as NodeJS.ErrnoException).code === "ENOENT") return undefined;
         throw statError;
       });
       if (lockInfo && (!lockInfo.isDirectory() || lockInfo.isSymbolicLink())) throw new Error("Portfolio lock path is unsafe", { cause: error });
-      if (lockInfo && Date.now() - lockInfo.mtimeMs > 30_000) {
+      const owner = lockInfo ? await readLockOwner(paths.lock) : undefined;
+      if (owner?.host === hostname() && !processIsAlive(owner.pid)) {
         const stale = `${paths.lock}.stale-${randomUUID()}`;
-        try { await rename(paths.lock, stale); }
-        catch (renameError) { if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError; }
-        await rm(stale, { recursive: true, force: true });
+        try {
+          await rename(paths.lock, stale);
+          const movedOwner = await readLockOwner(stale);
+          if (movedOwner?.token === owner.token && movedOwner.pid === owner.pid && movedOwner.host === owner.host) {
+            await rm(stale, { recursive: true, force: true });
+          } else {
+            try { await rename(stale, paths.lock); } catch (restoreError) {
+              if ((restoreError as NodeJS.ErrnoException).code !== "EEXIST") throw restoreError;
+            }
+          }
+        } catch (renameError) {
+          if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError;
+        }
         continue;
       }
       if (Date.now() - started > 10_000) throw new Error("Portfolio state is locked by another writer; retry shortly.", { cause: error });
@@ -153,7 +187,7 @@ async function locked<T>(paths: { file: string; lock: string }, operation: (stat
     return changed.result;
   } finally {
     if (temp) await rm(temp, { force: true });
-    await rm(paths.lock, { recursive: true, force: true });
+    if ((await readLockOwner(paths.lock))?.token === token) await rm(paths.lock, { recursive: true, force: true });
   }
 }
 function now(): string { return new Date().toISOString(); }
@@ -184,8 +218,14 @@ export async function setPortfolioPaused(campRoot: string, paused: boolean): Pro
 export async function reservePortfolioAssignment(campRoot: string, input: Omit<PortfolioStateAssignment, "status" | "createdAt" | "updatedAt">): Promise<PortfolioStateAssignment> {
   const paths = await directory(campRoot, true);
   return locked(paths, (state) => {
+    const existing = state.assignments.find((row) => row.id === input.id);
+    if (existing) {
+      if (existing.festival === input.festival && existing.task === input.task && existing.sessionId === input.sessionId &&
+          existing.worker === input.worker && existing.workingDir === input.workingDir &&
+          JSON.stringify(existing.files) === JSON.stringify(input.files)) return { state, result: existing };
+      throw new Error(`Portfolio assignment ID already exists: ${input.id}`);
+    }
     if (state.paused) throw new Error("Portfolio dispatch is paused; cannot reserve a new assignment.");
-    if (state.assignments.some((row) => row.id === input.id)) throw new Error(`Portfolio assignment ID already exists: ${input.id}`);
     if (state.assignments.some((row) => ACTIVE.has(row.status) && row.festival === input.festival && row.task === input.task)) {
       throw new Error(`Portfolio task is already active: ${input.festival}/${input.task}`);
     }
@@ -204,7 +244,13 @@ export async function updatePortfolioAssignment(campRoot: string, id: string, st
     const index = state.assignments.findIndex((row) => row.id === id);
     const prior = state.assignments[index];
     if (!prior) throw new Error(`Unknown portfolio assignment: ${id}`);
-    if (TERMINAL.has(prior.status)) throw new Error(`Portfolio assignment ${id} is terminal (${prior.status})`);
+    if (TERMINAL.has(prior.status)) {
+      if (prior.status === status && (details?.report === undefined || details.report === prior.report) &&
+          (details?.failure === undefined || details.failure === prior.failure) && (details?.festival === undefined || details.festival === prior.festival)) {
+        return { state, result: prior };
+      }
+      throw new Error(`Portfolio assignment ${id} is terminal (${prior.status})`);
+    }
     if (!STATUSES.has(status)) throw new Error(`Invalid portfolio assignment status: ${status}`);
     const festival = details?.festival ?? prior.festival;
     if (ACTIVE.has(status) && state.assignments.some((row) => row.id !== id && ACTIVE.has(row.status) && row.festival === festival && row.task === prior.task)) {

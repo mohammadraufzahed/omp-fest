@@ -1,11 +1,12 @@
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
-import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY } from "../../application/supervisor.js";
+import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY, type WorkerAssignment } from "../../application/supervisor.js";
 import { dispatchQueue, taskFiles, type DispatchQueue, type DispatchTask, type WriteLockOwner } from "../../application/supervisor-queue.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { festivalOwner } from "../../application/festival-ownership.js";
 import { claimFestivalTask, joinFestivalTeam, readFestivalTeam, releaseFestivalTask, reviewFestivalTask, submitFestivalTask } from "../../application/festival-team.js";
 import type { FestivalTeamAssignment } from "../../application/festival-team.js";
+import { referencesForTask } from "../../application/visual-references.js";
 import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { PiLike, ToolDeps } from "./tools.js";
@@ -137,11 +138,13 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
   const festivalQueues: PortfolioFestivalQueue[] = [];
   const rows: { id: string; status?: string; progress?: unknown }[] = [];
   const workingDirs = new Set<string>();
+  const recoveryTasks = new Map<string, DispatchTask[]>();
   for (const festival of owned) {
     const id = basename(festival.path);
     rows.push({ id, status: festival.status, progress: festival.progress });
     try {
       const { queue, tasks } = await supervisorQueue(deps, supervisor, sid, cwd, festival.id);
+      recoveryTasks.set(id, tasks);
       festivalQueues.push({
         festival: id,
         candidates: queue.candidates.flatMap((candidate) => candidate.workingDir ? [{
@@ -166,19 +169,58 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
     })),
   ]);
   const assignments = stored.assignments.map((row) => ({
-    festival: row.festival, task: row.task, status: row.status === "released" ? "accepted" as const : row.status,
+    festival: row.festival, task: row.task,
+    status: row.status === "released" || row.status === "failed" || ["failed", "exited"].includes(row.runtimeStatus ?? "")
+      ? "failed" as const : row.status,
   }));
-  const ledgerKeys = new Set(stored.assignments.map((row) => `${row.festival}\0${row.task}`));
+  const ledgerById = new Map(stored.assignments.map((row) => [row.id, row]));
+  const recovered: WorkerAssignment[] = [];
   for (const festival of owned) {
     const id = basename(festival.path);
-    try {
-      const team = await readFestivalTeam(location.campRoot, festival.path);
-      for (const row of team?.assignments ?? []) {
-        if (ledgerKeys.has(`${id}\0${row.task}`)) continue;
-        assignments.push({ festival: id, task: row.task, status: row.status === "claimed" ? "running" : row.status === "submitted" ? "submitted" : "accepted" });
+    const team = await readFestivalTeam(location.campRoot, festival.path).catch(() => undefined);
+    for (const shared of team?.assignments ?? []) {
+      if (shared.sessionId !== sid) continue;
+      const ledger = ledgerById.get(shared.id);
+      if (!ledger) {
+        const task = recoveryTasks.get(id)?.find((row) => row.path === shared.task);
+        recovered.push({
+          id: shared.id, festival: id, task: shared.task, worker: shared.label ?? shared.sessionId,
+          files: task?.files ?? (task ? taskFiles(task.document) : []),
+          status: shared.status === "accepted" ? "accepted" : shared.status === "submitted" ? "ready_for_review" : "assigned",
+          report: shared.report ?? "", review: shared.review ?? "",
+        });
+        continue;
       }
-    } catch (error) { errors.push({ festival: id, error: String(error) }); }
+      if (ledger.sessionId !== sid) continue;
+      const status: WorkerAssignment["status"] = ["failed", "exited"].includes(ledger.runtimeStatus ?? "") || ledger.status === "failed" || ledger.status === "released"
+        ? "failed"
+        : shared.status === "accepted" || ledger.status === "accepted" ? "accepted"
+        : shared.status === "submitted" || ledger.status === "submitted" ? "ready_for_review"
+        : ledger.status === "blocked" ? "blocked"
+        : ledger.status === "running" ? "running" : "assigned";
+      recovered.push({
+        id: shared.id, festival: id, task: shared.task, worker: shared.label ?? ledger.worker,
+        files: ledger.files, status, report: shared.report ?? ledger.report ?? "", review: shared.review ?? "",
+        ...(ledger.runtimeStatus ? { runtime: {
+          status: ledger.runtimeStatus, source: "unverified" as const, observedAt: ledger.runtimeObservedAt ?? ledger.updatedAt,
+          ...(ledger.runtimeId ? { runtimeId: ledger.runtimeId } : {}),
+        } } : {}),
+      });
+    }
+    for (const ledger of stored.assignments.filter((entry) => entry.festival === id && entry.sessionId === sid && !recovered.some((worker) => worker.id === entry.id))) {
+      const failed = ledger.status === "failed" || ledger.status === "released" || ["failed", "exited"].includes(ledger.runtimeStatus ?? "");
+      recovered.push({
+        id: ledger.id, festival: id, task: ledger.task, worker: ledger.worker, files: ledger.files,
+        status: failed ? "failed" : ledger.status === "accepted" ? "accepted" : ledger.status === "submitted" ? "ready_for_review" : ledger.status === "blocked" ? "blocked" : ledger.status === "running" ? "running" : "assigned",
+        report: ledger.report ?? "", review: "",
+        ...(ledger.runtimeStatus ? { runtime: {
+          status: ledger.runtimeStatus, source: "unverified" as const, observedAt: ledger.runtimeObservedAt ?? ledger.updatedAt,
+          ...(ledger.runtimeId ? { runtimeId: ledger.runtimeId } : {}),
+        } } : {}),
+      });
+    }
   }
+  supervisor.restoreAssignments(sid, recovered);
   const scheduler = buildPortfolioQueue({
     festivals: festivalQueues, assignments,
     paused: supervisor.state(sid).paused || stored.paused,
@@ -211,15 +253,40 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
       const output = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
       try {
         if (hooks.isMainSession && !hooks.isMainSession(ctx)) throw new Error("Festival supervision is main-session only; return your report through the native worker channel.");
-        if (params.action === "status") return output({ ...supervisor.snapshot(sid, params.since), statusSource: "supervisor_reported", runtimeSource: "worker.runtime.source; absent means unverified" });
-        if (params.action === "resume") {
-          const reconciliation = supervisor.reconcile(sid);
+        if (params.action === "status") {
           const location = await deps.detect.locate(ctx.cwd);
+          if (location.campRoot) await supervisorPortfolioQueue(deps, supervisor, sid, ctx.cwd);
+          return output({ ...supervisor.snapshot(sid, params.since), statusSource: "supervisor_reported", runtimeSource: "worker.runtime.source; absent means unverified" });
+        }
+        if (params.action === "resume") {
+          const location = await deps.detect.locate(ctx.cwd);
+          if (location.campRoot) await supervisorPortfolioQueue(deps, supervisor, sid, ctx.cwd);
+          const reconciliation = supervisor.reconcile(sid);
           if (location.campRoot) {
             const ledger = await readPortfolioState(location.campRoot);
+            const festivals = await deps.detect.listFestivals(location.campRoot);
             for (const row of supervisor.state(sid).workers) {
-              if (!row.runtime || !ledger.assignments.some((entry) => entry.id === row.id)) continue;
-              await updatePortfolioAssignmentRuntime(location.campRoot, row.id, {
+              const persisted = ledger.assignments.find((entry) => entry.id === row.id);
+              if (persisted?.sessionId !== sid) continue;
+              const festival = festivals.find((entry) => basename(entry.path) === row.festival);
+              if (festival && (await festivalOwner(festival.path))?.sessionId === sid) {
+                const team = await readFestivalTeam(location.campRoot, festival.path).catch(() => undefined);
+                const shared = team?.assignments.find((entry) => entry.id === row.id);
+                if (row.status === "accepted" && persisted.status === "submitted") {
+                  if (shared?.status !== "accepted") await reviewFestivalTask(location.campRoot, festival.path, sid, row.id, "accept", row.review);
+                  await updatePortfolioAssignment(location.campRoot, row.id, "accepted");
+                } else if (shared?.status === "submitted" && row.status === "ready_for_review" &&
+                    !["accepted", "failed", "released", "submitted"].includes(persisted.status)) {
+                  await updatePortfolioAssignment(location.campRoot, row.id, "submitted", { report: shared.report ?? row.report });
+                } else if (row.status === "blocked" && !["blocked", "accepted", "failed", "released"].includes(persisted.status)) {
+                  await updatePortfolioAssignment(location.campRoot, row.id, "blocked");
+                }
+              }
+              if (row.runtime && ["failed", "exited"].includes(row.runtime.status) &&
+                  !["accepted", "failed", "released"].includes(persisted.status)) {
+                await updatePortfolioAssignment(location.campRoot, row.id, "failed", { failure: `Native runtime ${row.runtime.status}.` });
+              }
+              if (row.runtime) await updatePortfolioAssignmentRuntime(location.campRoot, row.id, {
                 ...(row.runtime.runtimeId ? { runtimeId: row.runtime.runtimeId } : {}),
                 runtimeStatus: row.runtime.status, runtimeObservedAt: row.runtime.observedAt,
               });
@@ -248,6 +315,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           const festival = (await deps.detect.listFestivals(location.campRoot)).find((row) => basename(row.path) === candidate.festival);
           if (!festival) throw new Error("Owned festival disappeared; refresh the portfolio.");
           const dir = festival.path, campRoot = location.campRoot;
+          const visualReferences = await referencesForTask(dir, task.document);
           const ownership = await festivalOwner(dir);
           if (ownership?.sessionId !== sid) throw new Error("Only festivals explicitly owned by this session may be supervised.");
           const local = supervisor.state(sid);
@@ -266,7 +334,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             await recordPortfolioFestivalDispatch(campRoot, candidate.festival);
             deps.tracker.taskOpened(sid, candidate.task);
             const row = supervisor.assign(sid, candidate.festival, candidate.task, params.worker, candidate.files, { id: shared.id });
-            result = { assignment: row, contract: { festivalDir: dir, task: candidate.task, workingDir: candidate.workingDir, document: task.document, policy: SUPERVISOR_POLICY, browserVerification: BROWSER_VERIFICATION_POLICY }, nextSteps: "Launch this named worker through the native omp agent tool. The shared festival team board reserves this exact task across omp sessions; file locks remain write-scoped. After host acceptance bind the native job ID. Do not relaunch unfinished work." };
+            result = { assignment: row, contract: { festivalDir: dir, task: candidate.task, workingDir: candidate.workingDir, document: task.document, ...(visualReferences.length ? { visualReferences } : {}), policy: SUPERVISOR_POLICY, browserVerification: BROWSER_VERIFICATION_POLICY }, nextSteps: "Launch this named worker through the native omp agent tool. The shared festival team board reserves this exact task across omp sessions; file locks remain write-scoped. After host acceptance bind the native job ID. Do not relaunch unfinished work." };
           } catch (error) {
             if (ledgerCreated && shared) await releasePortfolioAssignment(campRoot, shared.id, "Portfolio assignment transaction rolled back.").catch(() => undefined);
             if (shared) await releaseFestivalTask(campRoot, dir, sid, shared.id, "Native supervisor assignment could not be created.").catch(() => undefined);

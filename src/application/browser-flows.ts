@@ -55,17 +55,16 @@ async function directory(root: string): Promise<string> {
 }
 function pathOf(dir: string, id: string) { if (!slug(id)) throw new Error("Invalid flow ID."); return join(dir, `${id}.flow.json`); }
 export async function createBrowserFlow(root: string, input: BrowserFlowInput) {
-  const dir = await directory(root), clean = validateInput(input), id = clean.name;
-  const flow: BrowserLoginFlow = { ...clean, path: clean.path ?? "/", id, revision: createHash("sha256").update(JSON.stringify(clean)).digest("hex"), updatedAt: new Date().toISOString() };
-  const file = await open(pathOf(dir, id), "wx", 0o600);
-  try { await file.writeFile(JSON.stringify(flow, null, 2) + "\n"); } finally { await file.close(); }
+  const dir = await directory(root), clean = validateInput(input), id = clean.name, path = pathOf(dir, id);
+  const flow: BrowserLoginFlow = { ...clean, path: clean.path ?? "/", id, revision: `${createHash("sha256").update(JSON.stringify(clean)).digest("hex")}-${randomUUID()}`, updatedAt: new Date().toISOString() };
+  await writeFile(path, JSON.stringify(flow, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   return flow;
 }
 export async function readBrowserFlow(root: string, id: string): Promise<BrowserLoginFlow> {
   const dir = await directory(root), path = pathOf(dir, id), info = await lstat(path);
   if (!info.isFile() || info.isSymbolicLink() || info.size > 128 * 1024) throw new Error("Unsafe or oversized browser flow.");
   const flow = JSON.parse(await readFile(path, "utf8")) as BrowserLoginFlow;
-  if (flow.id !== id || flow.revision !== createHash("sha256").update(JSON.stringify(validateInput(flow))).digest("hex")) throw new Error("Browser flow is corrupt or has been modified outside its revision.");
+  if (flow.id !== id || !flow.revision.startsWith(`${createHash("sha256").update(JSON.stringify(validateInput(flow))).digest("hex")}-`) || !/^[a-f0-9-]{36}$/.test(flow.revision.slice(65))) throw new Error("Browser flow is corrupt or has been modified outside its revision.");
   return flow;
 }
 export async function listBrowserFlows(root: string) {
@@ -79,7 +78,7 @@ export async function updateBrowserFlow(root: string, id: string, revision: stri
   try {
     const prior = await readBrowserFlow(root, id); if (prior.revision !== revision) throw new Error("Stale flow revision; reread before editing.");
     const clean = validateInput({ ...prior, ...patch, name: id });
-    const flow: BrowserLoginFlow = { ...clean, path: clean.path ?? "/", id, revision: createHash("sha256").update(JSON.stringify(clean)).digest("hex"), updatedAt: new Date().toISOString() };
+    const flow: BrowserLoginFlow = { ...clean, path: clean.path ?? "/", id, revision: `${createHash("sha256").update(JSON.stringify(clean)).digest("hex")}-${randomUUID()}`, updatedAt: new Date().toISOString() };
     await writeFile(temp, JSON.stringify(flow, null, 2) + "\n", { flag: "wx", mode: 0o600 }); await rename(temp, path); return flow;
   } finally { await unlink(temp).catch(() => undefined); await lock.close(); await unlink(lockPath); }
 }
@@ -89,7 +88,7 @@ export async function deleteBrowserFlow(root: string, id: string, revision: stri
 }
 
 export interface FlowBrowser {
-  open(url: string): Promise<void>;
+  open(url: string, configuredOrigin: string): Promise<void>;
   fill(selector: string, value: string): Promise<void>;
   click(selector: string): Promise<void>;
   visible(selector: string): Promise<boolean>;
@@ -97,11 +96,11 @@ export interface FlowBrowser {
 }
 export interface FlowInputProvider { ask(field: BrowserFlowField): Promise<string | undefined>; getCredential(reference: string): Promise<string | undefined> }
 export async function runBrowserFlow(flow: BrowserLoginFlow, browser: FlowBrowser, inputs: FlowInputProvider, checkpoint?: { submitted: boolean; onSubmitted?: () => Promise<void> }): Promise<{ status: "authenticated" | "needs_otp" | "cancelled" | "failed"; reason?: string }> {
-  const url = new URL(flow.path || "/", flow.origin);
-  if (url.origin !== flow.origin) return { status: "failed", reason: "Navigation escaped the configured origin." };
+  const origin = safeOrigin(flow.origin), url = new URL(flow.path || "/", origin);
+  if (url.origin !== origin) return { status: "failed", reason: "Navigation escaped the configured origin." };
   if (checkpoint?.submitted) {
     try {
-      await browser.open(url.toString());
+      await browser.open(url.toString(), origin);
       return await browser.visible(flow.selectors.success)
         ? { status: "authenticated" }
         : { status: "failed", reason: "Previous submission is uncertain in a fresh browser; verify the site manually before explicitly restarting." };
@@ -122,19 +121,19 @@ export async function runBrowserFlow(flow: BrowserLoginFlow, browser: FlowBrowse
   const user = flow.fields.find((field) => field.kind === "username"), pass = flow.fields.find((field) => field.kind === "secret");
   if (!user || !pass) return { status: "failed", reason: "Flow requires username and secret fields." };
   try {
-    await browser.open(url.toString());
+    await browser.open(url.toString(), origin);
     for (const field of flow.fields.filter((row) => row.kind !== "otp")) {
       const selector = field.kind === "username" ? flow.selectors.username : field.kind === "secret" ? flow.selectors.password : field.selector;
       if (selector && field.kind !== "confirmation") await browser.fill(selector, values.get(field.id) ?? "");
     }
-    await browser.click(flow.selectors.submit);
     if (checkpoint) { checkpoint.submitted = true; await checkpoint.onSubmitted?.(); }
+    await browser.click(flow.selectors.submit);
     if (flow.selectors.otp && await browser.visible(flow.selectors.otp)) {
       if (!otpField) return { status: "needs_otp", reason: "OTP challenge detected; add an OTP input field and resume after verifying state." };
       const code = await inputs.ask(otpField); if (!code) return { status: "needs_otp" };
       await browser.fill(flow.selectors.otp, code);
-      await browser.click(flow.selectors.submit);
       if (checkpoint) await checkpoint.onSubmitted?.();
+      await browser.click(flow.selectors.submit);
     }
     return await browser.visible(flow.selectors.success) ? { status: "authenticated" } : { status: "failed", reason: "Configured authenticated-success condition was not observed." };
   } catch { return { status: "failed", reason: "Browser operation failed; sensitive values were not included in the error." }; }

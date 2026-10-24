@@ -1,5 +1,5 @@
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { listStalePortfolioAssignments, readPortfolioState, recordPortfolioFestivalDispatch, releasePortfolioAssignment, reservePortfolioAssignment, setPortfolioPaused, setPortfolioWorkerLimit, updatePortfolioAssignment, updatePortfolioAssignmentRuntime } from "../src/application/portfolio-state.js";
@@ -39,6 +39,38 @@ describe("portfolio state", () => {
     await reservePortfolioAssignment(root, input("two"));
     expect((await readPortfolioState(root)).assignments.map((row) => row.id)).toEqual(["one", "two"]);
   });
+  it("treats an identical reservation retry as the same assignment", async () => {
+    const root = await fixture();
+    const first = await reservePortfolioAssignment(root, input("retry"));
+    expect(await reservePortfolioAssignment(root, input("retry"))).toEqual(first);
+    expect((await readPortfolioState(root)).assignments).toHaveLength(1);
+  });
+
+  it("recovers a crashed portfolio lock only when its owner process is proven dead", async () => {
+    const root = await fixture();
+    const store = join(root, ".ompfest");
+    await mkdir(store);
+    const lock = join(store, "portfolio.lock");
+    await mkdir(lock);
+    await writeFile(join(lock, "owner.json"), JSON.stringify({ token: "crashed-owner", pid: 2147483647, host: hostname() }));
+    const stale = new Date(Date.now() - 60_000);
+    await utimes(lock, stale, stale);
+    await setPortfolioPaused(root, true);
+    expect((await readPortfolioState(root)).paused).toBe(true);
+  });
+
+  it("does not reclaim a portfolio lock just because its owner exceeded the old stale threshold", async () => {
+    const root = await fixture();
+    const store = join(root, ".ompfest");
+    await mkdir(store);
+    const lock = join(store, "portfolio.lock");
+    await mkdir(lock);
+    await writeFile(join(lock, "owner.json"), JSON.stringify({ token: "live-owner", pid: process.pid, host: hostname() }));
+    const stale = new Date(Date.now() - 60_000);
+    await utimes(lock, stale, stale);
+    await expect(setPortfolioPaused(root, true)).rejects.toThrow("locked by another writer");
+    expect(await readFile(join(lock, "owner.json"), "utf8")).toContain("live-owner");
+  }, 15_000);
 
   it("enforces the 20-worker cap across concurrent reservations", async () => {
     const root = await fixture();

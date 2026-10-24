@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const JOURNAL_VERSION = 1;
 const MARKER = ".omp-fest-creation.json";
@@ -79,6 +79,29 @@ async function removeJournal(journalPath: string, root: string, id: string): Pro
   await rm(journalPath);
 }
 
+export async function festivalCreationIsScaffolded(receipt: CreationReceipt): Promise<boolean> {
+  const camp = await realpath(resolve(receipt.journalPath, "../../.."));
+  const journal = await readJournal(receipt.journalPath, camp);
+  if (journal.id !== receipt.id || !journal.festivalDir) return false;
+  const planPath = resolve(camp, journal.planPath);
+  const plans = join(camp, ".ompfest", "plans");
+  if (!inside(plans, planPath) || dirname(planPath) !== plans || !basename(planPath).endsWith(".STRUCTURE.md")) return false;
+  const actualPlans = await realpath(plans).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
+  if (actualPlans !== plans) return false;
+  const planInfo = await lstat(planPath).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
+  const festivalInfo = await lstat(journal.festivalDir).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
+  if (!planInfo?.isFile() || planInfo.isSymbolicLink() || !festivalInfo?.isDirectory() || festivalInfo.isSymbolicLink()) return false;
+  const statusPath = `${planPath}.status.json`;
+  const info = await lstat(statusPath).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
+  if (!info || !info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024) return false;
+  try {
+    const value: unknown = JSON.parse(await readFile(statusPath, "utf8"));
+    return !!value && typeof value === "object" && !Array.isArray(value) && "state" in value &&
+      value.state === "scaffolded" && "festivalDir" in value && typeof value.festivalDir === "string" &&
+      resolve(camp, value.festivalDir) === journal.festivalDir;
+  } catch { return false; }
+}
+
 async function withCreationIndexLock<T>(directory: string, action: () => Promise<T>): Promise<T> {
   const lock = join(directory, ".index.lock");
   try { await mkdir(lock, { mode: 0o700 }); }
@@ -139,7 +162,15 @@ export async function completeFestivalCreation(receipt: CreationReceipt): Promis
   const camp = await realpath(resolve(receipt.journalPath, "../../.."));
   const journal = await readJournal(receipt.journalPath, camp);
   if (journal.id !== receipt.id) throw new Error("Festival creation receipt does not match journal.");
-  if (journal.festivalDir && await markerFor(journal.festivalDir, receipt.id)) await rm(join(journal.festivalDir, MARKER));
+  if (!(await festivalCreationIsScaffolded(receipt))) throw new Error("Festival creation is not validated and marked scaffolded; refusing to finalize its journal.");
+  if (journal.festivalDir) {
+    const marker = join(journal.festivalDir, MARKER);
+    const info = await lstat(marker).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
+    if (info) {
+      if (!info.isFile() || info.isSymbolicLink() || !(await markerFor(journal.festivalDir, receipt.id))) throw new Error("Festival creation marker no longer matches this transaction.");
+      await rm(marker);
+    }
+  }
   await removeJournal(journal.journalPath, camp, receipt.id);
 }
 
@@ -148,14 +179,55 @@ export async function rollbackFestivalCreation(receipt: CreationReceipt, created
   const journal = await readJournal(receipt.journalPath, camp);
   if (journal.id !== receipt.id) throw new Error("Festival creation receipt does not match journal.");
   const candidate = createdFestivalDir ?? journal.festivalDir;
-  if (!candidate) { await removeJournal(journal.journalPath, camp, receipt.id); return undefined; }
+  if (!candidate) return { receipt };
+  let target: string;
   try {
-    const { target } = await safeFestivalPath(camp, candidate);
-    if (journal.preexisting.includes(basename(target)) || !await markerFor(target, receipt.id)) return { receipt, festivalDir: target };
-    await rm(target, { recursive: true, force: false });
-    await removeJournal(journal.journalPath, camp, receipt.id);
-    return undefined;
+    ({ target } = await safeFestivalPath(camp, candidate));
+    if (journal.preexisting.includes(basename(target)) || basename(target) !== journal.name || !await markerFor(target, receipt.id)) return { receipt, festivalDir: target };
+    await quarantineOwnedFestival(camp, target);
   } catch { return { receipt, festivalDir: candidate }; }
+  await removeJournal(journal.journalPath, camp, receipt.id);
+  return undefined;
+}
+
+async function quarantineOwnedFestival(camp: string, target: string): Promise<string> {
+  const storage = join(camp, ".ompfest");
+  await mkdir(storage, { mode: 0o700 }).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
+  await realDirectory(storage);
+  const orphans = join(storage, "orphans");
+  await mkdir(orphans, { mode: 0o700 }).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
+  await realDirectory(orphans);
+  const destination = join(orphans, `${randomUUID()}-${Date.now()}`);
+  const manifest = join(target, QUARANTINE);
+  await writeFile(manifest, `${JSON.stringify({ version: 1, originalName: basename(target), quarantinedAt: new Date().toISOString() })}\n`, { flag: "wx", mode: 0o600 });
+  try { await rename(target, destination); }
+  catch (error) { await rm(manifest, { force: true }); throw error; }
+  return destination;
+}
+
+export interface QuarantinedFestival { id: string; name: string }
+
+export async function listQuarantinedFestivals(campRoot: string): Promise<QuarantinedFestival[]> {
+  const camp = await realpath(campRoot);
+  await ensureStorage(camp);
+  const orphans = join(camp, ".ompfest", "orphans");
+  await mkdir(orphans, { mode: 0o700 }).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
+  await realDirectory(orphans);
+  const result: QuarantinedFestival[] = [];
+  for (const id of await readdir(orphans)) {
+    const target = join(orphans, id);
+    try {
+      await realDirectory(target);
+      const manifestPath = join(target, QUARANTINE), info = await lstat(manifestPath);
+      if (!info.isFile() || info.isSymbolicLink() || info.size > 4096) continue;
+      const value: unknown = JSON.parse(await readFile(manifestPath, "utf8"));
+      if (!value || typeof value !== "object" || !("version" in value) || value.version !== 1 ||
+          !("originalName" in value) || typeof value.originalName !== "string" ||
+          value.originalName === "." || value.originalName === ".." || value.originalName.includes(sep)) continue;
+      result.push({ id, name: value.originalName });
+    } catch { /* Invalid quarantine entries are not safe restore candidates. */ }
+  }
+  return result;
 }
 
 export async function listFestivalCreationOrphans(campRoot: string): Promise<FestivalCreationOrphan[]> {
@@ -180,19 +252,8 @@ export async function quarantineFestival(campRoot: string, festivalDir: string):
   if ((await listFestivalCreationOrphans(camp)).some((orphan) => orphan.receipt.name === basename(target) || orphan.festivalDir === target)) {
     throw new Error("A festival creation journal is still present; resolve that transaction before quarantining.");
   }
-  const storage = join(camp, ".ompfest");
-  await mkdir(storage, { mode: 0o700 }).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
-  await realDirectory(storage);
-  const orphans = join(storage, "orphans");
-  await mkdir(orphans, { mode: 0o700 }).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; });
-  await realDirectory(orphans);
-  const destination = join(orphans, `${randomUUID()}-${Date.now()}`);
   if (!inside(planning, target) || target === planning) throw new Error("Festival directory must be within planning.");
-  const manifest = join(target, QUARANTINE);
-  await writeFile(manifest, `${JSON.stringify({ version: 1, originalName: basename(target), quarantinedAt: new Date().toISOString() })}\n`, { flag: "wx", mode: 0o600 });
-  try { await rename(target, destination); }
-  catch (error) { await rm(manifest, { force: true }); throw error; }
-  return destination;
+  return quarantineOwnedFestival(camp, target);
 }
 
 export async function restoreQuarantinedFestival(campRoot: string, quarantineDir: string): Promise<string> {

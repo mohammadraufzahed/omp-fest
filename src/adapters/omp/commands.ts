@@ -5,15 +5,16 @@
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { joinFestivalTeam, transferFestivalTeamCoordinator, readFestivalTeam } from "../../application/festival-team.js";
 import { festivalOwner, type FestivalOwner, claimFestivalOwnership } from "../../application/festival-ownership.js";
-import { listFestivalCreationOrphans, quarantineFestival, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
+import { completeFestivalCreation, festivalCreationIsScaffolded, listFestivalCreationOrphans, listQuarantinedFestivals, quarantineFestival, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { listStalePortfolioAssignments, readPortfolioState, setPortfolioPaused, setPortfolioWorkerLimit } from "../../application/portfolio-state.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { LoopTracker } from "../../application/loop-tracker.js";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { referencesForTask, validateVisualReferences } from "../../application/visual-references.js";
-import { visualEvidenceStatus } from "../../application/visual-evidence.js";
+import { integrationReviewStatus } from "../../application/integration-review.js";
+import { recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
+import { referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import { loadConfig, saveConfig } from "../../domain/config.js";
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
@@ -107,7 +108,7 @@ async function festivalDirOf(deps: CommandDeps, ctx: CommandCtx, selector?: stri
 
 async function coordinatorOnly(pi: PiCommandsLike, deps: CommandDeps, ctx: CommandCtx, festivalDir: string): Promise<boolean> {
   const owner = await festivalOwner(festivalDir);
-  if (owner?.sessionId === sessionIdOf(ctx)) return true;
+  if (ctx.agent?.kind !== "sub" && owner?.sessionId === sessionIdOf(ctx)) return true;
   send(pi, "fest-status", `This action belongs to the festival coordinator${owner ? ` (${owner.sessionId})` : ""}. Use /fest join to collaborate; task work goes through fest_team.`);
   return false;
 }
@@ -405,18 +406,68 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       },
     },
     task: {
-      desc: "task state: /fest task <show|done|block|defer|unblock|reset|update> [task] [reason|pct]",
+      desc: "task state: /fest task <show|done|block|defer|unblock|reset|update> [task] [reason|pct]; done accepts --evidence and optional --visual-evidence JSON",
       run: async (args, ctx) => {
         const [action = "show", ...rest] = args;
         const dir = await festivalDirOf(deps, ctx);
         if (action !== "show" && !(await coordinatorOnly(pi, deps, ctx, dir))) return;
         if (action === "done") {
-          const outstanding = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) => worker.status !== "accepted");
-          if (outstanding.length) {
-            send(pi, "fest-status", "Completion blocked: review outstanding worker submissions before completing festival tasks.");
+          const visualArg = rest.indexOf("--visual-evidence");
+          let visualEvidence: VisualEvidence[] | undefined;
+          if (visualArg >= 0) {
+            try {
+              const parsed: unknown = JSON.parse(rest.slice(visualArg + 1).join(" "));
+              if (!Array.isArray(parsed)) throw new Error("expected a JSON array");
+              visualEvidence = parsed as VisualEvidence[];
+            } catch (error) {
+              send(pi, "fest-status", `Completion blocked: invalid --visual-evidence JSON (${String(error)}).`);
+              return;
+            }
+          }
+          const evidenceArg = rest.indexOf("--evidence");
+          const taskArgs = rest.filter((_arg, index) => index !== visualArg && index < visualArg || visualArg < 0 && index >= 0)
+            .filter((_arg, index) => index !== evidenceArg && index < evidenceArg || evidenceArg < 0 && index >= 0);
+          const evidence = evidenceArg >= 0 ? rest.slice(evidenceArg + 1, visualArg > evidenceArg ? visualArg : undefined).join(" ").trim() : "";
+          const task = taskArgs.join(" ");
+          if (!evidence) {
+            send(pi, "fest-status", "Completion blocked: provide evidence with `/fest task done <task> --evidence <verified checks>`.");
             return;
           }
-          const completion = await deps.fest.taskComplete(dir, rest[0] ?? "");
+          const visual = await validateVisualReferences(dir, deps.detect);
+          if (visual.issues.length) {
+            send(pi, "fest-status", `Completion blocked by visual references:\n${visual.issues.join("\n")}`);
+            return;
+          }
+          const target = task || undefined;
+          const requested = target ? (await deps.detect.pendingTasks(dir)).find((item) => item.path === target || item.path.endsWith(`/${target}`)) : undefined;
+          const taskPath = requested?.path;
+          const taskDoc = taskPath ? await readFile(join(dir, taskPath), "utf8").catch(() => undefined) : undefined;
+          if ((visual.pages.length || target) && (!taskPath || !taskDoc)) {
+            send(pi, "fest-status", "Completion blocked: choose a valid task path returned by /fest next.");
+            return;
+          }
+          const outstanding = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) =>
+            worker.festival === basename(dir) && worker.task === taskPath && worker.status !== "accepted" && worker.status !== "failed");
+          if (outstanding.length) {
+            send(pi, "fest-status", "Completion blocked: review and settle outstanding worker submissions before completing festival tasks.");
+            return;
+          }
+          const location = await deps.detect.locate(ctx.cwd);
+          const team = location.campRoot ? await readFestivalTeam(location.campRoot, dir) : undefined;
+          if (team?.assignments.some((assignment) =>
+            (!taskPath || assignment.task === taskPath) && (assignment.status === "claimed" || assignment.status === "submitted"))) {
+            send(pi, "fest-status", "Completion blocked: a joined worker still owns or has submitted this task; review or release the assignment before completing.");
+            return;
+          }
+          if (taskDoc && taskPath && taskChecks(taskDoc).length) {
+            try {
+              await recordVisualEvidence(dir, taskPath, taskDoc, visualEvidence ?? []);
+            } catch (error) {
+              send(pi, "fest-status", `Completion blocked: provide visual evidence for each acceptance check (${String(error)}).`);
+              return;
+            }
+          }
+          const completion = await deps.fest.taskComplete(dir, taskPath ?? "", evidence);
           send(pi, "fest-status", completion.ok ? "Task completed." : `Completion blocked:\n${completion.output}`);
           return;
         }
@@ -508,6 +559,11 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         const dir = await festivalDirOf(deps, ctx);
         if (!(await coordinatorOnly(pi, deps, ctx, dir))) return;
         const visual = await validateVisualReferences(dir, deps.detect);
+        const integration = await integrationReviewStatus(dir, deps.detect);
+        if (integration.status === "failed" || integration.status === "stale") {
+          send(pi, "fest-gate", `Approval blocked by integration review: ${integration.status}`);
+          return;
+        }
         const verification = visual.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
         if (visual.issues.length || verification?.issues.length) {
           send(pi, "fest-gate", `Approval blocked:\n${[...visual.issues, ...(verification?.issues ?? [])].join("\n")}`);
@@ -540,8 +596,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         }
         const currentReferences = await validateVisualReferences(dir, deps.detect);
         const currentEvidence = currentReferences.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
-        if (currentReferences.issues.length || JSON.stringify(currentEvidence) !== JSON.stringify(verification)) {
-          send(pi, "fest-gate", "References or evidence changed during review. Review the gate again.");
+        const currentIntegration = await integrationReviewStatus(dir, deps.detect);
+        if (currentReferences.issues.length || currentEvidence?.issues.length || JSON.stringify(currentEvidence) !== JSON.stringify(verification) ||
+            JSON.stringify(currentIntegration) !== JSON.stringify(integration) || currentIntegration.status === "failed" || currentIntegration.status === "stale") {
+          send(pi, "fest-gate", "References, evidence, or integration review changed during review. Review the gate again.");
           return;
         }
         send(pi, "fest-gate", await deps.fest.workflowApprove(dir));
@@ -565,38 +623,9 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       },
     },
     parallel: {
-      desc: "pending tasks grouped by sequence — spawn a subagent per lane",
-      run: async (args, ctx) => {
-        const dir = await festivalDirOf(deps, ctx, args[0]);
-        const visual = await validateVisualReferences(dir, deps.detect);
-        if (visual.issues.length > 0) {
-          send(pi, "fest-status", `Visual references need repair:\n${visual.issues.join("\n")}`);
-          return;
-        }
-        const tasks = await deps.detect.pendingTasks(dir);
-        const pending = tasks.filter((t) => !t.done);
-        if (pending.length === 0) {
-          send(pi, "fest-status", "No pending tasks — festival is done or fully dispatched.");
-          return;
-        }
-        const groups = new Map<string, string[]>();
-        for (const task of pending) {
-          const list = groups.get(task.sequence) ?? [];
-          list.push(task.path);
-          groups.set(task.sequence, list);
-        }
-        const lines = ["Candidate tasks by lane (check dependencies and file overlap before dispatch):", SUPERVISOR_POLICY, BROWSER_VERIFICATION_POLICY];
-        for (const [seq, files] of groups) {
-          lines.push(`\n${seq}`);
-          for (const file of files) {
-            lines.push(`  • ${file}`);
-            const refs = await referencesForTask(dir, await readFile(join(dir, file), "utf8"));
-            for (const ref of refs) {
-              lines.push(`    Visual reference: ${ref.spec} (wireframe: ${ref.wireframe})`);
-            }
-          }
-        }
-        send(pi, "fest-status", lines.join("\n"));
+      desc: "supervisor-filtered queue — use /fest dispatch or fest_supervisor queue",
+      run: (_args, _ctx) => {
+        send(pi, "fest-status", "Sequence-grouped candidates are not dispatch-safe. Use /fest dispatch or fest_supervisor action:'queue'; only the supervisor-filtered queue is authoritative.");
       },
     },
     doctor: {
@@ -796,6 +825,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         if (!location.campRoot) throw new Error("Not inside a camp.");
         const root = location.campRoot;
         const journals = await listFestivalCreationOrphans(root);
+        const quarantined = await listQuarantinedFestivals(root);
         const festivals = await deps.detect.listFestivals(root);
         const journalNames = new Set(journals.map((orphan) => orphan.receipt.name));
         const legacy: typeof festivals = [];
@@ -810,15 +840,24 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         if (action === "rollback") {
           const found = journals.find((item) => item.receipt.id === selector);
           if (!found) throw new Error("No matching creation transaction. Run /fest orphans to inspect exact IDs.");
-          const confirmed = await ctx.ui.confirm?.("Remove incomplete festival creation", `Roll back only ${found.receipt.name} from transaction ${found.receipt.id}? Removal proceeds only if its on-disk marker matches this transaction; otherwise it is preserved for manual inspection.`);
+          const completed = await festivalCreationIsScaffolded(found.receipt);
+          const confirmed = await ctx.ui.confirm?.(completed ? "Finish validated festival creation" : "Roll back incomplete festival creation", completed
+            ? `Finalize transaction ${found.receipt.id} for validated festival ${found.receipt.name}? Only its matching marker and journal are removed; the festival contents remain.`
+            : `Move ${found.receipt.name} from transaction ${found.receipt.id} into .ompfest/orphans only if its exact marker proves ownership? All scaffold and user-added contents will be preserved and can be restored.`);
           if (!confirmed) {
             send(pi, "fest-status", "No cleanup performed.");
             return;
           }
+          if (completed) {
+            await completeFestivalCreation(found.receipt);
+            send(pi, "fest-status", `Finalized validated festival ${found.receipt.name}; its contents were preserved.`);
+            deps.detect.bustCache?.();
+            return;
+          }
           const remaining = await rollbackFestivalCreation(found.receipt, found.festivalDir);
           send(pi, "fest-status", remaining
-            ? `Preserved ${remaining.festivalDir ?? found.receipt.name}; transaction could not prove safe ownership. Inspect it manually.`
-            : `Rolled back incomplete creation ${found.receipt.name}.`);
+            ? `Preserved ${remaining.festivalDir ?? found.receipt.name}; transaction could not prove safe ownership or move the target. Target and journal remain for inspection.`
+            : `Quarantined incomplete creation ${found.receipt.name}; run /fest orphans to inspect its restore ID.`);
           deps.detect.bustCache?.();
           return;
         }
@@ -853,6 +892,8 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           ...(journals.length ? journals.map((item) => `- ${item.receipt.id} · ${item.receipt.name} · ${item.festivalDir ?? "no festival directory recorded"} · ${item.receipt.sessionId}`) : ["- none"]),
           "Unowned legacy planning candidates (inspect before quarantine):",
           ...(legacy.length ? legacy.map((item) => `- ${item.id} · ${item.path}`) : ["- none"]),
+          "Quarantined festivals (restorable):",
+          ...(quarantined.length ? quarantined.map((item) => `- ${item.id} · ${item.name}`) : ["- none"]),
           "Actions: /fest orphans rollback <transaction-id> · /fest orphans quarantine <festival-id> · /fest orphans restore <quarantine-id>",
           "Plan drafts and previews in .ompfest/plans are not orphans and are never removed by this flow.",
         ];

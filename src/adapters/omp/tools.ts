@@ -23,7 +23,7 @@ import { installVisualReferences, prepareVisualReferences, referencesForTask, ta
 import { createWireframe, WireframeInputError, type WireframeSpec } from "../../application/visual-wireframe.js";
 import { structuredPlanSchema, type StructuredPlan } from "../../application/structured-plan.js";
 import { normalizePlanInput } from "../../application/plan-input.js";
-import { approvedPlan, markPlanScaffolded, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
+import { abandonPlanPreview, approvedPlan, markPlanApproved, markPlanScaffolded, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
 import { finalizeApprovedScaffold } from "../../application/plan-scaffold.js";
 import { createPlanDraft, readPlanDraft, updatePlanDraft, listPlanDrafts, type PlanDraftFields } from "../../application/plan-drafts.js";
 import { findPlanningConflicts } from "../../application/planning-conflicts.js";
@@ -143,6 +143,7 @@ function planFailure(error: unknown, extra: Record<string, unknown> = {}): ToolR
 async function interactivePlanReview(
   ctx: ToolContextLike,
   payload: Record<string, unknown>,
+  approval: { root: string; plan: string; name: string; references: { path: string; content: string }[] },
 ): Promise<ToolResult> {
   const ui = ctx.ui;
   if (!ui || typeof ui.confirm !== "function") {
@@ -161,7 +162,7 @@ async function interactivePlanReview(
     `Plan revision: ${typeof payload.planRevision === "string" ? payload.planRevision : "unknown"}`,
     `Tasks: ${String((payload.counts as { tasks?: number } | undefined)?.tasks ?? "unknown")}`,
     "",
-    "Approve creates an immutable revision for scaffolding. Reject keeps the repository unchanged.",
+    "Preview persists the structure plan, rendered preview, plan artifact and status under .ompfest/plans. Rejecting does not scaffold or create the festival, and leaves those saved files in place.",
   ];
   const floated = await showCard(ui, {
     title: "✦ Plan proposal review",
@@ -173,12 +174,13 @@ async function interactivePlanReview(
     floated ? "Approve this proposal for scaffolding?" : lines.join("\n") + "\n\nApprove this proposal?",
   );
   if (approved) {
-    return textResult({
-      ...payload,
-      approval: "approved",
-      nextSteps: "Plan approved. Call action:'scaffold' with this planRevision and omit spec.",
-    });
+    const revision = typeof payload.planRevision === "string" ? payload.planRevision : "";
+    if (!revision) return textResult({ ...payload, approval: "awaiting_human", error: "Missing planRevision; approval was not recorded." });
+    await markPlanApproved(approval.root, approval.plan, approval.name, revision, approval.references);
+    return textResult({ ...payload, approval: "approved", nextSteps: "Plan approved. Call action:'scaffold' with this planRevision and omit spec." });
   }
+  const revision = typeof payload.planRevision === "string" ? payload.planRevision : "";
+  if (revision) await abandonPlanPreview(approval.root, approval.plan, approval.name, revision, "rejected");
   const reason = typeof ui.input === "function"
     ? (await ui.input("Request plan revision", "What should change?")) ?? "no reason given"
     : "no reason given";
@@ -454,7 +456,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const campRoot = await campRootOf(deps, ctx);
       const team = campRoot ? await readFestivalTeam(campRoot, dir) : undefined;
       if (team?.assignments.some((assignment) =>
-        assignment.task === (task?.path ?? taskPath) && assignment.status !== "accepted")) {
+        assignment.task === (task?.path ?? taskPath) && (assignment.status === "claimed" || assignment.status === "submitted"))) {
         return textResult({ kind: "completion_blocked", hint: "A joined session still owns or has submitted this task. Review or release its shared team assignment before completing it." });
       }
       const completion = await deps.fest.taskComplete(dir, task?.path ?? taskPath ?? "", params.evidence);
@@ -706,9 +708,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (approved) {
         const currentReferences = await validateVisualReferences(dir, deps.detect);
         const currentEvidence = currentReferences.issues.length ? undefined : await visualEvidenceStatus(dir, deps.detect);
-        if (currentReferences.issues.length || currentEvidence?.issues.length || JSON.stringify(currentEvidence) !== JSON.stringify(verification)) {
+        const currentIntegration = await integrationReviewStatus(dir, deps.detect);
+        if (currentReferences.issues.length || currentEvidence?.issues.length || JSON.stringify(currentEvidence) !== JSON.stringify(verification) ||
+            JSON.stringify(currentIntegration) !== JSON.stringify(integration) || currentIntegration.status === "failed" || currentIntegration.status === "stale") {
           return textResult({ kind: "gate_blocked", issues: [...currentReferences.issues, ...(currentEvidence?.issues ?? [])],
-            hint: "References or evidence changed during review; verify them again." });
+            integration: currentIntegration, hint: "References, evidence, or integration review changed during review; verify them again." });
         }
         const output = await deps.fest.workflowApprove(dir);
         return textResult({ status: "approved", output });
@@ -733,7 +737,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description:
       "Single stateful planning API. Use action create/update/read/list for persisted incremental drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
     parameters: z.object({
-      action: z.enum(["create", "read", "update", "list", "preview", "scaffold"]).optional(),
+      action: z.enum(["create", "read", "update", "list", "preview", "scaffold", "cancel"]).optional(),
       name: z.string().optional(), plan: z.string().optional(), draftId: z.string().optional(), draftRevision: z.string().optional(),
       goal: z.string().optional(), scope: z.array(z.string()).optional(), exclusions: z.array(z.string()).optional(),
       acceptance: z.array(z.string()).optional(), inspection: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
@@ -746,7 +750,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       baseRevision: z.string().optional(), proposalRevision: z.string().optional(),
       conflictChoice: z.enum(["sequence", "narrow", "worktree"]).optional().describe("Human-selected resolution after returning planning_conflict options and asking conversationally; never open a blocking selection modal"),
     }),
-    async execute(_id: string, params: { action?: "create" | "read" | "update" | "list" | "preview" | "scaffold"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { action?: "create" | "read" | "update" | "list" | "preview" | "scaffold" | "cancel"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -801,6 +805,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!params.action && !params.referenceAction) return planFailure("Choose action:'preview' with a structured spec, then action:'scaffold' with the human-approved planRevision.");
       if (params.action === "preview" && !params.spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
       if (params.action === "scaffold" && (!params.approvedRevision || params.spec)) return planFailure("Scaffolding requires the human-approved planRevision and must omit spec.", { code: "INVALID_SCAFFOLD_INPUT" });
+      if (params.action === "cancel") {
+        try {
+          if (!params.approvedRevision) throw new Error("Cancelling a preview requires its exact planRevision.");
+          await abandonPlanPreview(root, planPath, params.name, params.approvedRevision, "cancelled");
+          return textResult({ kind: "plan_cancelled", name: params.name, planRevision: params.approvedRevision, artifactsPreserved: true });
+        } catch (error) { return planFailure(error); }
+      }
       if (params.action && params.referencesDir && (params.visualIntent !== "ui_visual" || !params.attachments?.some((item) => item.role === "ui_design"))) {
         return textResult({
           kind: "plan_failed", code: "VISUAL_REFERENCE_NOT_CONFIRMED", field: "attachments",
@@ -844,7 +855,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             counts: prepared.counts, planRevision: prepared.planRevision, reuseCandidates,
             ...(planWarnings.length || normalized.warnings.length ? { warnings: [...planWarnings, ...normalized.warnings] } : {}),
             ...(visual ? { visualPreview: visual } : {}),
-          });
+          }, { root, plan: planPath, name: params.name, references: bundle?.files ?? [] });
         } catch (error) {
           return planFailure(error);
         }
@@ -992,17 +1003,30 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           const created = after.filter((festival) => !previous.has(resolve(festival.path)));
           if (created.length === 1) candidate = created[0]?.path;
         }
-        const orphan = planMarked
-          ? undefined
-          : candidate
-            ? await rollbackFestivalCreation(creation, candidate).catch(() => ({ receipt: creation, festivalDir: candidate }))
-            : { receipt: creation };
+        if (planMarked) {
+          try {
+            await completeFestivalCreation(creation);
+            return textResult({
+              kind: "plan_scaffolded", planRevision: approved.planRevision, counts: approved.counts,
+              festivalDir, validation: { score: 100 }, cleanupRecovered: true,
+              nextSteps: ["The validated festival and approved plan are intact; transaction cleanup succeeded on retry.", "Run fest_validate before promotion."],
+            });
+          } catch (cleanupError) {
+            return textResult({
+              kind: "plan_failed", error: `Scaffold validated but transaction cleanup failed: ${String(cleanupError)}`,
+              festivalDir, orphanedCreation: { receipt: creation, festivalDir },
+              hint: `The validated festival remains in place. Run /fest orphans rollback ${creation.id} to finish marker/journal cleanup; this will not quarantine or recreate it.`,
+            });
+          }
+        }
+        const orphan = candidate
+          ? await rollbackFestivalCreation(creation, candidate).catch(() => ({ receipt: creation, festivalDir: candidate }))
+          : { receipt: creation };
         return textResult({
           kind: "plan_failed",
           error: String(error),
-          ...(planMarked ? { festivalDir, hint: "The validated festival and approved plan lifecycle are preserved; inspect the creation journal before retrying." } : {}),
-          ...(orphan ? { orphanedCreation: orphan, hint: "The failed creation could not be safely removed. It remains marked and must be reviewed with /fest orphans; it was not selected." } : {}),
-          ...(!orphan && !planMarked ? { cleanup: "The partial festival directory was removed when created; the approved plan remains available to retry." } : {}),
+          ...(orphan ? { orphanedCreation: orphan, hint: "The target and transaction journal remain because safe rollback could not be proven. Review /fest orphans before retrying." } : {}),
+          ...(!orphan ? { cleanup: "The partial festival was moved to reversible .ompfest/orphans. Run /fest orphans to inspect its restore ID; the approved plan remains available to retry." } : {}),
         });
       }
     },
@@ -1191,38 +1215,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_parallel",
     label: "Fest Parallel",
     description:
-      "List candidate pending tasks grouped by sequence. Different sequences are not automatically parallel-safe: check dependency eligibility and file overlap through fest_supervisor before bounded subagent dispatch.",
+      "Deprecated candidate listing. Use fest_supervisor action:'queue' for dependency-eligible tasks, reservations and file-overlap filtering; this tool never supplies dispatch candidates.",
     parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
-    async execute(_id: string, params: { festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
-      const r = await dirOrResult(pi, deps, ctx, params.festival);
-      if ("result" in r) {
-        return r.result;
-      }
-      const tasks = await deps.detect.pendingTasks(r.dir);
-      const visual = await validateVisualReferences(r.dir, deps.detect);
-      if (visual.issues.length > 0) {
-        return textResult({ kind: "parallel_blocked", issues: visual.issues });
-      }
-      const pending = tasks.filter((t) => !t.done);
-      const groups = new Map<string, string[]>();
-      const laneReferences = new Map<string, Awaited<ReturnType<typeof referencesForTask>>>();
-      for (const task of pending) {
-        const list = groups.get(task.sequence) ?? [];
-        list.push(task.path);
-        groups.set(task.sequence, list);
-        const doc = await readFile(join(r.dir, task.path), "utf8");
-        const refs = await referencesForTask(r.dir, doc);
-        const existing = laneReferences.get(task.sequence) ?? [];
-        laneReferences.set(task.sequence, [...existing, ...refs.filter((ref) => !existing.some((item) => item.page === ref.page))]);
-      }
+    execute() {
       return textResult({
-        hint: SUPERVISOR_POLICY,
-        lanes: [...groups.entries()].map(([sequence, files]) => ({
-          sequence, tasks: files, visualReferences: laneReferences.get(sequence) ?? [],
-          browserVerification: BROWSER_VERIFICATION_POLICY,
-        })),
-        pendingCount: pending.length,
-        totalCount: tasks.length,
+        kind: "parallel_queue_deprecated",
+        nextAction: "Call fest_supervisor action:'queue' (or action:'portfolio') and dispatch only the supervisor-filtered candidates.",
       });
     },
   });

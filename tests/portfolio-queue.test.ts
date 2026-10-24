@@ -63,4 +63,29 @@ describe("portfolio queue", () => {
     const isolated = buildPortfolioQueue({ festivals: [festival("a", ["a1"], [{ task: "bad", reason: "failure" }]), festival("b", ["b1"])], assignments: [{ festival: "a", task: "a1", status: "failed" }], paused: false });
     expect(isolated.candidates.map((c) => `${c.festival}:${c.task}`)).toEqual(["a:a1", "b:b1"]);
   });
+  it("holds overlapping candidate file sets out of the launch list", () => {
+    const a = candidate("a", "first");
+    const b = candidate("b", "second");
+    a.workingDir = b.workingDir = "/shared";
+    a.files = ["src/lib"];
+    b.files = ["src/lib/child.ts"];
+    const result = buildPortfolioQueue({
+      festivals: [
+        { festival: "a", candidates: [a], waiting: [] },
+        { festival: "b", candidates: [b], waiting: [] },
+      ],
+      assignments: [], paused: false, workerLimit: 2,
+    });
+    expect(result.candidates.map((row) => `${row.festival}:${row.task}`)).toEqual(["a:first"]);
+    expect(result.waiting.some((row) => row.festival === "b" && row.task === "second" && row.reason.includes("overlaps a/first"))).toBe(true);
+    const rotated = buildPortfolioQueue({
+      festivals: [
+        { festival: "a", candidates: [a], waiting: [] },
+        { festival: "b", candidates: [b], waiting: [] },
+      ],
+      assignments: [], paused: false, workerLimit: 2, lastFestival: "a",
+    });
+    expect(rotated.candidates.map((row) => `${row.festival}:${row.task}`)).toEqual(["b:second"]);
+    expect(rotated.waiting[0]?.reason).toContain("overlaps b/second");
+  });
 });

@@ -14,13 +14,26 @@ export async function findPlanningConflicts(root: string, name: string, workingD
   for (const entry of entries.filter((file) => file.endsWith(".STRUCTURE.md.json") && file !== `${name}.STRUCTURE.md.json`)) {
     const statusPath = join(plans, `${entry.slice(0, -".json".length)}.status.json`);
     const statusInfo = await lstat(statusPath).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; });
-    if (statusInfo && statusInfo.isFile() && !statusInfo.isSymbolicLink()) {
-      try { const status: unknown = JSON.parse(await readFile(statusPath, "utf8")); if (status && typeof status === "object" && "state" in status && status.state === "scaffolded") continue; } catch { /* Corrupt markers do not suppress an overlap. */ }
+    let statusState: unknown;
+    if (statusInfo) {
+      if (!statusInfo.isFile() || statusInfo.isSymbolicLink()) {
+        // Unsafe status artifacts fail closed: the corresponding plan remains live.
+      } else {
+        try {
+          const status: unknown = JSON.parse(await readFile(statusPath, "utf8"));
+          if (status && typeof status === "object" && !Array.isArray(status) && "state" in status && "planRevision" in status && typeof status.planRevision === "string" && status.planRevision.length > 0) {
+            statusState = status.state;
+          }
+        } catch { /* Corrupt status artifacts do not suppress an overlap. */ }
+      }
     }
-    const artifact: unknown = JSON.parse(await readFile(join(plans, entry), "utf8"));
-    if (!artifact || typeof artifact !== "object" || !("name" in artifact) || typeof artifact.name !== "string" || !("workingDir" in artifact) || typeof artifact.workingDir !== "string" || !("spec" in artifact)) continue;
-    const saved = artifact as { name: string; workingDir: string; spec: StructuredPlan };
-    if (!Array.isArray(saved.spec.phases)) continue;
+    if (statusState === "rejected" || statusState === "cancelled" || statusState === "scaffolded") continue;
+    const artifactValue: unknown = JSON.parse(await readFile(join(plans, entry), "utf8"));
+    if (!artifactValue || typeof artifactValue !== "object" || Array.isArray(artifactValue) || !("name" in artifactValue) || typeof artifactValue.name !== "string" || !("workingDir" in artifactValue) || typeof artifactValue.workingDir !== "string" || !("spec" in artifactValue)) {
+      throw new Error(`Planning artifact is invalid or corrupted: ${entry}`);
+    }
+    const saved = artifactValue as { name: string; workingDir: string; spec: StructuredPlan };
+    if (typeof saved.spec !== "object" || !Array.isArray(saved.spec.phases)) throw new Error(`Planning artifact is invalid or corrupted: ${entry}`);
     const otherProject = await canonicalProjectDirectory(resolve(root, saved.workingDir)).catch(() => undefined);
     if (!otherProject || otherProject !== project) continue;
     const otherFiles = files(saved.spec), intersection = proposedFiles.filter((path) => otherFiles.some((other) => overlaps(path, other)));

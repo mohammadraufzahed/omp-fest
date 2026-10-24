@@ -12,6 +12,19 @@ function inside(root: string, path: string): boolean {
 }
 
 
+function assertStructuredInput(value: unknown): asserts value is StructuredPlan {
+  const object = (item: unknown): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item);
+  const array = (item: unknown): item is unknown[] => Array.isArray(item);
+  if (!object(value) || typeof value.goal !== "string" || !array(value.scope) || !array(value.exclusions)
+    || !array(value.acceptance) || !array(value.questions) || !array(value.inspection) || !array(value.phases)
+    || !value.phases.every((phase) => object(phase) && array(phase.sequences)
+      && phase.sequences.every((sequence) => object(sequence) && array(sequence.tasks)
+        && sequence.tasks.every((task) => object(task) && array(task.dependsOn) && array(task.implements)
+          && array(task.verifies) && array(task.files) && array(task.verification))))) {
+    throw new Error("Plan input must be a complete structured plan with valid phase, sequence, and task arrays");
+  }
+}
+
 function slug(value: string, fallback: string): string {
   const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const result = normalized || fallback;
@@ -65,6 +78,7 @@ function projectRelative(root: string, value: string, warnings: string[], label:
 
 /** Repairs common model formatting mistakes without inventing repository facts. */
 export function normalizePlanInput(input: StructuredPlan, projectRoot: string): PlanInputNormalization {
+  assertStructuredInput(input);
   const warnings: string[] = [];
   const phaseIds = new Set<string>();
   const sequenceIds = new Set<string>();

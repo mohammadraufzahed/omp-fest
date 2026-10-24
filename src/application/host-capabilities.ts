@@ -6,12 +6,22 @@ export interface HostToolMetadata {
   name: string;
   description?: string;
   parameters?: unknown;
-  sourceInfo?: { source: string; path: string; scope?: string; origin?: string };
+  sourceInfo?: { source?: string; path?: string; scope?: string; origin?: string; type?: string; name?: string };
 }
 export interface FlowUi {
-  input?(title: string, placeholder?: string): Promise<string | undefined>;
-  select?(title: string, options: (string | { label: string; description?: string })[]): Promise<string | undefined>;
-  confirm?(title: string, message: string): Promise<boolean>;
+  input?(title: string, placeholder?: string, options?: Record<string, unknown>): Promise<string | undefined>;
+  select?(title: string, options: (string | { label: string; description?: string })[], opts?: Record<string, unknown>): Promise<string | undefined>;
+  confirm?(title: string, message: string, options?: Record<string, unknown>): Promise<boolean>;
+  notify?(message: string, type?: string): void;
+  setWidget?(key: string, content: string[] | undefined, options?: { placement?: string }): void;
+  onTerminalInput?(handler: (data: string) => { consume?: boolean; data?: string } | undefined): () => void;
+}
+export function inspectFlowUi(ui?: FlowUi) {
+  return {
+    input: typeof ui?.input === "function",
+    confirm: typeof ui?.confirm === "function",
+    maskedInput: typeof ui?.onTerminalInput === "function" && typeof ui.setWidget === "function",
+  };
 }
 export interface BrowserCheckpoint {
   origin: string;

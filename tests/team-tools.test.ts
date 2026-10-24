@@ -28,7 +28,7 @@ describe("team assignments in the durable portfolio ledger", () => {
     const second = await claimFestivalTask(root, festival, "collaborator", "two.md", join(root, "project"));
     await expect(reservePortfolioAssignment(root, { id: second.id, festival: "demo-F1", task: second.task, sessionId: second.sessionId, worker: second.sessionId, workingDir: second.workingDir, files: ["two.ts"] })).rejects.toThrow("Portfolio worker limit reached");
     await releaseFestivalTask(root, festival, "collaborator", second.id, "Portfolio limit reached.");
-    expect((await readFestivalTeam(root, festival))?.assignments.map((item) => item.id)).toEqual([first.id]);
+    expect((await readFestivalTeam(root, festival))?.assignments.map((item) => [item.id, item.status])).toEqual([[first.id, "claimed"], [second.id, "released"]]);
     expect((await readPortfolioState(root)).assignments.map((item) => item.id)).toEqual([first.id]);
   });
 

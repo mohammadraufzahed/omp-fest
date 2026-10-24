@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { approvedPlan } from "../src/application/plan-artifacts.js";
 import { createPlanDraft, listPlanDrafts, previewPlanDraft, readPlanDraft, updatePlanDraft, type PlanDraftFields } from "../src/application/plan-drafts.js";
 
 const roots: string[] = [];
@@ -52,10 +53,14 @@ describe("persisted plan drafts", () => {
     const preview = await previewPlanDraft(root, draft.draftId, draft.revision);
     expect(preview.counts).toEqual({ phases: 1, sequences: 1, tasks: 1 });
     expect(preview.draftRevision).toBe(draft.revision);
-    expect(await readFile(preview.plan, "utf8")).toContain("Make the feature usable");
-    expect(await readFile(`${preview.plan}.json`, "utf8")).toContain('"workingDir": "projects/app"');
+    expect(preview.previewState).toBe("saved_preview");
+    expect(await readFile(`${preview.plan}.status.json`, "utf8")).toContain('"state":"saved_preview"');
+    expect(preview.previewMessage).toBe("Saved approval preview; no festival scaffold has been created.");
+    expect(await readFile(preview.previewFile, "utf8")).toContain("# Approval Preview");
+    const savedPreview = await readFile(preview.plan, "utf8");
     const updated = await updatePlanDraft(root, draft.draftId, draft.revision, { goal: "Updated goal" });
     await expect(previewPlanDraft(root, updated.draftId, draft.revision)).rejects.toThrow("Stale draft revision");
+    expect(await readFile(preview.plan, "utf8")).toBe(savedPreview);
   });
 
   it("supports incremental goal edits on stored structured specs", async () => {
@@ -151,5 +156,20 @@ describe("persisted plan drafts", () => {
     const { root, fields } = await fixture();
     const draft = await createPlanDraft(root, { ...fields, workingDir: join(root, "projects", "app") });
     expect(draft.fields.workingDir).toBe("projects/app");
+  });
+  it("fails closed when a persisted draft is malformed", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, fields);
+    await writeFile(join(root, ".ompfest", "plans", `${draft.draftId}.draft.json`), "{broken");
+    await expect(readPlanDraft(root, draft.draftId)).rejects.toThrow("Invalid persisted plan draft");
+  });
+  it("rejects a corrupted saved artifact instead of accepting partial JSON", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, fields);
+    const preview = await previewPlanDraft(root, draft.draftId, draft.revision);
+    await writeFile(`${preview.plan}.json`, "{broken");
+    await expect(approvedPlan(root, preview.plan, fields.name, preview.planRevision)).rejects.toThrow(
+      "Saved plan artifact is invalid or corrupted; create a fresh preview",
+    );
   });
 });

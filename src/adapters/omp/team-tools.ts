@@ -82,7 +82,7 @@ export function registerFestivalTeamTools(pi: PiLike, deps: ToolDeps, supervisor
         }
         if (params.action === "queue") {
           const { queue } = await supervisorQueue(deps, supervisor, sid, ctx.cwd, basename(dir));
-          return output({ kind: "team_queue", festival: basename(dir), queue, assignments: team.assignments.filter((assignment) => assignment.status !== "accepted") });
+          return output({ kind: "team_queue", festival: basename(dir), queue, assignments: team.assignments.filter((assignment) => assignment.status !== "accepted" && assignment.status !== "released") });
         }
         if (params.action === "claim") {
           if (!params.task) throw new Error("Claim requires the exact task path from the team queue.");

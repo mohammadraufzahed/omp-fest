@@ -1,7 +1,8 @@
 import { deleteBrowserFlow, listBrowserFlows } from "../../application/browser-flows.js";
 import { deleteCredential } from "../../application/secret-store.js";
+import type { FlowUi } from "../../application/host-capabilities.js";
 import type { CampDetect } from "../../ports.js";
-interface Ui { select?(title: string, options: (string | { label: string; description?: string })[], opts?: Record<string, unknown>): Promise<string | undefined>; confirm?(title: string, message: string): Promise<boolean>; notify(message: string, type?: string): void }
+type Ui = FlowUi & { notify(message: string, type?: string): void };
 interface Ctx { cwd: string; ui: Ui }
 interface Pi { registerCommand(name: string, options: { description?: string; handler(args: string, ctx: Ctx): Promise<void> | void }): void; sendUserMessage?(text: string, options?: { deliverAs?: "steer" | "followUp" | "aside" }): void }
 export function flowCommands(pi: Pi, detect: CampDetect) {
