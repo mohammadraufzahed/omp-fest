@@ -12,6 +12,7 @@
  * against upstream: before_agent_start.message, tool_call/tool_result
  * additionalContext, before_subagent_spawn {note, block, reason, model}.
  */
+import { randomUUID } from "node:crypto";
 import { basename, isAbsolute, resolve, sep } from "node:path";
 
 import { CachedDetect } from "./src/application/detect-cache.js";
@@ -35,6 +36,7 @@ import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 import { planInterviewKickoff } from "./src/domain/orientation.js";
 import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
 import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
+import { projectRootForFile, reserveProjectFiles, releaseProjectFiles } from "./src/application/project-conflicts.js";
 
 interface ExtensionContextLike {
   cwd: string;
@@ -61,15 +63,15 @@ interface BeforeAgentStartResult {
   message?: CustomMessagePayload;
 }
 
-interface ToolCallEvent {
-  toolName?: string;
-  input?: Record<string, unknown>;
-}
-
 interface InputEventShape {
   text: string;
   images?: unknown[];
   source?: string;
+}
+
+interface ToolCallEvent {
+  toolName?: string;
+  input?: Record<string, unknown>;
 }
 
 interface ToolResultEventShape extends ToolCallEvent {
@@ -143,13 +145,38 @@ function targetPaths(input: Record<string, unknown> | undefined, cwd: string): s
   if (Array.isArray(input.paths)) {
     raw.push(...input.paths.filter((p): p is string => typeof p === "string"));
   }
+  if (typeof input.filePath === "string") raw.push(input.filePath);
   return raw
     .filter((p): p is string => typeof p === "string" && p.length > 0)
     .map((p) => (isAbsolute(p) ? p : resolve(cwd, p)));
 }
+function writeTool(toolName: string): boolean {
+  return ["write", "edit", "patch", "apply_patch", "write_file", "edit_file", "multiedit"].includes(toolName);
+}
+function writeCallKey(toolName: string, input: Record<string, unknown> | undefined, sessionId: string): string {
+  return JSON.stringify([sessionId, toolName, input ?? {}]);
+}
+function shellWritesFiles(command: string): boolean {
+  return /\b(?:tee|cp|mv|rm|touch|mkdir|install|truncate|apply_patch)\b/.test(command) ||
+    /\b(?:sed|perl)\b[^;\n]*\s-i(?:\s|$)/.test(command) ||
+    /\bgit\s+apply\b/.test(command) ||
+    /(?:^|[^<])>{1,2}\s*(?:\/|\.{0,2}\/|[A-Za-z0-9_.-])/.test(command) ||
+    /\b(?:python|node|ruby|php)\s+(?:-c|-e|-r)\b/.test(command);
+}
+
+
 
 export default function ompFest(pi: ExtensionApiLike): void {
-  pi.setLabel("fest.build");
+  const releaseWriteLocks = async (locks: { projectDir: string; sessionId: string; assignmentId: string }[]) => {
+    for (const lock of locks) {
+      try {
+        const result = await releaseProjectFiles(lock.projectDir, lock.sessionId, lock.assignmentId);
+        if (result.kind === "busy") pi.logger?.warn(`omp-fest could not release write lock ${lock.assignmentId}; inspect /fest conflicts.`);
+      } catch (error) {
+        pi.logger?.warn(`omp-fest could not release write lock ${lock.assignmentId}: ${String(error)}`);
+      }
+    }
+  };
 
   const exec = new NodeExecRunner();
   const fest = new FestCliAdapter(exec);
@@ -157,6 +184,8 @@ export default function ompFest(pi: ExtensionApiLike): void {
   const detect = new CachedDetect(new CampFsDetect());
   const tracker = new LoopTracker();
   const supervisor = new Supervisor();
+
+  const writeLocks = new Map<string, { projectDir: string; sessionId: string; assignmentId: string }[]>();
 
   const cwd = process.cwd();
   const deps = { fest, camp, detect, tracker, supervisor, config: () => loadConfig(cwd), host: { getAllTools: pi.getAllTools?.bind(pi), getActiveTools: pi.getActiveTools?.bind(pi) } };
@@ -310,8 +339,49 @@ export default function ompFest(pi: ExtensionApiLike): void {
       if (!location.campRoot) {
         return undefined;
       }
-      const command =
-        typeof event.input?.command === "string" ? event.input.command : "";
+      if (writeTool(toolName)) {
+        const sid = sessionIdOf(ctx);
+        const campRoot = location.campRoot;
+        const administrativeRoot = resolve(campRoot, ".ompfest");
+        const targets = targetPaths(event.input, ctx.cwd).filter((path) =>
+          !path.includes(`${sep}festivals${sep}`) && !path.startsWith(`${administrativeRoot}${sep}`),
+        );
+        if (targets.length === 0) return { block: true, reason: "omp-fest cannot lock this write because its target path is missing. Use a native write/edit tool with an explicit file path." };
+        const grouped = new Map<string, string[]>();
+        for (const target of targets) {
+          const projectDir = await projectRootForFile(target);
+          if (!projectDir) return { block: true, reason: `omp-fest cannot safely lock ${target}: no Git checkout owns this file.` };
+          grouped.set(projectDir, [...(grouped.get(projectDir) ?? []), target]);
+        }
+        const acquired: { projectDir: string; sessionId: string; assignmentId: string }[] = [];
+        try {
+          const festival = await claimedFestivalDir(tracker, detect, sid, campRoot);
+          for (const [projectDir, files] of grouped) {
+            const assignmentId = randomUUID();
+            const result = await reserveProjectFiles(projectDir, {
+              sessionId: sid, assignmentId, files,
+              ...(festival ? { festival: basename(festival) } : {}),
+              ...(tracker.openTaskPathFor(sid) ? { task: tracker.openTaskPathFor(sid) } : {}),
+              worker: ctx.agent?.name ?? ctx.agent?.id ?? toolName,
+            });
+            if (result.kind !== "reserved") {
+              const owners = result.kind === "conflict"
+                ? result.conflicts.map((row) => `${row.worker ?? row.assignmentId} (${row.files.join(", ") || "whole checkout"})`).join("; ")
+                : "write-lock registry busy";
+              throw new Error(`Write lock unavailable for ${files.join(", ")}: ${owners}. Retry after the active write finishes.`);
+            }
+            acquired.push({ projectDir, sessionId: sid, assignmentId });
+          }
+          writeLocks.set(writeCallKey(toolName, event.input, sid), acquired);
+        } catch (error) {
+          await releaseWriteLocks(acquired);
+          return { block: true, reason: String(error) };
+        }
+      }
+      const command = typeof event.input?.command === "string" ? event.input.command : "";
+      if (toolName === "bash" && shellWritesFiles(command)) {
+        return { block: true, reason: "omp-fest blocks shell-based project file mutations because it cannot acquire exact per-file write locks. Use the native write/edit tool with explicit target paths." };
+      }
       if (
         toolName === "bash" &&
         /\b(?:fest|camp)\s+[a-z]/i.test(command) &&
@@ -352,6 +422,13 @@ export default function ompFest(pi: ExtensionApiLike): void {
         pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sessionIdOf(ctx)));
       }
     }
+    const sid = sessionIdOf(ctx);
+    const writeKey = writeCallKey(event.toolName ?? "", event.input, sid);
+    const pendingLocks = writeLocks.get(writeKey);
+    if (pendingLocks) {
+      writeLocks.delete(writeKey);
+      await releaseWriteLocks(pendingLocks);
+    }
     if (event.isError) {
       return undefined;
     }
@@ -363,7 +440,6 @@ export default function ompFest(pi: ExtensionApiLike): void {
       };
     }
     const location = await detect.locate(ctx.cwd);
-    const sid = sessionIdOf(ctx);
     const festivalDir =
       location.festivalDir ??
       (location.campRoot ? await claimedFestivalDir(tracker, detect, sid, location.campRoot) : undefined) ??
@@ -404,7 +480,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return { block: true, reason: "Festival worker dispatch is paused. Use /fest dispatch to resume." };
     }
     return {
-      note: "omp-fest worker: implement only the parent's explicit assignment; return files changed, actual verification results and blockers through the native subagent result. Do not select/claim festivals, run fest_next, complete festival tasks, commit, approve gates, change scope or transfer ownership. The parent supervisor alone reviews and records completion. Follow the browser-verification policy in the task contract.",
+      note: "omp-fest worker: implement only the parent's explicit assignment; use native path-bearing write/edit tools for all project changes so exact per-file locks are acquired. Shell file mutations are blocked. Return files changed, actual verification results and blockers through the native subagent result. Do not select/claim festivals, run fest_next, complete festival tasks, commit, approve gates, change scope or transfer ownership. The parent supervisor alone reviews and records completion. Follow the browser-verification policy in the task contract.",
     };
   });
 

@@ -70,7 +70,7 @@ export const RECOVERY_PLAYBOOK = [
   "- kind 'idle': at camp root with no festival — call camp_status to list festivals; for NEW work, start the plan workflow instead of writing your own todo list",
   "- kind 'blocked': fix the listed files/markers, then call fest_next again",
   "- kind 'gate_step': gather evidence and call fest_gate_submit — it asks the human directly; never approve",
-  "- kind 'task': work in the returned working_dir only after fest_supervisor queue confirms the current task is eligible; if it reports a project reservation conflict, show its owner details and tell the human to run /fest conflicts reclaim only after verifying the worker is stopped. Stop before edits/dispatch; never complete or commit a blocked task.",
+  "- kind 'task': work in the returned working_dir only after fest_supervisor queue confirms eligibility; overlapping tasks can proceed because writes lock exact files only while native write/edit tools execute. If queue reports a live lock, refresh after it clears; reclaim only an orphaned lock after confirming the writer stopped. Never complete or commit while the current task is blocked.",
   "- never run bare `git commit` in a linked project — use fest_commit",
 ].join("\n");
 

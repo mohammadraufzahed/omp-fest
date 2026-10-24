@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Supervisor, SUPERVISOR_ENTRY } from "../src/application/supervisor.js";
 import { supervisorCommands } from "../src/adapters/omp/supervisor-commands.js";
-import { dispatchQueue, filesOverlap, type DispatchTask } from "../src/application/supervisor-queue.js";
+import { dispatchQueue, type DispatchTask } from "../src/application/supervisor-queue.js";
 import type { NextUnit } from "../src/domain/types.js";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -38,14 +38,13 @@ describe("festival supervisor", () => {
     expect(supervisor.snapshot("s", "expired")).toMatchObject({ full: true, reset: true });
   });
 
-  it("bounds independent work, prevents overlap and preserves running work on pause", () => {
+  it("bounds independent work, permits overlapping assignments and preserves running work on pause", () => {
     const supervisor = new Supervisor();
     const row = supervisor.assign("s", "festival", "a.md", "A", ["src/a"]);
     supervisor.update("s", row.id, "running", "");
-    expect(() => supervisor.assign("s", "festival", "b.md", "B", ["src/a/child.ts"])).toThrow("overlaps");
-    expect(() => supervisor.assign("s", "festival", "b.md", "B", [])).toThrow("unknown");
-    supervisor.assign("s", "festival", "b.md", "B", ["src/b.ts"]);
-    supervisor.assign("s", "festival", "c.md", "C", ["src/c.ts"]);
+    const overlapping = supervisor.assign("s", "festival", "b.md", "B", ["src/a/child.ts"]);
+    expect(supervisor.assign("s", "festival", "c.md", "C", [])).toMatchObject({ status: "assigned" });
+    expect(overlapping.status).toBe("assigned");
     expect(() => supervisor.assign("s", "festival", "d.md", "D", ["src/d.ts"])).toThrow("Three assignments");
     supervisor.pause("s", true);
     expect(supervisor.state("s").workers[0]?.status).toBe("running");
@@ -102,7 +101,7 @@ describe("festival supervisor", () => {
     expect(dispatchQueue({ ...input, paused: true }).candidates).toEqual([]);
   });
 
-  it("bounds queued candidates and serializes overlapping or unknown boundaries", () => {
+  it("bounds queued candidates and allows overlapping or unknown file boundaries", () => {
     const tasks = ["a", "b", "c", "d"].map((name, index) => ({
       path: `001_BUILD/0${index + 1}_${name}/01_task.md`, sequence: `001_BUILD/0${index + 1}_${name}`,
       done: false, document: `Task ID: ${name}\nDependencies: none\n- src/${name}.ts (existing)`,
@@ -110,9 +109,7 @@ describe("festival supervisor", () => {
     const input = { festivalDir: "/festival", festival: "festival", current: { kind: "task" as const, path: tasks[0]!.path, doc: "", goals: [] }, tasks, workers: [], paused: false };
     expect(dispatchQueue(input).candidates).toHaveLength(3);
     tasks[1]!.document = "Dependencies: none\n- src (existing)";
-    expect(dispatchQueue(input).candidates.map((row) => row.task)).not.toContain(tasks[1]!.path);
-    expect(filesOverlap(["src/./a.ts"], ["src/a.ts"])).toBe(true);
-    expect(filesOverlap([], ["src/a.ts"])).toBe(true);
+    expect(dispatchQueue(input).candidates.map((row) => row.task)).toContain(tasks[1]!.path);
     const supervisor = new Supervisor();
     const row = supervisor.assign("s", "festival", tasks[0]!.path, "A", ["src/a.ts"]);
     supervisor.update("s", row.id, "running", "");
@@ -191,7 +188,7 @@ describe("festival supervisor", () => {
     expect(sendUserMessage).toHaveBeenCalledOnce();
   });
 
-  it("persists compact native worker submissions, returns the next queue and releases accepted boundaries", async () => {
+  it("persists compact native worker submissions without reserving files for task lifetime", async () => {
     const root = await mkdtemp(join(tmpdir(), "fest-supervisor-"));
     try {
       const festival = join(root, "festival"), project = join(root, "project");
@@ -228,7 +225,7 @@ describe("festival supervisor", () => {
       await call({ action: "assign", task, worker: "A" });
       const assignment = supervisor.state("s").workers[0]!;
       expect(assignment).toMatchObject({ worker: "A", status: "assigned" });
-      expect(await listProjectReservations(project)).toHaveLength(1);
+      expect(await listProjectReservations(project)).toEqual([]);
       expect(await call({ action: "running", assignment: assignment.id })).toMatchObject({ kind: "supervisor_blocked" });
       expect(supervisor.state("s").workers[0]?.status).toBe("assigned");
       await call({ action: "running", assignment: assignment.id, runtimeId: "native-a" });
@@ -276,7 +273,7 @@ describe("festival supervisor", () => {
       const blocked = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
       const waiting = blocked.queue.waiting.find((item) => item.task === task);
       expect(waiting?.reason).toContain("/fest conflicts reclaim");
-      expect(waiting?.reservations).toEqual([expect.objectContaining({
+      expect(waiting?.writeLocks).toEqual([expect.objectContaining({
         sessionId: "session-owner", assignmentId: "other-festival-worker", worker: "Worker",
         festival: "another-festival", task: "another-task", files: ["src/a.php"],
       })]);

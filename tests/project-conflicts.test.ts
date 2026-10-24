@@ -37,35 +37,24 @@ describe("project reservations", () => {
     expect(conflict?.conflicts).toEqual(persisted);
   });
 
-  it("holds parent directories against descendants in both directions, not similarly named siblings", async () => {
+  it("locks only exact files while candidate directory scopes still detect overlap", async () => {
     const project = await fixture();
-    const first = { sessionId: "session-a", assignmentId: "a", files: ["src/domain"] };
-    expect((await reserveProjectFiles(project, first)).kind).toBe("reserved");
-    expect((await reserveProjectFiles(project, { sessionId: "session-b", assignmentId: "b", files: ["src/domain/model.ts"] })).kind).toBe("conflict");
-    expect((await reserveProjectFiles(project, { sessionId: "session-b", assignmentId: "b", files: ["src"] })).kind).toBe("conflict");
-    expect((await reserveProjectFiles(project, { sessionId: "session-b", assignmentId: "b", files: ["src/domain-model.ts"] })).kind).toBe("reserved");
-    expect((await reserveProjectFiles(project, { sessionId: "session-c", assignmentId: "c", files: ["tests/domain.test.ts"] })).kind).toBe("reserved");
+    await mkdir(join(project, "src/domain"), { recursive: true });
+    await expect(reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "empty", files: [] })).rejects.toThrow("exact target file paths");
+    await expect(reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "directory", files: ["src/domain"] })).rejects.toThrow("not a directory");
+    expect((await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "file", files: ["src/domain/model.ts"] })).kind).toBe("reserved");
+    expect((await checkProjectConflicts(project, ["src/domain"])).kind).toBe("conflict");
+    expect((await checkProjectConflicts(project, ["src/domain-model.ts"])).kind).toBe("clear");
   });
 
-  it("serializes an unknown boundary against all work in either order", async () => {
-    const project = await fixture();
-    await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: [] });
-    expect((await checkProjectConflicts(project, ["unrelated.ts"])).kind).toBe("conflict");
-    expect((await reserveProjectFiles(project, { sessionId: "session-b", assignmentId: "b", files: ["unrelated.ts"] })).kind).toBe("conflict");
-    await releaseProjectFiles(project, "session-a", "a");
-    await reserveProjectFiles(project, { sessionId: "session-b", assignmentId: "b", files: ["unrelated.ts"] });
-    expect((await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: [] })).kind).toBe("conflict");
-  });
-
-  it("normalizes paths and supports explicit root boundaries", async () => {
+  it("normalizes paths and checks broad candidate scopes against exact file locks", async () => {
     const project = await fixture();
     await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: ["./src/../src/file.ts", join(project, "src/file.ts")] });
     expect((await listProjectReservations(project))[0]?.files).toEqual(["src/file.ts"]);
     expect((await checkProjectConflicts(project, ["."])).kind).toBe("conflict");
-    await releaseProjectFiles(project, "session-a", "a");
-    await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: ["."] });
-    expect((await checkProjectConflicts(project, ["anything/new.ts"])).kind).toBe("conflict");
+    await expect(reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "directory", files: ["."] })).rejects.toThrow("exact target file paths");
   });
+
 
   it("shares a registry through canonical checkout aliases and canonical file symlinks", async () => {
     const root = await fixture();
@@ -140,7 +129,7 @@ describe("project reservations", () => {
     const project = await fixture();
     const path = join(project, ".omp-fest-reservations.json");
     await writeFile(path, text);
-    await expect(reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: [] })).rejects.toThrow();
+    await expect(reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: ["src/file.ts"] })).rejects.toThrow();
     await expect(listProjectReservations(project)).rejects.toThrow();
     await expect(releaseProjectFiles(project, "session-a", "a")).rejects.toThrow();
     expect(await readFile(path, "utf8")).toBe(text);
@@ -149,7 +138,7 @@ describe("project reservations", () => {
   it("does not turn unreadable registry records into an empty checkout", async () => {
     const project = await fixture();
     await mkdir(join(project, ".omp-fest-reservations.json"));
-    await expect(reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: [] })).rejects.toThrow();
+    await expect(reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: ["src/file.ts"] })).rejects.toThrow();
   });
 
   it("never deletes a preexisting lock to infer stale ownership", async () => {
@@ -157,7 +146,7 @@ describe("project reservations", () => {
     const lock = join(project, ".omp-fest-reservations.lock");
     await mkdir(lock);
     await writeFile(join(lock, "owner"), "another process");
-    expect(await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: [] })).toEqual({ kind: "busy" });
+    expect(await reserveProjectFiles(project, { sessionId: "session-a", assignmentId: "a", files: ["src/file.ts"] })).toEqual({ kind: "busy" });
     expect((await stat(lock)).isDirectory()).toBe(true);
     expect(await readFile(join(lock, "owner"), "utf8")).toBe("another process");
   });

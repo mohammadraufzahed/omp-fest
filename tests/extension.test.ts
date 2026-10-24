@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import ompFest from "../index.js";
+import { listProjectReservations } from "../src/application/project-conflicts.js";
 
 interface AutocompleteItem {
   value: string;
@@ -365,6 +366,39 @@ it("tool_result hook warns on untracked edits and dedupes per path", async () =>
   expect(await hook(failed, ctx)).toBeUndefined();
 });
 
+it("locks exact files only during native write tool execution", async () => {
+  const root = await makeCamp();
+  const project = join(root, "projects", "app");
+  const target = join(project, "src", "feature.ts");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await mkdir(join(project, "src"), { recursive: true });
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const before = handlers.get("tool_call") as (event: unknown, ctx: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>;
+  const after = handlers.get("tool_result") as (event: unknown, ctx: unknown) => Promise<unknown>;
+  let session = "writer-a";
+  const context = { ...ctx, sessionManager: { getSessionId: () => session } };
+  const write = { toolName: "edit", input: { path: target } };
+
+  expect(await before(write, context)).toBeUndefined();
+  expect(await listProjectReservations(project)).toHaveLength(1);
+  session = "writer-b";
+  const different = { toolName: "edit", input: { path: join(project, "src", "other.ts") } };
+  expect(await before(different, context)).toBeUndefined();
+  await after({ ...different, isError: false }, context);
+  const blocked = await before(write, context);
+  expect(blocked?.block).toBe(true);
+  expect(blocked?.reason).toContain(target);
+
+  session = "writer-a";
+  await after({ ...write, isError: true }, context);
+  expect(await listProjectReservations(project)).toEqual([]);
+  session = "writer-b";
+  expect(await before(write, context)).toBeUndefined();
+  await after({ ...write, isError: false }, context);
+  expect(await listProjectReservations(project)).toEqual([]);
+});
+
 it("tool_call hook nudges raw fest bash + ad hoc todos inside a camp", async () => {
   const root = await makeCamp();
   const { pi, handlers, ctx } = mockPi(root);
@@ -372,11 +406,13 @@ it("tool_call hook nudges raw fest bash + ad hoc todos inside a camp", async () 
   const hook = handlers.get("tool_call") as (
     event: unknown,
     ctx: unknown,
-  ) => Promise<{ additionalContext?: string } | undefined>;
+  ) => Promise<{ block?: boolean; reason?: string; additionalContext?: string } | undefined>;
   const festBash = await hook({ toolName: "bash", input: { command: "fest next" } }, ctx);
   expect(festBash?.additionalContext).toContain("fest_*");
   const todo = await hook({ toolName: "todo", input: {} }, ctx);
   expect(todo?.additionalContext).toContain("festival plan");
+  const shellWrite = await hook({ toolName: "bash", input: { command: "cat > src/file.ts" } }, ctx);
+  expect(shellWrite?.block).toBe(true);
   const ownTool = await hook({ toolName: "fest_next", input: {} }, ctx);
   expect(ownTool).toBeUndefined();
 });

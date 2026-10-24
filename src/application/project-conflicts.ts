@@ -11,7 +11,7 @@ const LOCK_WAIT_MS = 25;
 export interface ProjectReservationRequest {
   sessionId: string;
   assignmentId: string;
-  /** Paths relative to the supplied working directory, or absolute. Empty reserves the entire checkout. */
+  /** Exact target file paths relative to the supplied working directory, or absolute. */
   files: string[];
   festival?: string;
   task?: string;
@@ -88,6 +88,22 @@ export async function canonicalProjectDirectory(projectDir: string): Promise<str
     candidate = parent;
   }
 }
+/** Find the Git checkout owning a write target; files outside a checkout have no shared lock registry. */
+export async function projectRootForFile(filePath: string): Promise<string | undefined> {
+  let candidate = dirname(resolve(filePath));
+  for (;;) {
+    try {
+      await lstat(join(candidate, ".git"));
+      return await canonicalProjectDirectory(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const parent = dirname(candidate);
+    if (parent === candidate) return undefined;
+    candidate = parent;
+  }
+}
+
 
 async function canonicalFiles(project: string, workingDir: string, files: string[]): Promise<string[]> {
   const canonical = new Set<string>();
@@ -201,12 +217,20 @@ async function withProjectLock<T>(project: string, action: () => Promise<T>): Pr
   return undefined;
 }
 
-/** Reserve before dispatch; records survive process exit until explicitly released by their session. */
+/** Acquire exact file locks immediately before an omp write tool executes. */
 export async function reserveProjectFiles(projectDir: string, request: ProjectReservationRequest): Promise<ProjectReservationResult> {
   validateIdentity(request);
   const project = await canonicalProjectDirectory(projectDir);
   const result = await withProjectLock(project, async (): Promise<ProjectReservationResult> => {
     const files = await canonicalFiles(project, await realpath(projectDir), request.files);
+    if (!files.length || files.some((file) => file === ".")) throw new Error("A write lock requires exact target file paths; whole-checkout and directory locks are not allowed.");
+    for (const file of files) {
+      const info = await stat(join(project, file)).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (info?.isDirectory()) throw new Error(`A write lock must target a file, not a directory: ${file}`);
+    }
     const registry = await readRegistry(project);
     const existing = registry.reservations.find((row) => sameIdentity(row, request));
     if (existing && (existing.files.length !== files.length || existing.files.some((file, index) => file !== files[index]))) {
@@ -228,7 +252,7 @@ export async function reserveProjectFiles(projectDir: string, request: ProjectRe
   return result ?? { kind: "busy" };
 }
 
-/** Release only this session's exact assignment, after acceptance or explicit settlement. */
+/** Release this exact write lock immediately after its native tool result. */
 export async function releaseProjectFiles(projectDir: string, sessionId: string, assignmentId: string): Promise<ProjectReleaseResult> {
   const identity = { sessionId, assignmentId };
   validateIdentity(identity);
@@ -243,11 +267,11 @@ export async function releaseProjectFiles(projectDir: string, sessionId: string,
   return result ?? { kind: "busy" };
 }
 
-/** Read durable reservations on resume/review; lock contention and corruption fail closed. */
+/** Read active and legacy lock records; contention and corruption fail closed. */
 export async function listProjectReservations(projectDir: string): Promise<ProjectReservation[]> {
   const project = await canonicalProjectDirectory(projectDir);
   const result = await withProjectLock(project, async () => (await readRegistry(project)).reservations);
-  if (!result) throw new Error("Project reservation registry is busy; retry without dispatching work.");
+  if (!result) throw new Error("Write-lock registry is busy; retry after the current file operation.");
   return result;
 }
 
@@ -266,14 +290,14 @@ export async function checkProjectConflicts(projectDir: string, files: string[],
 export async function reclaimProjectFiles(projectDir: string, expected: ProjectReservation): Promise<ProjectReleaseResult> {
   validateIdentity(expected);
   const project = await canonicalProjectDirectory(projectDir);
-  if (expected.projectDir !== project) throw new Error("Reservation belongs to another checkout.");
+  if (expected.projectDir !== project) throw new Error("Write lock belongs to another checkout.");
   const result = await withProjectLock(project, async () => {
     const registry = await readRegistry(project);
     const current = registry.reservations.find((row) => sameIdentity(row, expected));
     if (!current) return { kind: "released" as const, released: false };
     if (current.reservedAt !== expected.reservedAt || current.files.join("\0") !== expected.files.join("\0") ||
         current.festival !== expected.festival || current.task !== expected.task || current.worker !== expected.worker) {
-      throw new Error("Reservation changed since inspection; reread conflicts before reclaiming.");
+      throw new Error("Write lock changed since inspection; reread active writes before reclaiming.");
     }
     await writeRegistry(project, { ...registry, reservations: registry.reservations.filter((row) => !sameIdentity(row, expected)) });
     return { kind: "released" as const, released: true };

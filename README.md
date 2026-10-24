@@ -80,16 +80,17 @@ missing native subagent capability is reported as a blocker, not fabricated succ
 | `/fest review [assignment-id]` | Select a submission, inspect its report, then accept with independent verification evidence or request changes. Escape/cancel preserves pending review. |
 | `/fest resume` | Reconcile unfinished assignments without unpausing or relaunching uncertain workers. |
 | `/fest blockers` | Select a retained worker question, record an answer, and hand it to the supervisor for native delivery. |
-| `/fest conflicts` | Inspect durable project reservations and choose sequential work or request native worktree isolation. |
+| `/fest conflicts` | Inspect active per-file write locks and reclaim one only after its write process is confirmed stopped. |
 | `/fest finish` | Start the final integration/visual comparison pass; record actual results before the completion gate. |
 | `/fest draft [draftId]` | Inspect and incrementally edit persisted planning fields, then request native preview approval. |
 | `/fest release [patch\|minor\|major]` | Preview exact release files/version/checks and request explicit authorization before version, verification, fest commit, and push. |
 
-The supervisor uses `fest_supervisor queue` to find eligible tasks and refill
-available capacity after accepted submissions. Phase gates, completed dependencies,
-sequence ordering, file boundaries and project-wide reservations determine eligibility.
-The tool reports candidates; the agent launches them using native omp tools.
-It does not create a background process scheduler.
+The supervisor uses `fest_supervisor queue` to find dependency-eligible tasks and
+refill capacity after accepted submissions. Phase gates, completed dependencies
+and sequence ordering determine eligibility. Tasks may overlap; the checkout
+registry serializes writes to the same file rather than reserving task files for
+the worker's full lifetime. The tool reports candidates; the agent launches them
+using native omp tools. It does not create a background process scheduler.
 
 Reported workflow status and observed native lifecycle are distinct. Structured
 native subagent results with matching assignment/runtime identity can record
@@ -98,18 +99,20 @@ unverified; resume never interprets silence as worker exit or permission to rela
 Assignments, blockers, answers, runtime observations and report links persist in
 the session transcript. Native completion never implies supervisor acceptance.
 
-At most three assignments may be outstanding. File reservations are durable and
-atomic across supervisor sessions in the same canonical checkout, including nested
-project folders. Unknown boundaries reserve the checkout; overlaps wait for explicit
-settlement. Queue blockers include the owning session, worker, festival, task, and
-reserved files. If the worker is confirmed stopped, `/fest conflicts reclaim` shows
-the exact reservation and asks for native confirmation before its exact-token release.
-Never reclaim automatically or merely because a festival moved to archive. When the
-current task is blocked by a reservation, the loop warning and completion guard prevent
-marking it complete or committing until the queue confirms the reservation has cleared.
-Git checkout reservations live in the private per-checkout Git metadata directory
-so staging/commits cannot include runtime locks or session records. Non-Git folders
-retain local reservation files.
+At most three assignments may be outstanding. File locks are acquired atomically
+for exact target paths immediately before native `write`/`edit` tools run and are
+released when that tool returns, including errors. Different files and idle
+workers never hold locks; overlapping task assignments may proceed concurrently.
+The queue can briefly report a live write lock that clears before it is read;
+refresh the queue, and `/fest conflicts` shows the current lock owner and exact
+paths. If a write process stopped without returning, `/fest conflicts reclaim`
+asks for native confirmation before exact-token release. Never reclaim while a
+write is active. Locks live in private per-checkout Git metadata.
+
+Common shell file mutations are blocked because their target paths cannot be
+locked reliably; use native file write/edit tools. Workers must follow this
+rule. This is a tool-level guard, not an OS sandbox: arbitrary external
+processes can still modify files outside omp's tools.
 
 Workers receive a bounded contract, including Playwright-MCP-first browser
 verification guidance. They return files changed, real verification and blockers

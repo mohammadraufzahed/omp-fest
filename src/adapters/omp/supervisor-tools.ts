@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
 import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY } from "../../application/supervisor.js";
-import { dispatchQueue, taskFiles, type DispatchQueue, type DispatchTask } from "../../application/supervisor-queue.js";
+import { dispatchQueue, taskFiles, type DispatchQueue, type DispatchTask, type WriteLockOwner } from "../../application/supervisor-queue.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { claimFestivalOwnership, festivalOwner } from "../../application/festival-ownership.js";
-import { checkProjectConflicts, reserveProjectFiles, releaseProjectFiles, type ProjectReleaseResult } from "../../application/project-conflicts.js";
 import { storeEvidenceBundle } from "../../application/evidence-bundles.js";
+import { checkProjectConflicts } from "../../application/project-conflicts.js";
 import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { PiLike, ToolDeps } from "./tools.js";
@@ -55,16 +55,11 @@ export async function supervisorQueue(deps: ToolDeps, supervisor: Supervisor, si
     return { ...task, document, ...(workingDir ? { workingDir, files: taskFiles(document).map((file) => resolve(workingDir, file)) } : !task.done ? { boundaryError: "Sequence working directory is unknown; resolve its fest_working_dir before dispatch." } : {}) };
   }));
   const state = supervisor.state(sid);
-  // A prior acceptance may have hit a busy registry. Retry only accepted releases.
-  for (const worker of state.workers) {
-    if (worker.status === "accepted" && worker.projectDir) await releaseProjectFiles(worker.projectDir, sid, worker.id);
-  }
   const queue = dispatchQueue({ festivalDir: dir, festival: basename(dir), current, tasks, workers: state.workers, paused: state.paused });
-  const projectDir = current.kind === "task" && current.workingDir ? await realpath(resolve(campRoot, current.workingDir)) : undefined;
   const currentTask = current.kind === "task"
     ? (isAbsolute(current.path) ? relative(dir, current.path) : current.path)
     : undefined;
-  let currentReservation: string | undefined;
+  let currentWriteLock: string | undefined;
   {
     const candidates = [];
     for (const candidate of queue.candidates) {
@@ -74,35 +69,35 @@ export async function supervisorQueue(deps: ToolDeps, supervisor: Supervisor, si
       const conflict = await checkProjectConflicts(candidate.workingDir, candidate.files);
       if (conflict.kind === "clear") candidates.push(candidate);
       else {
-        const reservations = conflict.kind === "conflict" ? conflict.conflicts.map((row) => ({
+        const writeLocks: WriteLockOwner[] | undefined = conflict.kind === "conflict" ? conflict.conflicts.map((row) => ({
           sessionId: row.sessionId, assignmentId: row.assignmentId,
           ...(row.worker ? { worker: row.worker } : {}),
           ...(row.festival ? { festival: row.festival } : {}),
           ...(row.task ? { task: row.task } : {}),
           files: row.files, reservedAt: row.reservedAt,
         })) : undefined;
-        const ownerSummary = reservations?.map((row) =>
+        const ownerSummary = writeLocks?.map((row) =>
           `${row.worker ?? row.assignmentId} (session ${row.sessionId}; ${row.festival ?? "unknown festival"}/${row.task ?? "unknown task"}; ${row.files.length ? row.files.join(", ") : "whole checkout"})`,
         ).join("; ");
         const reason = conflict.kind === "busy"
-          ? "Project reservation registry is busy; retry without launching."
-          : `Another session owns overlapping project files; keep work sequential. Reservation: ${ownerSummary}. Inspect with /fest conflicts; run /fest conflicts reclaim only after confirming the worker has stopped.`;
-        queue.waiting.push({ task: candidate.task, reason, ...(reservations ? { reservations } : {}) });
-        if (candidate.task === currentTask) currentReservation = reason;
+          ? "Write-lock registry is busy; retry without dispatching."
+          : `A write operation holds overlapping files in ${candidate.workingDir}: ${ownerSummary}. The lock may have cleared since this snapshot; refresh the queue. Inspect with /fest conflicts; run /fest conflicts reclaim only after confirming the writer stopped.`;
+        queue.waiting.push({ task: candidate.task, reason, ...(writeLocks ? { writeLocks } : {}) });
+        if (candidate.task === currentTask) currentWriteLock = reason;
       }
     }
     queue.candidates = candidates;
   }
-  if (currentTask && currentReservation) deps.tracker.taskPaused(sid, currentTask, currentReservation);
+  if (currentTask && currentWriteLock) deps.tracker.taskPaused(sid, currentTask, currentWriteLock);
   else if (currentTask && queue.candidates.some((candidate) => candidate.task === currentTask)) deps.tracker.taskResumed(sid, currentTask);
-  return { dir, current, tasks, projectDir, queue };
+  return { dir, current, tasks, queue };
 }
 
 export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: Supervisor, hooks: SupervisorToolHooks = {}): void {
   const z = pi.zod;
   pi.registerTool({
     name: "fest_supervisor",
-    description: "Queue dependency-eligible tasks, reserve assignments, track supervisor reports separately from observed native lifecycle, reconcile resume, retain worker questions and independently review submissions. Status returns a compact delta for a known revision; omit since for full state. Never launches workers or completes tasks. Main session only.",
+    description: "Queue dependency-eligible tasks, track native worker reports and per-file write locks, reconcile resume, retain worker questions and independently review submissions. Status returns a compact delta for a known revision; omit since for full state. Never launches workers or completes tasks. Main session only.",
     parameters: z.object({
       action: z.enum(["status", "queue", "resume", "assign", "running", "submit", "block", "question", "accept", "revise"]),
       festival: z.string().optional(), task: z.string().optional(), worker: z.string().optional(),
@@ -133,11 +128,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           if (!task) throw new Error("Queued task disappeared; refresh the queue.");
           const document = task.document;
           const id = randomUUID();
-          const reservation = await reserveProjectFiles(projectDir, { sessionId: sid, assignmentId: id, files: candidate.files, festival: dir, task: candidate.task, worker: params.worker });
-          if (reservation.kind !== "reserved") throw new Error(reservation.kind === "busy" ? "Project reservations are busy; no worker assigned." : "Project files overlap another outstanding assignment; no worker assigned.");
-          let row;
-          try { row = supervisor.assign(sid, basename(dir), candidate.task, params.worker, candidate.files, { id, projectDir }); }
-          catch (error) { await releaseProjectFiles(projectDir, sid, id); throw error; }
+          const row = supervisor.assign(sid, basename(dir), candidate.task, params.worker, candidate.files, { id });
           deps.tracker.taskOpened(sid, candidate.task);
           result = { assignment: row, contract: { festivalDir: dir, task: candidate.task, workingDir: projectDir, document, policy: SUPERVISOR_POLICY, browserVerification: BROWSER_VERIFICATION_POLICY }, nextSteps: "Launch this named worker through the native omp agent tool. After host acceptance, call fest_capabilities and bind the exact running task job ID with fest_supervisor action running {assignment,runtimeId}; if no matching job is exposed, keep runtime unverified. Native async job snapshots reconcile running/completed/failed/cancelled states and surface completion for supervisor review; no duplicate launch or auto-accept." };
         } else {
@@ -168,13 +159,10 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             result = row;
             if (params.action === "accept") {
               pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sid));
-              let release: ProjectReleaseResult | { kind: "release_pending"; error: string } | undefined;
-              try { release = row.projectDir ? await releaseProjectFiles(row.projectDir, sid, row.id) : undefined; }
-              catch (error) { release = { kind: "release_pending", error: String(error) }; }
               let next: DispatchQueue | { kind: "queue_unavailable"; error: string };
               try { next = (await supervisorQueue(deps, supervisor, sid, ctx.cwd, row.festival)).queue; }
               catch (error) { next = { kind: "queue_unavailable", error: String(error) }; }
-              result = { assignment: row, next, reservation: release, nextSteps: "Acceptance does not complete this festival task. Record task completion, then continue fest_next/queue in this native agent turn; launch only queued candidates through native tools. Once tasks settle follow /fest finish and record actual combined verification and visual comparisons through fest_integration before the human completion gate; never approve the gate yourself." };
+              result = { assignment: row, next, nextSteps: "Acceptance does not complete this festival task. Record task completion, then continue fest_next/queue in this native agent turn; launch only queued candidates through native tools. Once tasks settle follow /fest finish and record actual combined verification and visual comparisons through fest_integration before the human completion gate; never approve the gate yourself." };
             }
           }
         }

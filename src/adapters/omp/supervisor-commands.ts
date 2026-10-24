@@ -1,5 +1,4 @@
 import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY, type RuntimeObservation } from "../../application/supervisor.js";
-import { releaseProjectFiles } from "../../application/project-conflicts.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import type { PiCommandsLike } from "./commands.js";
@@ -119,10 +118,6 @@ export function supervisorCommands(pi: PiCommandsLike, supervisor: Supervisor, h
         catch (error) { send(`Review not applied: ${String(error)}`); return; }
         save(sid);
         if (action === "Accept after verification") {
-          if (row.projectDir) {
-            try { const released = await releaseProjectFiles(row.projectDir, sid, row.id); if (released.kind === "busy") send("Accepted, but project reservation release is busy; retry release before dispatching overlapping work."); }
-            catch (error) { send(`Accepted, but project reservation remains held: ${String(error)}`); }
-          }
           if (hooks.queue) { try { send(`Eligible next candidates: ${JSON.stringify(await hooks.queue(ctx))}`); } catch (error) { send(`Queue unavailable: ${String(error)}`); } }
         }
         send(action === "Accept after verification" ? "Submission accepted. Supervisor must still integrate, verify combined behavior and record fest_task_complete/fest_commit." : "Changes requested. Resume the same worker with these corrections; do not launch a duplicate editor.");

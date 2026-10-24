@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { filesOverlap } from "./supervisor-queue.js";
 
 export const SUPERVISOR_ENTRY = "com.github.mohammadraufzahed.omp-fest.supervisor";
 export const SUPERVISOR_POLICY = [
@@ -7,12 +6,12 @@ export const SUPERVISOR_POLICY = [
   "After human-authorized activation reaches active, immediately continue with fest_next and supervisor dispatch; do not end the turn at activation or wait for a separate /fest dispatch command.",
   "Activation itself is not a worker launch. Invoke the exposed omp subagent tool; /fest dispatch explicitly unpauses, /fest resume reconciles without changing pause.",
   "Continue assignment, worker results, independent review, integration, task completion and commits until complete, a human gate, an explicit pause or a real blocker. Missing subagent capability means blocked, not launched.",
-  "Use omp's exposed native parallel/subagent tools for substantial implementation, never an external Orca runtime, shell-launched agents or a custom worker scheduler. Batch independent eligible assignments; overlaps stay sequential.",
-  "Call fest_supervisor queue, assign the exact eligible task and worker, pass the contract to that named subagent, and mark running only after the host accepts dispatch. If the current task is waiting on another session's project reservation, report the owner/session/task/files and /fest conflicts reclaim recovery path; stop before edits/dispatch, never complete or commit, and reclaim only after human confirmation that the worker is stopped.",
-  "Workers return compact files/evidence/failures/blockers reports through their native channel. They must not select/claim festivals, mutate festival tasks, commit, approve gates, change scope or transfer ownership.",
+  "Use omp's exposed native parallel/subagent tools for substantial implementation, never an external Orca runtime, shell-launched agents or a custom worker scheduler. Batch dependency-eligible assignments even when files overlap; per-file write locks serialize conflicting edits.",
+  "Call fest_supervisor queue, assign the exact eligible task and worker, pass the contract to that named subagent, and mark running only after the host accepts dispatch. File locks are acquired only around native write/edit tool execution; a live lock means an actual write is in progress. Refresh queue after it clears; never reclaim a lock while the write is active.",
+  "Workers return compact files/evidence/failures/blockers reports through their native channel and must use path-bearing native write/edit tools for project mutations; shell file mutations are blocked. They must not select/claim festivals, mutate festival tasks, commit, approve gates, change scope or transfer ownership.",
   "Submit returned results through fest_supervisor; native completion is not acceptance. Independently review and verify, accept with evidence, then fest_task_complete and fest_commit.",
   "After each accepted submission record task completion and continue fest_next/queue in the same native agent turn; this is not an autonomous background scheduler. After workers and tasks settle, follow /fest finish and record actual combined checks and visual comparisons through fest_integration before the completion gate. Never approve that gate yourself.",
-  "Maximum three outstanding workers. Never relaunch unfinished, exited, failed or unverifiable workers on resume; reconcile and continue the existing worker. Shared files/contracts stay sequential.",
+  "Maximum three outstanding workers. Never relaunch unfinished, exited, failed or unverifiable workers on resume; reconcile and continue the existing worker. Conflicting file writes wait for the current write operation, not for the full task.",
   "Pause stops new assignments, not existing workers. Answer worker questions through the blocker inbox and send the answer to the same native worker. Human gates remain human-only.",
 ].join(" ");
 
@@ -35,7 +34,6 @@ export interface WorkerAssignment {
   report: string; review: string;
   runtime?: WorkerRuntime;
   reportArtifact?: string;
-  projectDir?: string;
 }
 export interface WorkerBlocker {
   id: string; assignmentId: string; question: string; answer?: string;
@@ -90,7 +88,7 @@ export class Supervisor {
             !status || !["assigned", "running", "blocked", "ready_for_review", "accepted"].includes(status) || typeof row.report !== "string" || typeof row.review !== "string") continue;
         const worker: WorkerAssignment = { id: row.id, festival: row.festival, task: row.task, worker: row.worker, files: row.files, status, report: row.report, review: row.review };
         if (typeof row.reportArtifact === "string") worker.reportArtifact = row.reportArtifact;
-        if (typeof row.projectDir === "string") worker.projectDir = row.projectDir;
+        
         if (row.runtime && typeof row.runtime === "object" && runtimeStatuses.includes(row.runtime.status) && ["native_runtime", "native_tool_result", "unverified"].includes(row.runtime.source) && typeof row.runtime.observedAt === "string") {
           worker.runtime = { status: row.runtime.status, source: row.runtime.source, observedAt: row.runtime.observedAt };
           if (typeof row.runtime.runtimeId === "string") worker.runtime.runtimeId = row.runtime.runtimeId;
@@ -116,7 +114,7 @@ export class Supervisor {
     const state = this.state(session); state.paused = paused; this.sessions.set(session, state); return this.state(session);
   }
 
-  assign(session: string, festival: string, task: string, worker: string, files: string[], options: { id?: string; projectDir?: string } = {}): WorkerAssignment {
+  assign(session: string, festival: string, task: string, worker: string, files: string[], options: { id?: string } = {}): WorkerAssignment {
     const state = this.state(session);
     if (state.paused) throw new Error("Dispatch is paused. Use /fest dispatch to resume explicitly.");
     if (!worker.trim()) throw new Error("Worker name is required.");
@@ -124,10 +122,7 @@ export class Supervisor {
     if (active.length >= 3) throw new Error("Three assignments are outstanding; review or settle them before dispatching more.");
     if (active.some((row) => row.festival === festival && row.task === task)) throw new Error("This task already has an outstanding assignment; continue that worker instead.");
     if (active.some((row) => row.worker === worker)) throw new Error("This worker already has an outstanding assignment.");
-    if (active.some((row) => filesOverlap(row.files, files))) throw new Error("Assignment overlaps outstanding work, or its file boundary is unknown. Keep it sequential.");
     const row: WorkerAssignment = { id: options.id ?? randomUUID(), festival, task, worker, files: [...files], status: "assigned", report: "", review: "" };
-    if (state.workers.some((item) => item.id === row.id)) throw new Error("Assignment id already exists.");
-    if (options.projectDir) row.projectDir = options.projectDir;
     state.workers.push(row); this.sessions.set(session, state); return structuredClone(row);
   }
 
