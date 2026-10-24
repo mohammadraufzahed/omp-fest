@@ -7,6 +7,7 @@ export interface StructuredTask {
   id: string;
   title: string;
   description: string;
+  priority?: "urgent" | "high" | "normal" | "low";
   dependsOn: string[];
   implements: string[];
   verifies: string[];
@@ -53,6 +54,7 @@ export function structuredPlanSchema(z: ZodLike): ZodSchema {
         id: z.string(), name: z.string(),
         tasks: z.array(z.object({
           id: z.string(), title: z.string(), description: z.string(),
+          priority: z.enum(["urgent", "high", "normal", "low"]).optional(),
           dependsOn: strings(), implements: strings(), verifies: strings(),
           files: z.array(z.object({ path: z.string(), status: z.enum(["existing", "proposed"]) })),
           verification: z.array(z.object({
@@ -133,9 +135,13 @@ function parsePlan(value: unknown): StructuredPlan {
             id: id(sequence.id, `${label}.id`), name: text(sequence.name, `${label}.name`),
             tasks: list(sequence.tasks, `${label}.tasks`, (value, label) => {
               const task = record(value, label);
+              const priority = task.priority === undefined ? "normal" : task.priority;
+              if (priority !== "urgent" && priority !== "high" && priority !== "normal" && priority !== "low") {
+                throw new Error(`${label}.priority must be urgent, high, normal, or low`);
+              }
               return {
                 id: id(task.id, `${label}.id`), title: text(task.title, `${label}.title`),
-                description: text(task.description, `${label}.description`),
+                description: text(task.description, `${label}.description`), priority,
                 dependsOn: stringList(task.dependsOn, `${label}.dependsOn`),
                 implements: stringList(task.implements, `${label}.implements`),
                 verifies: stringList(task.verifies, `${label}.verifies`),
@@ -367,8 +373,8 @@ export function renderTaskContract(spec: StructuredPlan, task: StructuredTask): 
   const acceptance = (ids: string[]) => ids.map((id) => `${markdownText(id)} — ${markdownText(descriptions.get(id) ?? id)}`);
   const lines = [
     `Task ID: ${markdownText(task.id)}`, "", markdownText(task.description), "",
+    `Priority: ${task.priority ?? "normal"}`,
     `Dependencies: ${task.dependsOn.length ? task.dependsOn.map(markdownText).join(", ") : "none"}`,
-    "", "Files:",
     ...(task.files.length ? task.files.map((file) => `- ${markdownText(file.path)} (${file.status})`) : ["- No file changes specified."]),
     "", "Implements:", ...(task.implements.length ? acceptance(task.implements).map((item) => `- ${item}`) : ["- None; supporting or verification task."]),
     "", "Verifies:", ...(task.verifies.length ? acceptance(task.verifies).map((item) => `- ${item}`) : ["- None; implementation or supporting task."]),
@@ -486,7 +492,7 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
       for (const [taskIndex, task] of sequence.tasks.entries()) {
         hierarchy.push(`      - Task ${taskIndex + 1}: ${structuredHierarchyName(task.title)}`);
         contracts.push("", `### ${markdownText(task.id)} — ${markdownText(task.title)}`, renderTaskContract(plan, task).trimEnd());
-        work.push(`- ${markdownText(task.id)}: ${markdownText(task.title)}; Dependencies: ${task.dependsOn.map(markdownText).join(", ") || "none"}; Implements: ${task.implements.map(markdownText).join(", ") || "none"}; Verifies: ${task.verifies.map(markdownText).join(", ") || "none"}`);
+        work.push(`- ${markdownText(task.id)}: ${markdownText(task.title)}; Priority: ${task.priority ?? "normal"}; Dependencies: ${task.dependsOn.map(markdownText).join(", ") || "none"}; Implements: ${task.implements.map(markdownText).join(", ") || "none"}; Verifies: ${task.verifies.map(markdownText).join(", ") || "none"}`);
         if (task.files.length) work.push(`  Files: ${task.files.map((file) => `${markdownText(file.path)} (${file.status})`).join("; ")}`);
         for (const check of task.verification) {
           verificationSummary.push(`- ${markdownText(task.id)}: ${markdownText(check.command)}; Cwd: ${markdownText(check.cwd)}; Evidence: ${markdownText(check.evidencePath)}; Expected: ${markdownText(check.expected)}`);

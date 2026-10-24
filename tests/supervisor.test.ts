@@ -12,7 +12,9 @@ import { LoopTracker } from "../src/application/loop-tracker.js";
 import type { PiLike, ToolDeps } from "../src/adapters/omp/tools.js";
 import { listProjectReservations, reserveProjectFiles, releaseProjectFiles } from "../src/application/project-conflicts.js";
 import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
-import { joinFestivalTeam } from "../src/application/festival-team.js";
+import { joinFestivalTeam, readFestivalTeam } from "../src/application/festival-team.js";
+import { readPortfolioState, recordPortfolioFestivalDispatch, reservePortfolioAssignment, setPortfolioPaused } from "../src/application/portfolio-state.js";
+import { supervisorPortfolioQueue } from "../src/adapters/omp/supervisor-tools.js";
 
 describe("festival supervisor", () => {
   it("requires a real dispatch and independent review before acceptance", () => {
@@ -121,22 +123,31 @@ describe("festival supervisor", () => {
     const acceptedQueue = dispatchQueue({ ...input, workers: supervisor.state("s").workers });
     expect(acceptedQueue.candidates.map((candidate) => candidate.task)).not.toContain(row.task);
     expect(acceptedQueue.waiting.find((waiting) => waiting.task === row.task)?.reason).toContain("awaits festival task completion");
+    const failed = new Supervisor();
+    const failedRow = failed.assign("s", "festival", tasks[0]!.path, "failed-worker", ["src/a.ts"]);
+    failed.observeRuntime("s", { assignmentId: failedRow.id, runtimeId: "native-failed", status: "failed" });
+    const retryQueue = dispatchQueue({ ...input, workers: failed.state("s").workers });
+    expect(retryQueue.candidates.map((candidate) => candidate.task)).toContain(failedRow.task);
   });
 
-  it("separates observed lifecycle from reported status and never accepts native failures", () => {
+  it("closes failed native assignments and permits a fresh retry without accepting the failure", () => {
     const supervisor = new Supervisor();
     const row = supervisor.assign("s", "festival", "task.md", "A", ["a.ts"]);
     supervisor.update("s", row.id, "running", "");
     const result = supervisor.observeNativeResult("s", { results: [{ assignmentId: row.id, agentId: "native-a", status: "failed" }] });
-    expect(result.observed[0]).toMatchObject({ status: "running", runtime: { source: "native_tool_result", runtimeId: "native-a", status: "failed" } });
-    supervisor.update("s", row.id, "submit", "Partial implementation report");
-    expect(() => supervisor.update("s", row.id, "accept", "Reviewed")).toThrow("reconcile");
+    expect(result.observed[0]).toMatchObject({ status: "failed", runtime: { source: "native_tool_result", runtimeId: "native-a", status: "failed" } });
+    expect(() => supervisor.update("s", row.id, "submit", "Partial implementation report")).toThrow("terminal");
+    expect(supervisor.reconcile("s").unfinished).toEqual([]);
     expect(supervisor.observeNativeResult("s", { status: "completed", text: "A succeeded" }).observed).toEqual([]);
-    expect(() => supervisor.observeRuntime("s", { assignmentId: row.id, runtimeId: "duplicate", status: "running" })).toThrow("identity");
-    supervisor.observeRuntime("s", { assignmentId: row.id, runtimeId: "native-a", status: "completed" });
-    expect(supervisor.state("s").workers[0]?.status).toBe("ready_for_review");
-    supervisor.update("s", row.id, "accept", "Independent smoke passed");
-    expect(supervisor.state("s").workers[0]?.status).toBe("accepted");
+
+    const retry = supervisor.assign("s", "festival", "task.md", "B", ["a.ts"]);
+    supervisor.update("s", retry.id, "running", "");
+    supervisor.observeRuntime("s", { assignmentId: retry.id, runtimeId: "native-b", status: "running" });
+    expect(() => supervisor.observeRuntime("s", { assignmentId: retry.id, runtimeId: "duplicate", status: "running" })).toThrow("identity");
+    supervisor.observeRuntime("s", { assignmentId: retry.id, runtimeId: "native-b", status: "completed" });
+    supervisor.update("s", retry.id, "submit", "Implemented and verified");
+    supervisor.update("s", retry.id, "accept", "Independent smoke passed");
+    expect(supervisor.state("s").workers.map((worker) => worker.status)).toEqual(["failed", "accepted"]);
   });
 
   it("durably restores paused unfinished assignments and refuses duplicate resume launches", () => {
@@ -185,7 +196,7 @@ describe("festival supervisor", () => {
     expect(supervisor.state("s").workers[0]?.runtime?.source).toBe("native_runtime");
     expect(sendUserMessage).toHaveBeenCalledOnce();
     const workerCommands = supervisorCommands(pi, supervisor, { isMainSession: () => false });
-    workerCommands.dispatch.run([], ctx);
+    await workerCommands.dispatch.run([], ctx);
     await workerCommands.resume.run([], ctx);
     expect(supervisor.state("s").paused).toBe(true);
     expect(sendUserMessage).toHaveBeenCalledOnce();
@@ -221,13 +232,17 @@ describe("festival supervisor", () => {
         appendEntry,
       } satisfies PiLike;
       const supervisor = new Supervisor();
-      registerSupervisorTools(pi, deps, supervisor);
+      registerSupervisorTools(pi, deps, supervisor, { isMainSession: (context) => context.agent?.kind !== "sub" });
       const ctx = { cwd: root, sessionManager: { getSessionId: () => "s" }, getAsyncJobSnapshot: () => ({ running: [{ id: "native-a", type: "task", status: "running", label: "task", agentId: "A" }] }) };
       const call = async (params: Record<string, unknown>) => {
         const result = await tools.get("fest_supervisor")!("id", { festival: "festival", ...params }, undefined, undefined, ctx);
         return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
       };
-      await call({ action: "assign", task, worker: "A" });
+      const denied = await tools.get("fest_supervisor")!("id", { action: "portfolio" }, undefined, undefined, { ...ctx, agent: { kind: "sub" } });
+      const deniedPayload = JSON.parse(denied.content[0]!.text) as Record<string, unknown>;
+      expect(deniedPayload.error).toContain("main-session only");
+      const assigned = await call({ action: "assign", task, worker: "A" });
+      expect((assigned.contract as { document: string }).document).toContain("Task ID: a");
       const assignment = supervisor.state("s").workers[0]!;
       expect(assignment).toMatchObject({ worker: "A", status: "assigned" });
       expect(await listProjectReservations(project)).toEqual([]);
@@ -292,5 +307,131 @@ describe("festival supervisor", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+  it("builds a fair owned-festival portfolio, isolates errors and excludes conflicting writes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fest-portfolio-"));
+    try {
+      const festivals: { id: string; name: string; status: string; path: string }[] = [];
+      const taskRows = new Map<string, { path: string; sequence: string; done: boolean }[]>();
+      const currentRows = new Map<string, NextUnit>();
+      for (let index = 0; index < 23; index++) {
+        const id = `f${String(index).padStart(2, "0")}`, festival = join(root, "festivals", "active", id);
+        const project = join(root, "projects", id);
+        await mkdir(project, { recursive: true });
+        await mkdir(festival, { recursive: true });
+        const ownership = await claimFestivalOwnership(festival, index === 22 ? "other" : "s");
+        if (ownership.kind !== "claimed") throw new Error(`Cannot claim ${id}`);
+        festivals.push({ id, name: id, status: "active", path: festival });
+        if (index === 22) continue;
+        const tasks = [];
+        for (let taskIndex = 0; taskIndex < 2; taskIndex++) {
+          const sequence = `001_BUILD/0${taskIndex + 1}_work`, task = `${sequence}/01_task.md`;
+          await mkdir(join(festival, sequence), { recursive: true });
+          await writeFile(join(festival, sequence, "SEQUENCE_GOAL.md"), `---\nfest_working_dir: ${JSON.stringify(project)}\n---\n`);
+          const priority = taskIndex === 0 ? "invalid-priority" : "urgent";
+          const file = index === 0 ? "src/shared.ts" : `src/${id}-${taskIndex}.ts`;
+          await writeFile(join(festival, task), `Task ID: ${id}-${taskIndex}\nDependencies: none\nPriority: ${priority}\n- ${file} (proposed)\n`);
+          tasks.push({ path: task, sequence, done: false });
+          if (taskIndex === 0) currentRows.set(festival, { kind: "task", path: task, workingDir: project, doc: "", goals: [] });
+        }
+        taskRows.set(festival, tasks);
+      }
+      const conflict = await reserveProjectFiles(join(root, "projects", "f00"), {
+        sessionId: "writer", assignmentId: "active-write", festival: "elsewhere",
+        task: "write", worker: "Writer", files: ["src/shared.ts"],
+      });
+      expect(conflict.kind).toBe("reserved");
+      await recordPortfolioFestivalDispatch(root, "f00");
+      const deps = {
+        detect: {
+          locate: () => Promise.resolve({ campRoot: root }),
+          listFestivals: () => Promise.resolve(festivals),
+          pendingTasks: (dir: string) => dir.endsWith("f21")
+            ? Promise.reject(new Error("broken festival"))
+            : Promise.resolve(taskRows.get(dir) ?? []),
+        },
+        fest: { next: (dir: string) => Promise.resolve(currentRows.get(dir)!) },
+        tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
+      } as unknown as ToolDeps;
+      const portfolio = await supervisorPortfolioQueue(deps, new Supervisor(), "s", root);
+      expect(portfolio.queue.candidates).toHaveLength(20);
+      expect(new Set(portfolio.queue.candidates.map((candidate) => candidate.festival)).size).toBe(20);
+      expect(portfolio.queue.candidates[0]).toMatchObject({ festival: "f01", task: "001_BUILD/02_work/01_task.md", priority: "urgent" });
+      expect(portfolio.queue.candidates.every((candidate) => candidate.priority === "urgent")).toBe(true);
+      expect(portfolio.queue.waiting.some((row) => row.festival === "f00" && row.task === "001_BUILD/01_work/01_task.md" && row.reason.includes("overlapping files"))).toBe(true);
+      expect(portfolio.errors.some((row) => row.festival === "f21" && row.error.includes("broken festival"))).toBe(true);
+      expect(portfolio.festivals.map((row) => row.id)).not.toContain("f22");
+      expect(portfolio.locks).toEqual(expect.arrayContaining([expect.objectContaining({ assignmentId: "active-write", workingDir: join(root, "projects", "f00") })]));
+      expect(portfolio.queue).toMatchObject({ lastFestival: "f00", workerLimit: 20 });
+      await setPortfolioPaused(root, true);
+      const paused = await supervisorQueue(deps, new Supervisor(), "s", root, "f01");
+      expect(paused.queue.candidates).toEqual([]);
+      expect(paused.queue.waiting.every((row) => row.reason.includes("paused"))).toBe(true);
+      await releaseProjectFiles(join(root, "projects", "f00"), "writer", "active-write");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("serializes portfolio reservations at the global worker cap", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fest-portfolio-cap-"));
+    try {
+      const project = join(root, "project");
+      await mkdir(project);
+      const attempts = await Promise.allSettled(Array.from({ length: 21 }, (_, index) => reservePortfolioAssignment(root, {
+        id: `assignment-${index}`, festival: `festival-${index}`, task: "001_BUILD/01_task.md",
+        sessionId: "s", worker: `worker-${index}`, workingDir: project, files: [],
+      })));
+      expect(attempts.filter((row) => row.status === "fulfilled")).toHaveLength(20);
+      expect(attempts.filter((row) => row.status === "rejected")).toHaveLength(1);
+      expect((await readPortfolioState(root)).assignments).toHaveLength(20);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it("rolls back a team claim when a concurrent portfolio reservation consumes the final capacity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fest-portfolio-rollback-"));
+    try {
+      const festival = join(root, "festivals", "active", "festival"), project = join(root, "project");
+      const sequence = "001_BUILD/01_work", task = `${sequence}/01_task.md`;
+      await mkdir(join(festival, sequence), { recursive: true });
+      await mkdir(project);
+      await writeFile(join(festival, sequence, "SEQUENCE_GOAL.md"), `---\nfest_working_dir: ${JSON.stringify(project)}\n---\n`);
+      await writeFile(join(festival, task), "Task ID: task\nDependencies: none\n- src/task.ts (proposed)\n");
+      const owner = await claimFestivalOwnership(festival, "s");
+      if (owner.kind !== "claimed") throw new Error("Cannot claim rollback test festival");
+      const current: NextUnit = { kind: "task", path: task, workingDir: project, doc: "", goals: [] };
+      let pendingCalls = 0;
+      const deps = {
+        detect: {
+          locate: () => Promise.resolve({ campRoot: root }),
+          listFestivals: () => Promise.resolve([{ id: "festival", name: "festival", status: "active", path: festival }]),
+          pendingTasks: async () => {
+            pendingCalls++;
+            if (pendingCalls === 2) {
+              await Promise.all(Array.from({ length: 20 }, (_, index) => reservePortfolioAssignment(root, {
+                id: `racer-${index}`, festival: `racer-${index}`, task: "task", sessionId: "other",
+                worker: `worker-${index}`, workingDir: project, files: [],
+              })));
+            }
+            return [{ path: task, sequence, done: false }];
+          },
+        },
+        fest: { next: () => Promise.resolve(current) },
+        tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
+      } as unknown as ToolDeps;
+      const schema = (): { optional(): unknown } => ({ optional: schema });
+      type Execute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<{ content: { text: string }[] }>;
+      const tools = new Map<string, Execute>();
+      const pi = {
+        zod: { object: schema, string: schema, enum: schema } as never,
+        registerTool: (tool: Record<string, unknown>) => { tools.set(String(tool.name), tool.execute as Execute); },
+      } satisfies PiLike;
+      const supervisor = new Supervisor();
+      registerSupervisorTools(pi, deps, supervisor);
+      const response = await tools.get("fest_supervisor")!("id", { action: "assign", task, worker: "Worker" }, undefined, undefined, {
+        cwd: root, sessionManager: { getSessionId: () => "s" },
+      });
+      expect(response.content[0]?.text).toContain("Portfolio worker limit reached");
+      expect(supervisor.state("s").workers).toEqual([]);
+      expect((await readPortfolioState(root)).assignments).toHaveLength(20);
+      expect((await readFestivalTeam(root, festival))?.assignments).toEqual([]);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 });

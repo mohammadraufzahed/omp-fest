@@ -1,11 +1,53 @@
 import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY, type RuntimeObservation } from "../../application/supervisor.js";
+import { PORTFOLIO_MAX_WORKERS, type PortfolioCandidate } from "../../application/portfolio-queue.js";
+import type { PortfolioStateAssignment } from "../../application/portfolio-state.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import type { PiCommandsLike } from "./commands.js";
+export interface PortfolioCommandData {
+  workerLimit: number;
+  activeWorkers: number;
+  availableSlots: number;
+  paused?: boolean;
+  festivalRows?: { festival: string; status: string; progress?: string }[];
+  candidates?: PortfolioCandidate[];
+  waiting?: { festival: string; task: string; reason: string }[];
+  activeAssignments?: PortfolioStateAssignment[];
+  failedTasks?: PortfolioStateAssignment[];
+  fileLockConflicts?: { festival: string; task: string; files: string[]; reason?: string }[];
+  staleAssignments?: PortfolioStateAssignment[];
+  errors?: { festival: string; error: string }[];
+}
+
+const assignmentLabel = (row: PortfolioStateAssignment) => `${row.festival}/${row.task} · ${row.worker} · ${row.status} · ${row.id}`;
+
+function portfolioLines(data: PortfolioCommandData): string[] {
+  return [
+    `Workers: ${data.activeWorkers}/${data.workerLimit} active in camp · ${data.availableSlots} available${data.paused ? " · portfolio dispatch paused" : ""}`,
+    "Festivals:",
+    ...(data.festivalRows?.length ? data.festivalRows.map((row) => `• ${row.festival} · ${row.status}${row.progress ? ` · ${row.progress}` : ""}`) : ["• None"]),
+    "Fair candidates:",
+    ...(data.candidates?.length ? data.candidates.map((row) => `• ${row.festival}/${row.task} · ${row.priority ?? "normal"} · ${row.files.join(", ") || "file boundary unavailable"}`) : ["• None"]),
+    "Waiting / festival errors:",
+    ...((data.waiting?.map((row) => `• ${row.festival}/${row.task}: ${row.reason}`) ?? [])),
+    ...((data.errors?.map((row) => `• ${row.festival}: ${row.error}`) ?? [])),
+    ...(!(data.waiting?.length || data.errors?.length) ? ["• None"] : []),
+    "Active workers:",
+    ...(data.activeAssignments?.length ? data.activeAssignments.map((row) => `• ${assignmentLabel(row)}`) : ["• None"]),
+    "Failed tasks:",
+    ...(data.failedTasks?.length ? data.failedTasks.map((row) => `• ${row.festival}/${row.task}${row.failure ? `: ${row.failure}` : ""}`) : ["• None"]),
+    "Current file-lock conflicts:",
+    ...(data.fileLockConflicts?.length ? data.fileLockConflicts.map((row) => `• ${row.festival}/${row.task}: ${row.files.join(", ") || "files"}${row.reason ? ` · ${row.reason}` : ""}`) : ["• None"]),
+    "Stale assignment recovery candidates (advisory only):",
+    ...(data.staleAssignments?.length ? data.staleAssignments.map(assignmentLabel) : ["• None"]),
+    "Stale recovery is advisory only; assignments are never auto-released or relaunched.",
+  ];
+}
 
 export interface SupervisorCommandContext {
   cwd: string;
   sessionManager?: { getSessionId?(): string };
+  agent?: { kind?: "main" | "sub" };
   ui: OverlayUiLike & {
     notify(message: string, type?: string): void;
     select?(title: string, options: (string | { label: string; description?: string })[]): Promise<string | undefined>;
@@ -17,6 +59,9 @@ export interface SupervisorCommandHooks {
   isMainSession?(ctx: SupervisorCommandContext): boolean;
   runtimeObservations?(ctx: SupervisorCommandContext): Promise<RuntimeObservation[]>;
   queue?(ctx: SupervisorCommandContext): Promise<unknown>;
+  portfolio?(ctx: SupervisorCommandContext): Promise<PortfolioCommandData>;
+  setPortfolioWorkerLimit?(ctx: SupervisorCommandContext, limit: number): Promise<unknown>;
+  setPortfolioPaused?(ctx: SupervisorCommandContext, paused: boolean): Promise<void>;
 }
 
 export function supervisorCommands(pi: PiCommandsLike, supervisor: Supervisor, hooks: SupervisorCommandHooks = {}) {
@@ -27,6 +72,34 @@ export function supervisorCommands(pi: PiCommandsLike, supervisor: Supervisor, h
     send("Festival supervision is main-session only. Return worker reports through the native worker channel."); return false;
   };
   return {
+    portfolio: {
+      desc: "inspect the multi-festival worker portfolio or set its worker limit",
+      run: async (args: string[], ctx: SupervisorCommandContext) => {
+        if (!mainOnly(ctx)) return;
+        if (args.length) {
+          if (args.length !== 2 || args[0]?.toLowerCase() !== "limit") {
+            send(`Usage: /fest portfolio [limit N] (N must be an integer from 1 to ${PORTFOLIO_MAX_WORKERS}).`); return;
+          }
+          const rawLimit = args[1] ?? "";
+          const limit = Number(rawLimit);
+          if (!/^\d+$/.test(rawLimit) || !Number.isInteger(limit) || limit < 1 || limit > PORTFOLIO_MAX_WORKERS) {
+            send(`Invalid portfolio worker limit "${rawLimit}". Choose an integer from 1 to ${PORTFOLIO_MAX_WORKERS}.`); return;
+          }
+          if (!hooks.setPortfolioWorkerLimit) { send("Portfolio worker limit is unavailable; no setting changed."); return; }
+          try {
+            await hooks.setPortfolioWorkerLimit(ctx, limit);
+            send(`Portfolio worker limit set to ${limit}.`);
+          } catch (error) { send(`Portfolio worker limit was not changed: ${String(error)}`); }
+          return;
+        }
+        if (!hooks.portfolio) { send("Portfolio data is unavailable."); return; }
+        try {
+          const data = await hooks.portfolio(ctx);
+          const lines = portfolioLines(data);
+          if (!(await showCard(ctx.ui, { title: "Festival portfolio", lines }))) send(lines.join("\n"));
+        } catch (error) { send(`Portfolio dashboard unavailable: ${String(error)}`); }
+      },
+    },
     workers: {
       desc: "inspect supervisor assignments and observed native lifecycle separately",
       run: async (_args: string[], ctx: SupervisorCommandContext) => {
@@ -57,22 +130,29 @@ export function supervisorCommands(pi: PiCommandsLike, supervisor: Supervisor, h
     },
     dispatch: {
       desc: "explicitly unpause dispatch and ask the supervisor to start eligible work",
-      run: (_args: string[], ctx: SupervisorCommandContext) => {
+      run: async (_args: string[], ctx: SupervisorCommandContext) => {
         if (!mainOnly(ctx)) return;
         if (!pi.sendUserMessage) { send("Dispatch requires an interactive omp agent turn; no workers started."); return; }
         const sid = sessionIdOf(ctx);
         supervisor.pause(sid, false);
-        const reconciliation = supervisor.reconcile(sid);
         save(sid);
-        pi.sendUserMessage(`${SUPERVISOR_POLICY}\nResume supervisor execution for this session's explicitly selected festival. Reconcile existing assignments first: ${JSON.stringify(reconciliation)}. Call fest_next and fest_supervisor queue, assign eligible implementation, and dispatch using exposed omp subagent tools. Continue review/integration until a human gate, real blocker, or pause. Do not select an unrelated active festival or duplicate unfinished workers.`);
+        if (hooks.setPortfolioPaused) {
+          try { await hooks.setPortfolioPaused(ctx, false); }
+          catch (error) { send(`Portfolio dispatch was not resumed: ${String(error)}. No portfolio dispatch was requested.`); return; }
+        }
+        const reconciliation = supervisor.reconcile(sid);
+        pi.sendUserMessage(`${SUPERVISOR_POLICY}\nResume portfolio orchestration for festivals explicitly owned by this session; never select unowned, joined, or unrelated festivals, and never transfer ownership. Reconcile existing assignments first: ${JSON.stringify(reconciliation)}. Call fest_supervisor with the portfolio action to get candidates across every explicitly owned festival, then dispatch eligible implementation through native omp agents fairly across those owned festivals until available slots are filled (maximum 20 workers), respecting the configured worker limit. Never use one festival's queue as a global queue. Never duplicate unfinished assignments. Do not cancel unrelated work or weaken festival-local dependency, gate, and file-lock checks.`);
       },
     },
     pause: {
       desc: "pause new worker assignments without cancelling existing workers",
-      run: (_args: string[], ctx: SupervisorCommandContext) => {
+      run: async (_args: string[], ctx: SupervisorCommandContext) => {
         if (!mainOnly(ctx)) return;
         const sid = sessionIdOf(ctx); supervisor.pause(sid, true); save(sid);
-        send("New worker dispatch paused. Existing workers are not cancelled; continue receiving and reviewing their results.");
+        try {
+          await hooks.setPortfolioPaused?.(ctx, true);
+          send("New portfolio worker dispatch paused. Existing workers are not cancelled; continue receiving and reviewing their results.");
+        } catch (error) { send(`Local dispatch paused, but the portfolio pause was not saved: ${String(error)}. Existing workers are not cancelled.`); }
       },
     },
     blockers: {

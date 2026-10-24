@@ -31,7 +31,7 @@ export function dispatchQueue(input: {
   festivalDir: string; festival: string; current: NextUnit; tasks: DispatchTask[];
   workers: WorkerAssignment[]; paused: boolean; limit?: number;
 }): DispatchQueue {
-  const outstanding = input.workers.filter((worker) => worker.status !== "accepted");
+  const outstanding = input.workers.filter((worker) => worker.status !== "accepted" && worker.status !== "failed");
   const capacity = input.limit === undefined ? "host-managed" : Math.max(0, input.limit - outstanding.length);
   const queue: DispatchQueue = { kind: "dispatch_queue", paused: input.paused, capacity, candidates: [], waiting: [] };
   if (input.paused) {

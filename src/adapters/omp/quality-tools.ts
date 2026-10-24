@@ -7,7 +7,7 @@ import type { PiLike, ToolDeps } from "./tools.js";
 
 export function registerQualityTools(pi: PiLike, deps: ToolDeps) {
   const z = pi.zod;
-  interface Context { cwd: string; sessionManager?: { getSessionId?(): string } }
+  interface Context { cwd: string; sessionManager?: { getSessionId?(): string }; agent?: { kind?: string } }
   const selected = async (ctx: Context, selector?: string) => {
     const location = await deps.detect.locate(ctx.cwd);
     if (!location.campRoot) throw new Error("Not inside a camp");
@@ -28,6 +28,7 @@ export function registerQualityTools(pi: PiLike, deps: ToolDeps) {
     }),
     async execute(_id: string, params: { action: "status" | "record"; festival?: string; summary?: string; details?: string; checks?: IntegrationCheck[]; comparisons?: VisualComparison[] }, _signal: unknown, _update: unknown, ctx: Context) {
       try {
+        if (ctx.agent?.kind === "sub" && params.action === "record") return output({ kind: "integration_blocked", error: "Only the main supervisor records final integration evidence." });
         const dir = await selected(ctx, params.festival);
         if (params.action === "status") return output(await integrationReviewStatus(dir, deps.detect));
         if ((await claimFestivalOwnership(dir, sessionIdOf(ctx))).kind !== "claimed") throw new Error("Only the owning supervisor can record integration");
@@ -42,6 +43,7 @@ export function registerQualityTools(pi: PiLike, deps: ToolDeps) {
     parameters: z.object({ action: z.enum(["store", "read"]), festival: z.string().optional(), id: z.string().optional(), kind: z.enum(["integration", "visual", "worker", "release"]).optional(), summary: z.string().optional(), details: z.string().optional(), attachments: z.array(z.string()).optional() }),
     async execute(_id: string, params: { action: "store" | "read"; festival?: string; id?: string; kind?: "integration" | "visual" | "worker" | "release"; summary?: string; details?: string; attachments?: string[] }, _signal: unknown, _update: unknown, ctx: Context) {
       try {
+        if (ctx.agent?.kind === "sub" && params.action === "store") return output({ kind: "evidence_failed", error: "Only the main supervisor stores festival evidence; return worker evidence through the native result." });
         const dir = await selected(ctx, params.festival);
         if (params.action === "read") return output(await readEvidenceBundle(dir, params.id ?? ""));
         if ((await claimFestivalOwnership(dir, sessionIdOf(ctx))).kind !== "claimed") throw new Error("Only festival owner may store evidence");

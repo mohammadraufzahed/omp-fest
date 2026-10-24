@@ -38,6 +38,9 @@ import { planInterviewKickoff } from "./src/domain/orientation.js";
 import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
 import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
 import { projectRootForFile, reserveProjectFiles, releaseProjectFiles } from "./src/application/project-conflicts.js";
+import { readPortfolioState, updatePortfolioAssignment, updatePortfolioAssignmentRuntime } from "./src/application/portfolio-state.js";
+import { releaseFestivalTask } from "./src/application/festival-team.js";
+import type { WorkerAssignment } from "./src/application/supervisor.js";
 
 interface ExtensionContextLike {
   cwd: string;
@@ -233,6 +236,42 @@ export default function ompFest(pi: ExtensionApiLike): void {
       ? claimedFestivalDir(tracker, detect, sid, location.campRoot)
       : undefined;
   };
+  const mirrorPortfolioRuntime = async (ctx: ExtensionContextLike, workers: WorkerAssignment[]): Promise<void> => {
+    if (workers.length === 0) return;
+    const location = await detect.locate(ctx.cwd);
+    if (!location.campRoot) return;
+    let state;
+    try {
+      state = await readPortfolioState(location.campRoot);
+    } catch (error) {
+      pi.logger?.warn(`omp-fest could not read portfolio runtime ledger: ${String(error)}`);
+      return;
+    }
+    for (const worker of workers) {
+      if (!worker.runtime) continue;
+      const assignment = state.assignments.find((row) => row.id === worker.id);
+      if (!assignment) continue;
+      const observedAt = worker.runtime.observedAt;
+      try {
+        await updatePortfolioAssignmentRuntime(location.campRoot, worker.id, {
+          ...(worker.runtime.runtimeId ? { runtimeId: worker.runtime.runtimeId } : {}),
+          runtimeStatus: worker.runtime.status,
+          runtimeObservedAt: observedAt,
+        });
+        if (worker.runtime.status === "failed" || worker.runtime.status === "exited") {
+          const current = (await readPortfolioState(location.campRoot)).assignments.find((row) => row.id === worker.id);
+          if (current && !["accepted", "failed", "released"].includes(current.status)) {
+            const reason = worker.runtime.detail ?? `Native worker ${worker.runtime.status}`;
+            await updatePortfolioAssignment(location.campRoot, worker.id, "failed", { failure: reason });
+            const festival = (await detect.listFestivals(location.campRoot)).find((row) => basename(row.path) === current.festival);
+            if (festival) await releaseFestivalTask(location.campRoot, festival.path, current.sessionId, worker.id, reason);
+          }
+        }
+      } catch (error) {
+        pi.logger?.warn(`omp-fest could not mirror portfolio runtime for ${worker.id}: ${String(error)}`);
+      }
+    }
+  };
   pi.on("session_start", async (_event, ctx) => {
     const config = await configFor();
     const notifier = new OmpNotifier(ctx.ui);
@@ -302,15 +341,19 @@ export default function ompFest(pi: ExtensionApiLike): void {
     const snapshot = ctx.getAsyncJobSnapshot?.();
     const jobs = [...(snapshot?.running ?? []), ...(snapshot?.recent ?? [])].filter((job) => job.type === "task");
     const updates: string[] = [];
+    const observedWorkers: WorkerAssignment[] = [];
     for (const assignment of supervisor.state(sid).workers) {
       if (!assignment.runtime?.runtimeId) continue;
       const job = jobs.find((item) => item.id === assignment.runtime?.runtimeId);
       const status = job?.status === "completed" ? "completed" : job?.status === "failed" ? "failed" : job?.status === "cancelled" ? "exited" : job?.status === "running" ? "running" : undefined;
       if (!job || !status || assignment.runtime.status === status) continue;
-      supervisor.observeRuntime(sid, { assignmentId: assignment.id, runtimeId: job.id, status, detail: `Native omp async task ${job.status}; ${job.label}` });
+      observedWorkers.push(supervisor.observeRuntime(sid, { assignmentId: assignment.id, runtimeId: job.id, status, detail: `Native omp async task ${job.status}; ${job.label}` }));
       updates.push(`${assignment.task}: native worker ${job.status}`);
     }
-    if (updates.length) pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sid));
+    if (observedWorkers.length) {
+      await mirrorPortfolioRuntime(ctx, observedWorkers);
+      pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sid));
+    }
     const digest = await buildStateDigest(deps, ctx.cwd, sessionIdOf(ctx));
     const config = await configFor();
     ctx.ui.setWidget?.(
@@ -427,12 +470,11 @@ export default function ompFest(pi: ExtensionApiLike): void {
   // pending work but no unit was opened via fest_next — the exact "implemented
   // without fest_next" failure.
   pi.on("tool_result", async (event, ctx) => {
-    if (/^(?:task|subagent|subagents)$/.test(event.toolName ?? "")) {
       const observed = supervisor.observeNativeResult(sessionIdOf(ctx), event.result);
       if (observed.observed.length) {
+        await mirrorPortfolioRuntime(ctx, observed.observed);
         pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sessionIdOf(ctx)));
       }
-    }
     const sid = sessionIdOf(ctx);
     const writeKey = writeCallKey(event.toolName ?? "", event.input, sid);
     const pendingLocks = writeLocks.get(writeKey);

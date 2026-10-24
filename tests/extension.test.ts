@@ -9,7 +9,11 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import ompFest from "../index.js";
 import { festivalOwner } from "../src/application/festival-ownership.js";
+import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
+import { claimFestivalTask, joinFestivalTeam, readFestivalTeam } from "../src/application/festival-team.js";
 import { listProjectReservations } from "../src/application/project-conflicts.js";
+import { readPortfolioState, reservePortfolioAssignment, updatePortfolioAssignment } from "../src/application/portfolio-state.js";
+import { SUPERVISOR_ENTRY } from "../src/application/supervisor.js";
 
 interface AutocompleteItem {
   value: string;
@@ -36,10 +40,16 @@ interface SentMessage {
   options?: { triggerTurn?: boolean };
 }
 
+interface ToolOutput {
+  content: { type: string; text: string }[];
+}
+type ToolExecute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<ToolOutput>;
+
 function mockPi(cwd: string) {
   const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
   const commands = new Map<string, RegisteredCommand>();
   const tools: { name: string }[] = [];
+  const toolExecutors = new Map<string, ToolExecute>();
   const sent: SentMessage[] = [];
   const userMessages: string[] = [];
   const statuses: Record<string, string | undefined> = {};
@@ -65,7 +75,10 @@ function mockPi(cwd: string) {
     on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
       handlers.set(event, handler);
     },
-    registerTool: (tool: { name: string }) => tools.push(tool),
+    registerTool: (tool: { name: string; execute?: unknown }) => {
+      tools.push({ name: tool.name });
+      if (typeof tool.execute === "function") toolExecutors.set(tool.name, tool.execute as ToolExecute);
+    },
     registerCommand: (name: string, options: RegisteredCommand) => commands.set(name, options),
     sendMessage: (message: SentMessage["message"], options?: SentMessage["options"]) => {
       sent.push({ message, options });
@@ -75,8 +88,33 @@ function mockPi(cwd: string) {
     },
     setLabel: vi.fn(),
   };
-  return { pi, handlers, commands, tools, sent, userMessages, statuses, ctx };
+  return { pi, handlers, commands, tools, toolExecutors, sent, userMessages, statuses, ctx };
 }
+it("keeps festival mutations and supervision under the main agent", async () => {
+  const root = await makeCamp();
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const ctx = { cwd: root, agent: { kind: "sub" }, sessionManager: { getSessionId: () => "worker-session" } };
+  const attempts: { name: string; params: Record<string, unknown>; kind: string }[] = [
+    { name: "fest_next", params: {}, kind: "supervisor_authority_required" },
+    { name: "fest_task_complete", params: { evidence: "verified" }, kind: "supervisor_authority_required" },
+    { name: "fest_task_update", params: { action: "unblock" }, kind: "supervisor_authority_required" },
+    { name: "fest_commit", params: { message: "worker commit" }, kind: "supervisor_authority_required" },
+    { name: "fest_gate_submit", params: { evidence: "verified" }, kind: "supervisor_authority_required" },
+    { name: "fest_promote", params: {}, kind: "supervisor_authority_required" },
+    { name: "fest_plan", params: { action: "create", name: "worker-plan" }, kind: "supervisor_authority_required" },
+    { name: "fest_flow", params: { action: "run", id: "login" }, kind: "flow_blocked" },
+    { name: "fest_team", params: { action: "claim", task: "task.md" }, kind: "team_blocked" },
+    { name: "fest_supervisor", params: { action: "portfolio" }, kind: "supervisor_blocked" },
+  ];
+  for (const attempt of attempts) {
+    const execute = toolExecutors.get(attempt.name);
+    if (!execute) throw new Error(`Missing registered tool ${attempt.name}`);
+    const result = await execute("test", attempt.params, undefined, undefined, ctx);
+    const payload = JSON.parse(result.content[0]!.text) as { kind?: string };
+    expect(payload.kind, attempt.name).toBe(attempt.kind);
+  }
+});
 
 async function makeCamp(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "ompfest-ext-"));
@@ -277,11 +315,61 @@ describe("ompFest extension", () => {
       widgets[key] = content;
     };
     ompFest(pi as never);
+
     await handlers.get("before_agent_start")?.({}, ctx);
     expect(String(widgets.ompfest)).toContain("camp=");
     const outer = { cwd: "/tmp", ui: ctx.ui };
     await handlers.get("before_agent_start")?.({}, outer);
     expect(widgets.ompfest).toBeUndefined();
+  });
+  it("mirrors native worker failures and releases the failed team claim", async () => {
+    const root = await makeCamp();
+    const festival = join(root, "festivals", "active", "festival-a");
+    await mkdir(festival, { recursive: true });
+    await writeFile(join(festival, "fest.yaml"), "id: festival-a\n");
+    const owner = await claimFestivalOwnership(festival, "portfolio-session");
+    if (owner.kind !== "claimed") throw new Error(`Cannot claim test festival: ${owner.kind}`);
+    await joinFestivalTeam(root, festival, "portfolio-session", "portfolio-session");
+    const teamAssignment = await claimFestivalTask(root, festival, "portfolio-session", "task-a", root, "worker-a");
+    const id = teamAssignment.id;
+    const { pi, handlers, ctx } = mockPi(root);
+    const branch = [{
+      type: "custom",
+      customType: SUPERVISOR_ENTRY,
+      data: {
+        paused: false,
+        workers: [{
+          id, festival: "festival-a", task: "task-a", worker: "worker-a", files: [],
+          status: "running", report: "", review: "",
+          runtime: {
+            status: "running", source: "native_runtime", runtimeId: "native-job-a",
+            observedAt: "2026-01-01T00:00:00.000Z",
+          },
+        }],
+      },
+    }];
+    (ctx as Record<string, unknown>).sessionManager = {
+      getSessionId: () => "portfolio-session",
+      getBranch: () => branch,
+    };
+    (ctx as Record<string, unknown>).getAsyncJobSnapshot = () => ({
+      running: [],
+      recent: [{ id: "native-job-a", type: "task", status: "failed", label: "worker-a" }],
+    });
+    await reservePortfolioAssignment(root, {
+      id, festival: "festival-a", task: "task-a", sessionId: "portfolio-session",
+      worker: "worker-a", workingDir: root, files: [],
+    });
+    await updatePortfolioAssignment(root, id, "running");
+    ompFest(pi as never);
+    await handlers.get("session_tree")?.({}, ctx);
+    await handlers.get("before_agent_start")?.({}, ctx);
+    const assignment = (await readPortfolioState(root)).assignments.find((row) => row.id === id);
+    expect(assignment?.status).toBe("failed");
+    expect(assignment?.runtimeId).toBe("native-job-a");
+    expect(assignment?.runtimeStatus).toBe("failed");
+    expect(assignment?.runtimeObservedAt).not.toBe("2026-01-01T00:00:00.000Z");
+    expect((await readFestivalTeam(root, festival))?.assignments).toEqual([]);
   });
 
   it("/fest reports dormant state when no festival exists", async () => {
@@ -438,3 +526,4 @@ it("tool_call hook stays silent outside a camp", async () => {
   expect(await hook({ toolName: "bash", input: { command: "fest next" } }, ctx)).toBeUndefined();
   expect(await hook({ toolName: "todo", input: {} }, ctx)).toBeUndefined();
 });
+

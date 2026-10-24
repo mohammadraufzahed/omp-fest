@@ -2,20 +2,21 @@ import { createHash, randomUUID } from "node:crypto";
 
 export const SUPERVISOR_ENTRY = "com.github.mohammadraufzahed.omp-fest.supervisor";
 export const SUPERVISOR_POLICY = [
-  "Festival supervisor mode: the main agent owns planning, decisions, integration, review, task completion and commits; explicitly joined omp sessions share the festival team board and task claims without transferring ownership.",
-  "After human-authorized activation reaches active, immediately continue with fest_next and supervisor dispatch; do not end the turn at activation or wait for a separate /fest dispatch command.",
-  "Activation itself is not a worker launch. Invoke the exposed omp subagent tool; /fest dispatch explicitly unpauses, /fest resume reconciles without changing pause.",
-  "Continue assignment, worker results, independent review, integration, task completion and commits until complete, a human gate, an explicit pause or a real blocker. Missing subagent capability means blocked, not launched.",
-  "Use omp's exposed native parallel/subagent tools for substantial implementation, never an external Orca runtime, shell-launched agents or a custom worker scheduler. Batch dependency-eligible assignments even when files overlap; per-file write locks serialize conflicting edits.",
-  "Call fest_supervisor queue, assign the exact eligible task and worker, pass the contract to that named subagent, and mark running only after the host accepts dispatch. File locks are acquired only around native write/edit tool execution; a live lock means an actual write is in progress. Refresh queue after it clears; never reclaim a lock while the write is active.",
-  "Workers return compact files/evidence/failures/blockers reports through their native channel and must use path-bearing native write/edit tools for project mutations; shell file mutations are blocked. They must not select/claim festivals, mutate festival tasks, commit, approve gates, change scope or transfer ownership.",
-  "Submit returned results through fest_supervisor; native completion is not acceptance. Independently review and verify, accept with evidence, then fest_task_complete and fest_commit.",
+  "Portfolio supervisor mode is the default: one main agent coordinates across every festival it explicitly owns; ownership remains with that main session, and only explicitly selected or joined festivals are in scope.",
+  "Never implicitly select, claim, join, transfer or assume ownership of a festival. Explicitly joined omp sessions may share the festival team board and task claims without transferring ownership; the main agent dispatches only festivals owned by this session, while joined-only festivals remain collaborator task claims through fest_team.",
+  "Use omp's native parallel/subagent tools for task workers. Call fest_supervisor with action=portfolio for the fair dependency-eligible candidate set across owned festivals, then assign each exact candidate with action=assign and its festival, task and worker. Respect the configured portfolio limit (20 by default, never above 20); never dispatch candidates with incomplete dependencies or conflicting file requirements.",
+  "After human-authorized activation/promotion reaches active, immediately call fest_supervisor with action=portfolio and use exposed native OMP subagent tools in the same agent turn to fill available worker slots; do not end the turn after activation. If no native agent capability is exposed, report a blocker and do not fabricate launch.",
+  "Keep assignment and execution task-scoped: pass each worker only its assigned task contract and require a compact report of changed files, evidence, failures and blockers through its native channel. Workers must use path-bearing native write/edit tools for project mutations; shell file mutations are blocked. Workers must not select/claim festivals, mutate festival tasks, commit, approve gates, change scope or transfer ownership.",
+  "A failure, cancellation, pause or blocker is local to its festival/task: never cancel, discard or block unrelated festival plans or assignments. Failed/exited native workers become terminal, release capacity and their task claim, and may be replaced by a fresh assignment only after confirming the old runtime is stopped; never relaunch the failed runtime. Pause stops new assignments for the affected scope, not already-running workers; resume reconciles without changing pause.",
+  "Exact-file locks are held only while a native write/edit call is executing, never for the lifetime of a task. A live lock means an actual write is in progress; refresh the queue after it clears and never reclaim it while the write is active.",
+  "Continue assignment, worker results, independent review, integration, task completion and commits until each festival is complete, reaches a human gate, an explicit pause or a real blocker. Missing native subagent capability means blocked, not launched; the extension requests native tools and does not itself launch agents.",
+  "Submit returned results through fest_supervisor; native completion is not acceptance. Independently review and verify each festival's work, accept with evidence, then fest_task_complete and fest_commit. Keep integration, review, task completion, gates and commits under the main agent's responsibility.",
   "After each accepted submission record task completion and continue fest_next/queue in the same native agent turn; this is not an autonomous background scheduler. After workers and tasks settle, follow /fest finish and record actual combined checks and visual comparisons through fest_integration before the completion gate. Never approve that gate yourself.",
-  "Use host-provided concurrency; omp-fest does not impose a fixed worker/session cap. Team task claims prevent duplicate assignment across sessions, while exact-file write locks are held only during writes.",
-  "Pause stops new assignments, not existing workers. Answer worker questions through the shared team inbox and send the answer to the same native worker. Human gates remain human-only.",
+  "Use host-provided native concurrency within the portfolio limit; omp-fest does not itself launch agents. Team task claims prevent duplicate assignment across sessions, while exact-file write locks are held only during native writes.",
+  "Answer worker questions through the shared team inbox and send the answer to the same native worker. Human gates remain human-only.",
 ].join(" ");
 
-export type WorkerStatus = "assigned" | "running" | "blocked" | "ready_for_review" | "accepted";
+export type WorkerStatus = "assigned" | "running" | "blocked" | "ready_for_review" | "accepted" | "failed";
 export type RuntimeStatus = "running" | "completed" | "failed" | "exited" | "unverifiable";
 export interface RuntimeObservation {
   assignmentId: string;
@@ -118,7 +119,7 @@ export class Supervisor {
     const state = this.state(session);
     if (state.paused) throw new Error("Dispatch is paused. Use /fest dispatch to resume explicitly.");
     if (!worker.trim()) throw new Error("Worker name is required.");
-    const active = state.workers.filter((row) => row.status !== "accepted");
+    const active = state.workers.filter((row) => row.status !== "accepted" && row.status !== "failed");
     if (active.some((row) => row.festival === festival && row.task === task)) throw new Error("This task already has an outstanding assignment; continue that worker instead.");
     if (active.some((row) => row.worker === worker)) throw new Error("This worker already has an outstanding assignment.");
     const row: WorkerAssignment = { id: options.id ?? randomUUID(), festival, task, worker, files: [...files], status: "assigned", report: "", review: "" };
@@ -129,6 +130,7 @@ export class Supervisor {
     const state = this.state(session), row = state.workers.find((item) => item.id === id);
     if (!row) throw new Error("Unknown assignment in this supervisor session.");
     if (row.status === "accepted") throw new Error("Accepted assignments cannot be changed.");
+    if (row.status === "failed") throw new Error("Failed assignments are terminal; assign a fresh worker after failure.");
     if (action === "running") {
       if (row.status !== "assigned" && row.status !== "blocked") throw new Error("Only assigned or blocked workers can start/resume.");
       if (row.runtime && ["failed", "exited", "unverifiable"].includes(row.runtime.status)) throw new Error("Reconcile native lifecycle before continuing this worker; do not relaunch it.");
@@ -154,8 +156,10 @@ export class Supervisor {
     const state = this.state(session), row = state.workers.find((worker) => worker.id === observation.assignmentId);
     if (!row) throw new Error("Unknown assignment in this supervisor session.");
     if (row.runtime?.runtimeId && observation.runtimeId && row.runtime.runtimeId !== observation.runtimeId) throw new Error("Runtime identity does not match the assigned worker; do not relaunch.");
+    if (row.status === "failed" && observation.status !== "failed" && observation.status !== "exited") throw new Error("Failed assignments are terminal; assign a fresh worker instead of reviving this runtime.");
     const runtimeId = observation.runtimeId ?? row.runtime?.runtimeId;
     row.runtime = { status: observation.status, source, observedAt: new Date().toISOString(), ...(runtimeId ? { runtimeId } : {}), ...(observation.detail ? { detail: observation.detail } : {}) };
+    if (row.status !== "accepted" && (observation.status === "failed" || observation.status === "exited")) row.status = "failed";
     this.sessions.set(session, state); return structuredClone(row);
   }
 
@@ -194,13 +198,13 @@ export class Supervisor {
       this.observeRuntime(session, { assignmentId: worker.id, status: "unverifiable", detail: worker.runtime ? `Prior observation: ${worker.runtime.status} at ${worker.runtime.observedAt}. No current runtime observation supplied.` : "No current runtime observation supplied." }, "unverified");
     }
     const state = this.state(session);
-    return { paused: state.paused, unknownObservations, unfinished: state.workers.filter((row) => row.status !== "accepted").map((assignment) => ({ assignment, launchAllowed: false, next: assignment.status === "ready_for_review" ? "Independently review the existing submission; do not relaunch." : assignment.runtime?.status === "running" ? "Continue observing or message the existing native worker." : "Runtime not confirmed active. Reconcile this existing assignment; never launch a duplicate." })) };
+    return { paused: state.paused, unknownObservations, unfinished: state.workers.filter((row) => row.status !== "accepted" && row.status !== "failed").map((assignment) => ({ assignment, launchAllowed: false, next: assignment.status === "ready_for_review" ? "Independently review the existing submission; do not relaunch." : assignment.runtime?.status === "running" ? "Continue observing or message the existing native worker." : "Runtime not confirmed active. Reconcile this existing assignment; never launch a duplicate." })) };
   }
 
   question(session: string, assignmentId: string, question: string): WorkerBlocker {
     if (!question.trim()) throw new Error("A concrete worker question or blocker is required.");
     const state = this.state(session), worker = state.workers.find((row) => row.id === assignmentId);
-    if (!worker || worker.status === "accepted") throw new Error("Unknown or accepted assignment cannot open a blocker.");
+    if (!worker || worker.status === "accepted" || worker.status === "failed") throw new Error("Unknown or terminal assignment cannot open a blocker.");
     const blocker: WorkerBlocker = { id: randomUUID(), assignmentId, question, createdAt: new Date().toISOString() };
     state.blockers = [...(state.blockers ?? []), blocker]; worker.status = "blocked";
     this.sessions.set(session, state); return structuredClone(blocker);

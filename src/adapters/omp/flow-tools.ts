@@ -49,6 +49,9 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
   } });
   pi.registerTool({ name: "fest_flow", label: "Reusable Secure Browser Flow", description: "Persist HTTPS-origin-bound browser procedures, manage revisions and credential references, run with native UI prompts for credentials/OTP, or resume after explicit verification. Secrets never belong in tool arguments or results. Uses isolated Playwright browser, never reuses cookies. No CAPTCHA/security challenge bypass.", parameters: schema(z), async execute(_id: string, raw: unknown, _signal: unknown, _update: unknown, ctx: FlowContext) {
     const params = raw as { action: string; id?: string; revision?: string; name?: string; origin?: string; path?: string; fields?: BrowserFlowField[]; selectors?: BrowserFlowInput["selectors"]; credentialRef?: string };
+    if (ctx.agent?.kind === "sub" && params.action !== "list" && params.action !== "read") {
+      return out({ kind: "flow_blocked", code: "MAIN_AGENT_REQUIRED", nextAction: "Only the main supervisor may create, run, resume, mutate or delete credential-backed browser flows. Return required page evidence through the worker channel." });
+    }
     const located = await deps.detect.locate(ctx.cwd), root = located.campRoot;
     if (!root) return out({ kind: "flow_failed", code: "NO_CAMP", field: "cwd", expected: "camp", nextAction: "Run this tool inside a camp." });
     try {

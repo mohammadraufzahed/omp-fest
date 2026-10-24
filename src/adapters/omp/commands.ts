@@ -7,6 +7,7 @@ import { joinFestivalTeam, transferFestivalTeamCoordinator, readFestivalTeam } f
 import { festivalOwner, type FestivalOwner, claimFestivalOwnership } from "../../application/festival-ownership.js";
 import { listFestivalCreationOrphans, quarantineFestival, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
+import { listStalePortfolioAssignments, readPortfolioState, setPortfolioPaused, setPortfolioWorkerLimit } from "../../application/portfolio-state.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { LoopTracker } from "../../application/loop-tracker.js";
 import { lstat, readFile } from "node:fs/promises";
@@ -24,8 +25,9 @@ import { supervisorCommands } from "./supervisor-commands.js";
 import { qualityCommands } from "./quality-commands.js";
 import { conflictCommands } from "./conflict-commands.js";
 import { draftCommands } from "./draft-commands.js";
-import { supervisorQueue } from "./supervisor-tools.js";
+import { supervisorPortfolioQueue, supervisorQueue } from "./supervisor-tools.js";
 import { flowCommands } from "./flow-commands.js";
+import type { PortfolioCommandData } from "./supervisor-commands.js";
 
 export interface CommandDeps {
   fest: FestCli;
@@ -52,6 +54,7 @@ export interface PiCommandsLike {
 interface CommandCtx {
   cwd: string;
   sessionManager?: { getSessionId?(): string };
+  agent?: { kind?: "main" | "sub" };
   ui: OverlayUiLike & {
     notify(message: string, type?: string): void;
     select?(
@@ -259,9 +262,64 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   const supervisor = deps.supervisor ?? new Supervisor();
   const subs: Record<string, Sub> = {
     ...supervisorCommands(pi, supervisor, {
+      isMainSession: (ctx) => ctx.agent?.kind !== "sub",
       queue: async (ctx) => {
         if (!deps.tracker) throw new Error("Supervisor session tracker unavailable");
         return (await supervisorQueue({ ...deps, tracker: deps.tracker }, supervisor, sessionIdOf(ctx), ctx.cwd)).queue;
+      },
+      portfolio: async (ctx): Promise<PortfolioCommandData> => {
+        const location = await deps.detect.locate(ctx.cwd);
+        if (!location.campRoot) throw new Error("Portfolio requires a camp root.");
+        const sid = sessionIdOf(ctx);
+        if (!deps.tracker) throw new Error("Supervisor session tracker unavailable");
+        const snapshot = await supervisorPortfolioQueue({ ...deps, tracker: deps.tracker }, supervisor, sid, ctx.cwd);
+        const state = await readPortfolioState(location.campRoot);
+        const owned = new Set(snapshot.festivals.map((festival) => festival.id));
+        const activeAssignments = state.assignments.filter((row) =>
+          owned.has(row.festival) && (row.status === "assigned" || row.status === "running" || row.status === "blocked" || row.status === "submitted"),
+        );
+        const fileLockConflicts = snapshot.locks.map((lock) => ({
+          festival: lock.festival ?? "unknown festival",
+          task: lock.task ?? "active write",
+          files: lock.files,
+          reason: `${lock.worker ?? lock.sessionId} is writing in ${lock.workingDir}`,
+        }));
+        const staleAssignments = (await listStalePortfolioAssignments(location.campRoot, 15 * 60_000))
+          .filter((row) => owned.has(row.festival));
+        return {
+          workerLimit: snapshot.queue.workerLimit,
+          activeWorkers: snapshot.queue.activeWorkers,
+          availableSlots: snapshot.queue.availableSlots,
+          paused: snapshot.queue.paused,
+          festivalRows: snapshot.festivals.map((row) => ({
+            festival: row.id,
+            status: row.status ?? "unknown",
+            progress: typeof row.progress === "string" ? row.progress : undefined,
+          })),
+          candidates: snapshot.queue.candidates,
+          waiting: snapshot.queue.waiting,
+          activeAssignments,
+          failedTasks: state.assignments.filter((row) => row.status === "failed" && owned.has(row.festival)),
+          fileLockConflicts,
+          staleAssignments,
+          errors: snapshot.errors,
+        };
+      },
+      setPortfolioWorkerLimit: async (ctx, limit) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        if (!location.campRoot) throw new Error("Portfolio limit requires a camp root.");
+        if (!deps.tracker) throw new Error("Supervisor session tracker unavailable");
+        const snapshot = await supervisorPortfolioQueue({ ...deps, tracker: deps.tracker }, supervisor, sessionIdOf(ctx), ctx.cwd);
+        if (!snapshot.festivals.length) throw new Error("Only a session that owns at least one festival may change portfolio settings.");
+        return setPortfolioWorkerLimit(location.campRoot, limit);
+      },
+      setPortfolioPaused: async (ctx, paused) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        if (!location.campRoot) throw new Error("Portfolio pause requires a camp root.");
+        if (!deps.tracker) throw new Error("Supervisor session tracker unavailable");
+        const snapshot = await supervisorPortfolioQueue({ ...deps, tracker: deps.tracker }, supervisor, sessionIdOf(ctx), ctx.cwd);
+        if (!snapshot.festivals.length) throw new Error("Only a session that owns at least one festival may change portfolio settings.");
+        await setPortfolioPaused(location.campRoot, paused);
       },
     }),
     ...qualityCommands(pi, { ...deps, supervisor }),
@@ -859,7 +917,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|dispatch|pause|review|next|status|show|select|join|team|orphans|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
+    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|portfolio|dispatch|pause|review|next|status|show|select|join|team|orphans|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")

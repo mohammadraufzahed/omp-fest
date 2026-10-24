@@ -10,6 +10,7 @@ import {
   structuredPlanSchema,
   type StructuredPlan,
 } from "../src/application/structured-plan.js";
+import { finalizeApprovedScaffold } from "../src/application/plan-scaffold.js";
 import type { ZodLike, ZodSchema } from "../src/adapters/omp/zod-types.js";
 
 const roots: string[] = [];
@@ -50,6 +51,41 @@ async function fixture() {
   const tasks = spec.phases[0]!.sequences[0]!.tasks;
   return { root, project, workingDir, spec, implement: tasks[0]!, verify: tasks[1]!, check: tasks[1]!.verification[0]! };
 }
+describe("task priority", () => {
+  it.each(["urgent", "high", "normal", "low"] as const)("validates and renders %s priority", async (priority) => {
+    const { root, workingDir, spec, implement } = await fixture();
+    implement.priority = priority;
+    const result = await prepareStructuredPlan(root, workingDir, "feature", spec);
+    expect(result.preview).toContain(`Priority: ${priority}`);
+    expect(renderTaskContract(spec, implement)).toContain(`Priority: ${priority}`);
+  });
+
+  it("defaults omitted priority to normal and rejects unsupported or empty values", async () => {
+    const { root, workingDir, spec, implement } = await fixture();
+    const result = await prepareStructuredPlan(root, workingDir, "feature", spec);
+    expect(result.preview).toContain("Priority: normal");
+    expect(renderTaskContract(spec, implement)).toContain("Priority: normal");
+    for (const priority of ["", "medium"] as const) {
+      const invalid = structuredClone(spec);
+      Object.assign(invalid.phases[0]!.sequences[0]!.tasks[0]!, { priority });
+      await expect(prepareStructuredPlan(root, workingDir, "feature", invalid)).rejects.toThrow(/priority/);
+    }
+  });
+
+  it("preserves priority in scaffolded task documents", async () => {
+    const { root, spec, implement } = await fixture();
+    implement.priority = "urgent";
+    const festival = join(root, "festival");
+    await mkdir(join(festival, "001_BUILD_FEATURE", "01_CORE_BEHAVIOR"), { recursive: true });
+    await writeFile(join(festival, "001_BUILD_FEATURE", "PHASE_GOAL.md"), "---\nfest_name: build_feature\n---\n");
+    await writeFile(join(festival, "001_BUILD_FEATURE", "01_CORE_BEHAVIOR", "SEQUENCE_GOAL.md"), "---\nfest_name: Core behavior\n---\n");
+    await writeFile(join(festival, "001_BUILD_FEATURE", "01_CORE_BEHAVIOR", "01_enable-feature.md"), "---\nfest_name: Enable feature\n---\n");
+    await writeFile(join(festival, "001_BUILD_FEATURE", "01_CORE_BEHAVIOR", "02_verify-feature.md"), "---\nfest_name: Verify feature\n---\n");
+    await finalizeApprovedScaffold(root, festival, { name: "feature", workingDir: "projects/app", rules: "", spec });
+    expect(await readFile(join(festival, "001_BUILD_FEATURE", "01_CORE_BEHAVIOR", "01_enable-feature.md"), "utf8")).toContain("Priority: urgent");
+  });
+});
+
 
 describe("structured plan preparation", () => {
   it("renders a deterministic one-phase plan with observable contracts without writing or executing", async () => {
@@ -63,6 +99,7 @@ describe("structured plan preparation", () => {
     expect(first.markdown).toContain("- **Festival:** feature\n  - **Phase 1:** BUILD_FEATURE (implementation)\n    - Sequence 1: Core behavior\n      - Task 1: Enable feature\n      - Task 2: Verify feature");
     expect(first.markdown).toContain("## Task Contracts");
     expect(first.preview).toContain("Dependencies: implement");
+    expect(first.preview).toContain("Priority: normal");
     expect(first.preview).toContain("src/feature.ts (existing)");
     expect(first.preview).toContain("tests/feature.test.ts (proposed)");
     expect(first.preview).toContain("npm run test; Cwd: .; Evidence: package.json");
@@ -379,7 +416,8 @@ describe("structuredPlanSchema", () => {
     expect((phase.fields!.type as Shape).values).toEqual(["implementation", "planning", "research", "validation"]);
     const sequence = (phase.fields!.sequences as Shape).item as Shape;
     const task = (sequence.fields!.tasks as Shape).item as Shape;
-    expect(Object.keys(task.fields!)).toEqual(["id", "title", "description", "dependsOn", "implements", "verifies", "files", "verification"]);
+    expect(Object.keys(task.fields!)).toEqual(["id", "title", "description", "priority", "dependsOn", "implements", "verifies", "files", "verification"]);
+    expect(((task.fields!.priority as Shape).values)).toEqual(["urgent", "high", "normal", "low"]);
     const verification = (task.fields!.verification as Shape).item as Shape;
     expect(Object.keys(verification.fields!)).toEqual(["command", "cwd", "evidencePath", "expected"]);
   });

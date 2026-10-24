@@ -13,6 +13,7 @@ import {
   submitFestivalTask,
 } from "../../application/festival-team.js";
 import { listFestivalCreationOrphans } from "../../application/festival-creation.js";
+import { releasePortfolioAssignment, reservePortfolioAssignment, updatePortfolioAssignment } from "../../application/portfolio-state.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { Supervisor } from "../../application/supervisor.js";
@@ -22,6 +23,7 @@ import type { PiLike, ToolDeps } from "./tools.js";
 interface TeamToolContext {
   cwd: string;
   sessionManager?: { getSessionId?(): string };
+  agent?: { kind?: string };
 }
 
 async function teamLocation(deps: ToolDeps, sid: string, cwd: string, selector?: string) {
@@ -56,8 +58,11 @@ export function registerFestivalTeamTools(pi: PiLike, deps: ToolDeps, supervisor
       action: "join" | "board" | "queue" | "claim" | "submit" | "review" | "release" | "message" | "inbox";
       festival?: string; task?: string; assignment?: string; evidence?: string; label?: string; decision?: "accept" | "revise"; toSession?: string; markRead?: boolean;
     }, _signal: unknown, _update: unknown, ctx: TeamToolContext) {
-      const sid = sessionIdOf(ctx);
       const output = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
+      const sid = sessionIdOf(ctx);
+      if (ctx.agent?.kind === "sub" && (!["board", "queue", "inbox"].includes(params.action) || (params.action === "inbox" && params.markRead))) {
+        return output({ kind: "team_blocked", error: "Native task workers cannot claim, review, submit, message, release, join, or mark team messages read; return results to the main supervisor." });
+      }
       try {
         const { campRoot, dir } = await teamLocation(deps, sid, ctx.cwd, params.festival);
         const owner = await festivalOwner(dir);
@@ -85,6 +90,22 @@ export function registerFestivalTeamTools(pi: PiLike, deps: ToolDeps, supervisor
           const candidate = queue.candidates.find((item) => item.task === params.task);
           if (!candidate?.workingDir) throw new Error(queue.waiting.find((item) => item.task === params.task)?.reason ?? "Task is not currently dependency-eligible; refresh the team queue.");
           const assignment = await claimFestivalTask(campRoot, dir, sid, candidate.task, candidate.workingDir, params.label ?? sid);
+          try {
+            await reservePortfolioAssignment(campRoot, {
+              id: assignment.id,
+              festival: basename(dir),
+              task: candidate.task,
+              sessionId: sid,
+              worker: params.label ?? sid,
+              workingDir: candidate.workingDir,
+              files: candidate.files,
+            });
+          } catch (error) {
+            await releaseFestivalTask(campRoot, dir, sid, assignment.id, "Portfolio slot reservation failed.");
+            const message = error instanceof Error ? error.message : String(error);
+            if (message.includes("Portfolio worker limit reached")) throw new Error(`Portfolio limit reached: ${message}`, { cause: error });
+            throw error;
+          }
           deps.tracker.taskOpened(sid, candidate.task);
           const taskDocument = await readFile(join(dir, candidate.task), "utf8");
           return output({ kind: "team_task_claimed", assignment, taskFile: candidate.task, taskDocument, workingDir: candidate.workingDir, instructions: "Implement only this task in the shared worktree. Use native write/edit tools so exact-file locks cover writes only. Do not mark the festival task complete, integrate, or commit; submit files changed and actual verification evidence here." });
@@ -92,23 +113,29 @@ export function registerFestivalTeamTools(pi: PiLike, deps: ToolDeps, supervisor
         if (params.action === "submit") {
           if (!params.assignment || !params.evidence?.trim()) throw new Error("Submission requires assignment id and concrete evidence.");
           const assignment = await submitFestivalTask(campRoot, dir, sid, params.assignment, params.evidence);
+          await updatePortfolioAssignment(campRoot, assignment.id, "submitted", { report: params.evidence });
           deps.tracker.cleared(sid);
           return output({ kind: "team_submission", assignment });
         }
         if (params.action === "review") {
           if (!params.assignment || !params.evidence?.trim()) throw new Error("Review requires assignment id and evidence.");
           if (!params.decision) throw new Error("Review requires decision accept or revise.");
-          return output({ kind: "team_review", assignment: await reviewFestivalTask(campRoot, dir, sid, params.assignment, params.decision, params.evidence) });
+          const assignment = await reviewFestivalTask(campRoot, dir, sid, params.assignment, params.decision, params.evidence);
+          await updatePortfolioAssignment(campRoot, assignment.id, params.decision === "accept" ? "accepted" : "running", { report: assignment.review });
+          return output({ kind: "team_review", assignment });
         }
         if (params.action === "release") {
           if (!params.assignment || !params.evidence?.trim()) throw new Error("Release requires assignment id and a reason.");
-          return output({ kind: "team_assignment_released", assignment: await releaseFestivalTask(campRoot, dir, sid, params.assignment, params.evidence) });
+          const assignment = await releaseFestivalTask(campRoot, dir, sid, params.assignment, params.evidence);
+          await releasePortfolioAssignment(campRoot, assignment.id, params.evidence);
+          return output({ kind: "team_assignment_released", assignment });
         }
         if (params.action === "message") {
           if (!params.evidence?.trim()) throw new Error("Message body is required.");
           return output({ kind: "team_message_sent", message: await sendFestivalTeamMessage(campRoot, dir, sid, params.evidence, params.toSession, params.task) });
         }
         return output({ kind: "team_inbox", festival: basename(dir), messages: await readFestivalTeamInbox(campRoot, dir, sid, params.markRead) });
+          
       } catch (error) {
         return output({ kind: "team_blocked", error: error instanceof Error ? error.message : String(error) });
       }

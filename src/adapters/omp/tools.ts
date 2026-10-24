@@ -102,6 +102,11 @@ function textResult(payload: unknown): ToolResult {
     ],
   };
 }
+function supervisorOnly(ctx: ToolContextLike, operation: string): ToolResult | undefined {
+  return ctx.agent?.kind === "sub"
+    ? textResult({ kind: "supervisor_authority_required", operation, hint: "Native task workers return evidence and blockers to the main supervisor; only the main agent changes festival state, plans, approvals, or commits." })
+    : undefined;
+}
 
 const READONLY_RAW_COMMANDS: Record<string, true> = { list: true, show: true, status: true, rules: true, context: true, markers: true, version: true, types: true, chain: true, feedback: true, links: true, watch: true, deps: true, parse: true, tokens: true, "--help": true };
 function compactBlockedUnit(unit: Extract<NextUnit, { kind: "blocked" }>): ToolResult {
@@ -322,7 +327,7 @@ function festivalRelativeTaskPath(festivalDir: string, taskPath: string): string
 export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const z = pi.zod;
   const supervisor = deps.supervisor ?? new Supervisor();
-  registerSupervisorTools(pi, deps, supervisor);
+  registerSupervisorTools(pi, deps, supervisor, { isMainSession: (ctx) => ctx.agent?.kind !== "sub" });
   registerQualityTools(pi, { ...deps, supervisor });
   registerFestivalTeamTools(pi, deps, supervisor);
 
@@ -334,6 +339,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "Get the next unit of work in the current festival (task, workflow step, gate step, blocked, or complete), including linked visual reference notes and wireframe paths for page tasks. This is the engine of the festival loop — call it, do what it returns, then call it again.",
     parameters: z.object({ festival: z.string().optional().describe("Festival name/id override") }),
     async execute(_id: string, params: { festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const blocked = supervisorOnly(ctx, "task selection");
+      if (blocked) return blocked;
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
@@ -388,6 +395,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { task?: string; evidence: string; festival?: string; visualEvidence?: VisualEvidence[] }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const blocked = supervisorOnly(ctx, "task completion");
+      if (blocked) return blocked;
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
@@ -439,7 +448,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       const assignments = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) =>
         worker.festival === basename(dir) && worker.task === (task?.path ?? taskPath));
-      if (assignments.some((worker) => worker.status !== "accepted")) {
+      if (assignments.some((worker) => worker.status !== "accepted" && worker.status !== "failed")) {
         return textResult({ kind: "completion_blocked", hint: "Worker submission requires independent supervisor review and acceptance before festival completion." });
       }
       const campRoot = await campRootOf(deps, ctx);
@@ -483,6 +492,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { action: "blocked" | "defer" | "unblock" | "reset" | "update"; task?: string; reason?: string; percent?: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const blocked = supervisorOnly(ctx, "task state update");
+      if (blocked) return blocked;
       const unsupportedField = params.reason?.trim() && !["blocked", "defer", "unblock"].includes(params.action) ? "reason"
         : params.percent?.trim() && params.action !== "update" ? "percent"
           : undefined;
@@ -516,6 +527,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { message: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const blocked = supervisorOnly(ctx, "commit");
+      if (blocked) return blocked;
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
@@ -526,7 +539,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (team?.assignments.some((assignment) => assignment.status !== "accepted")) {
         return textResult({ kind: "commit_blocked", hint: "Other omp sessions still own claimed or submitted work. Review or release every shared team assignment before committing." });
       }
-      if (supervisor.state(sessionIdOf(ctx)).workers.some((worker) => worker.status !== "accepted")) {
+      if (supervisor.state(sessionIdOf(ctx)).workers.some((worker) => worker.status !== "accepted" && worker.status !== "failed")) {
         return textResult({ kind: "commit_blocked", hint: "Outstanding workers may have unfinished shared-checkout changes. Review and settle all assignments before committing." });
       }
       const hash = await deps.fest.commit(r.dir, params.message);
@@ -544,6 +557,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { fix?: boolean; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      if (params.fix) {
+        const blocked = supervisorOnly(ctx, "festival repair");
+        if (blocked) return blocked;
+      }
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
@@ -567,6 +584,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { action: "status" | "show" | "advance"; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      if (params.action === "advance") {
+        const blocked = supervisorOnly(ctx, "workflow advancement");
+        if (blocked) return blocked;
+      }
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;
@@ -598,6 +619,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { evidence: string; festival?: string; visualEvidence?: (VisualEvidence & { task: string })[] }, signal: { aborted?: boolean } | undefined, _u: unknown, ctx: ToolContextLike) {
+      const blocked = supervisorOnly(ctx, "gate submission");
+      if (blocked) return blocked;
       const config = deps.config ? await deps.config() : DEFAULT_CONFIG;
       if (config.evidenceRequiredOnGates && params.evidence.trim().length === 0) {
         return textResult({
@@ -729,6 +752,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return await idleResult(deps, ctx);
       }
       const draftAction = params.action;
+      if (draftAction !== "read" && draftAction !== "list") {
+        const blocked = supervisorOnly(ctx, "plan mutation");
+        if (blocked) return blocked;
+      }
       if (draftAction === "list") {
         return textResult({ kind: "plan_drafts", drafts: (await listPlanDrafts(root)).map(({ draftId, revision, fields, missing }) => ({ draftId, revision, name: fields.name, goal: fields.goal, missing })) });
       }
@@ -1046,6 +1073,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     }),
     async execute(_id: string, params: { outputDirectory: string; attachmentRole: "ui_design" | "error_screenshot" | "document_pdf" | "context" | "unknown"; spec: WireframeSpec }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       if (params.attachmentRole !== "ui_design") return textResult({ kind: "wireframe_blocked", code: "NOT_UI_DESIGN", field: "attachmentRole", expected: "ui_design", received: params.attachmentRole, nextAction: "Keep this attachment as evidence; ask the user if the attachment role is ambiguous. Do not produce a wireframe." });
+      const blocked = supervisorOnly(ctx, "wireframe creation");
+      if (blocked) return blocked;
       try {
         const result = await createWireframe(params.outputDirectory, ctx.cwd, params.spec);
         return textResult({ kind: "wireframe_created", ...result });
@@ -1071,6 +1100,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival name/id; omit to promote the current festival"),
     }),
     async execute(_id: string, params: { festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const blocked = supervisorOnly(ctx, "festival promotion");
+      if (blocked) return blocked;
       const location = await deps.detect.locate(ctx.cwd);
       const sid = sessionIdOf(ctx);
       if (params.festival) {
@@ -1209,6 +1240,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival dir/name override when at camp root"),
     }),
     async execute(_id: string, params: { args: string[]; festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const blocked = params.args[0] && !READONLY_RAW_COMMANDS[params.args[0]]
+        ? supervisorOnly(ctx, `raw fest ${params.args[0]}`)
+        : undefined;
+      if (blocked) return blocked;
       const location = await deps.detect.locate(ctx.cwd);
       let cwd = location.festivalDir;
       if (!cwd && params.festival && location.campRoot) {
