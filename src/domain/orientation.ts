@@ -169,7 +169,7 @@ export function planInterviewKickoff(goal: string, visualGuidance?: string): str
     "Use repository evidence to resolve everything else. Do not implement before approval.",
     SUPERVISOR_POLICY,
     BROWSER_VERIFICATION_POLICY,
-    "Create a persisted fest_plan_draft first; edit individual fields using draftId+revision. Call fest_plan {action:'preview',draftId,draftRevision} instead of resending nested JSON. The draft remains incomplete until actual inspection and runnable verification are supplied.",
+    "Create/update/read/list drafts through fest_plan; ask only for its missing blocking fields. Preview the persisted revision with fest_plan {action:'preview',draftId,draftRevision} instead of resending nested JSON. No festival is created before explicit plan approval.",
     "When the native review returns approval:'approved', call fest_plan action:'scaffold' with its planRevision.",
     "New planning is independent of selected festivals: create a new name and continue even when another session owns an existing festival. Only existing-festival work (tasks, promotion, or reference revisions) requires ownership; never cancel or reset another plan.",
   ].join("\n");

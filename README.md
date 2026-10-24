@@ -174,12 +174,12 @@ not release from a nested package. No unattended release is authorized by a plan
 
 ### Persisted planning
 
-`fest_plan_draft` creates a private `.draft.json` artifact with `draftId` and
-`revision`. Read or update only the missing/changed fields; stale revisions reject
-concurrent overwrites. Missing runnable verification is an explicit missing field,
-not invented test proof. `/fest draft` offers native field editing and preview.
-Call `fest_plan` with `action:"preview"`, `draftId` and `draftRevision` to consume
-that persisted content without resending a deeply nested spec.
+`fest_plan` owns private `.draft.json` artifacts with `draftId` and `revision`.
+Use `action:"create"`, then `read`/`update`/`list` on the same tool; stale
+revisions reject concurrent overwrites. Missing runnable verification is an
+explicit missing field, not invented test proof. `/fest draft` provides native
+field editing and preview. Call `fest_plan` with `action:"preview"`, `draftId`
+and `draftRevision` to consume persisted content without resending a nested spec.
 
 Scaffolding renders festival/overview/phase/sequence/task documents from the
 approved contract, retains independent user notes and constraints, and removes
