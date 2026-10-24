@@ -12,8 +12,8 @@ import { LoopTracker } from "../src/application/loop-tracker.js";
 import type { PiLike, ToolDeps } from "../src/adapters/omp/tools.js";
 import { listProjectReservations, reserveProjectFiles, releaseProjectFiles } from "../src/application/project-conflicts.js";
 import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
-import { joinFestivalTeam, readFestivalTeam } from "../src/application/festival-team.js";
-import { readPortfolioState, recordPortfolioFestivalDispatch, reservePortfolioAssignment, setPortfolioPaused, updatePortfolioAssignmentRuntime } from "../src/application/portfolio-state.js";
+import { joinFestivalTeam, readFestivalTeam, transferFestivalTeamCoordinator } from "../src/application/festival-team.js";
+import { readPortfolioState, recordPortfolioFestivalDispatch, reservePortfolioAssignment, setPortfolioPaused, updatePortfolioAssignment, updatePortfolioAssignmentRuntime } from "../src/application/portfolio-state.js";
 import { supervisorPortfolioQueue } from "../src/adapters/omp/supervisor-tools.js";
 import { PAGE, SVG } from "./visual-fixture.js";
 
@@ -370,9 +370,10 @@ describe("festival supervisor", () => {
       registerSupervisorTools(pi, deps, supervisor, { isMainSession: (context) => context.agent?.kind !== "sub" });
       let running: { id: string; type: string; status: string; label: string }[] = [];
       const confirm = vi.fn(() => Promise.resolve(true));
+      let coordinatorSession = "coordinator";
       const ctx = {
         cwd: root,
-        sessionManager: { getSessionId: () => "coordinator" },
+        sessionManager: { getSessionId: () => coordinatorSession },
         getAsyncJobSnapshot: () => ({ running }),
         ui: { confirm },
       };
@@ -392,11 +393,26 @@ describe("festival supervisor", () => {
       const active = await call({ action: "accept_reviewed", assignment: assignment.id, evidence: "Reviewed files and checks" });
       expect(active.error).toContain("still has a running native job");
       expect(confirm).not.toHaveBeenCalled();
-
       running = [];
+
       await updatePortfolioAssignmentRuntime(root, assignment.id, {
         runtimeStatus: "unverifiable", runtimeObservedAt: new Date().toISOString(),
       });
+      await updatePortfolioAssignment(root, assignment.id, "blocked", { failure: "No native runtime is available in the new session." });
+      const sameSessionSupervisor = new Supervisor();
+      registerSupervisorTools(pi, deps, sameSessionSupervisor, { isMainSession: (context) => context.agent?.kind !== "sub" });
+      const status = await call({ action: "status" });
+      const statusWorkers = (status.state as { workers: { id: string; status: string; runtime?: { status: string } }[] }).workers;
+      expect(statusWorkers).toHaveLength(1);
+      expect(statusWorkers[0]).toMatchObject({ id: assignment.id, status: "blocked", runtime: { status: "unverifiable" } });
+
+      const nextCoordinator = "coordinator-next";
+      await joinFestivalTeam(root, festival, nextCoordinator, "coordinator");
+      const transferred = await claimFestivalOwnership(festival, nextCoordinator, ownership.owner);
+      expect(transferred.kind).toBe("claimed");
+      await transferFestivalTeamCoordinator(root, festival, "coordinator", nextCoordinator);
+      coordinatorSession = nextCoordinator;
+
       const recoveredSupervisor = new Supervisor();
       registerSupervisorTools(pi, deps, recoveredSupervisor, { isMainSession: (context) => context.agent?.kind !== "sub" });
       const accepted = await call({

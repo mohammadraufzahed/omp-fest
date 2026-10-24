@@ -180,8 +180,9 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
     const id = basename(festival.path);
     const team = await readFestivalTeam(location.campRoot, festival.path).catch(() => undefined);
     for (const shared of team?.assignments ?? []) {
-      if (shared.sessionId !== sid) continue;
       const ledger = ledgerById.get(shared.id);
+      if (!ledger && shared.sessionId !== sid) continue;
+      if (ledger && ledger.festival !== id) continue;
       if (!ledger) {
         const task = recoveryTasks.get(id)?.find((row) => row.path === shared.task);
         recovered.push({
@@ -193,7 +194,6 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
         });
         continue;
       }
-      if (ledger.sessionId !== sid) continue;
       const status: WorkerAssignment["status"] = ["failed", "exited"].includes(ledger.runtimeStatus ?? "") || ledger.status === "failed" || ledger.status === "released"
         ? "failed"
         : shared.status === "accepted" || ledger.status === "accepted" ? "accepted"
@@ -210,7 +210,7 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
         } } : {}),
       });
     }
-    for (const ledger of stored.assignments.filter((entry) => entry.festival === id && entry.sessionId === sid && !recovered.some((worker) => worker.id === entry.id))) {
+    for (const ledger of stored.assignments.filter((entry) => entry.festival === id && !recovered.some((worker) => worker.id === entry.id))) {
       const failed = ledger.status === "failed" || ledger.status === "released" || ["failed", "exited"].includes(ledger.runtimeStatus ?? "");
       recovered.push({
         id: ledger.id, festival: id, task: ledger.task, worker: ledger.worker, files: ledger.files,

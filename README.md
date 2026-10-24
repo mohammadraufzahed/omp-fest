@@ -63,6 +63,11 @@ and per omp session: `/fest select <festival>` explicitly claims coordinator
 ownership; `/fest join <festival>` joins the team without transfer. New sessions
 are unselected. A join never grants coordinator authority or expands the
 supervisor's portfolio; a confirmed transfer is required to change owners.
+After a confirmed transfer, the new owner’s supervisor view restores that
+festival’s existing assignments by stable assignment ID, even when they were
+created by the previous owner session. Transfer does not accept work, stop
+workers, or relaunch runtimes; reconcile runtime state and review the work
+explicitly.
 Only the owning main session selects tasks, changes festival state, records final
 integration, accepts worker reports, completes tasks, commits, submits gates,
 and operates credential-backed browser flows. Subagents do scoped implementation
