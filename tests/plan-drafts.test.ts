@@ -67,6 +67,45 @@ describe("persisted plan drafts", () => {
     expect(updated.spec.phases).toEqual(compact.spec.phases);
     expect(updated.missing).toEqual([]);
   });
+  it("infers package-script and explicit test-target evidence while preserving partial verification edits", async () => {
+    const { root, fields } = await fixture();
+    const withoutEvidence = await createPlanDraft(root, {
+      ...fields,
+      verification: { command: "npm run test", expected: "Feature regression passes" },
+    });
+    expect(withoutEvidence.fields.verification?.evidencePath).toBe("package.json");
+    expect(withoutEvidence.missing).toEqual([]);
+    await mkdir(join(root, fields.workingDir!, "tests"), { recursive: true });
+    await writeFile(join(root, fields.workingDir!, "tests", "sample_test.py"), "def test_feature(): pass\n");
+    const testTarget = await createPlanDraft(root, {
+      ...fields,
+      verification: { command: "pytest tests", expected: "Feature regression passes" },
+    });
+    expect(testTarget.fields.verification?.evidencePath).toBe("tests");
+    expect(testTarget.missing).toEqual([]);
+
+    const partialUpdate = await updatePlanDraft(root, withoutEvidence.draftId, withoutEvidence.revision, {
+      verification: { expected: "Updated regression result" },
+    });
+    expect(partialUpdate.fields.verification).toEqual({
+      command: "npm run test",
+      cwd: ".",
+      evidencePath: "package.json",
+      expected: "Updated regression result",
+    });
+    expect(partialUpdate.missing).toEqual([]);
+  });
+
+  it("reports an unresolved evidence field instead of building a misleading verification check", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, {
+      ...fields,
+      verification: { command: "custom-check", expected: "The check succeeds" },
+    });
+    expect(draft.missing).toContain("verification.evidencePath");
+    expect(draft.spec.phases[0]!.sequences[0]!.tasks[0]!.verification).toEqual([]);
+  });
+
 
   it("persists incomplete observations but does not invent scope or verification", async () => {
     const { root } = await fixture();

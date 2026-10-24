@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { previewPlan, type PlanArtifact } from "./plan-artifacts.js";
+import { inferVerificationEvidencePath } from "./plan-input.js";
 import type { StructuredPlan } from "./structured-plan.js";
 import type { ClassifiedAttachment } from "../domain/reference-classification.js";
 
@@ -15,7 +16,7 @@ export interface PlanDraftFields {
   workingDir?: string;
   exclusions?: string[];
   files?: string[];
-  verification?: { command: string; cwd?: string; evidencePath: string; expected: string } | null;
+  verification?: { command?: string; cwd?: string; evidencePath?: string; expected?: string } | null;
   visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown";
   attachments?: ClassifiedAttachment[];
   rules?: string;
@@ -59,16 +60,21 @@ function validate(fields: PlanDraftFields, root: string): PlanDraftFields {
     if (result.visualIntent !== "ui_visual" || !result.attachments?.some((item) => item.role === "ui_design")) throw new Error("Wireframes require explicit ui_visual intent and at least one attachment classified as ui_design.");
   }
   if (result.verification) {
-    relativePath(result.verification.cwd ?? ".", "Verification cwd");
-    relativePath(result.verification.evidencePath, "Verification evidencePath");
+    result.verification.cwd ??= ".";
+    relativePath(result.verification.cwd, "Verification cwd");
+    result.verification.evidencePath ??= inferVerificationEvidencePath(result.verification.command, result.verification.cwd);
+    if (result.verification.evidencePath) relativePath(result.verification.evidencePath, "Verification evidencePath");
   }
   if (result.spec) {
     for (const item of result.spec.inspection) relativePath(item.path, "Inspection path");
     for (const task of result.spec.phases.flatMap((phase) => phase.sequences.flatMap((sequence) => sequence.tasks))) {
       for (const file of task.files) relativePath(file.path, "File");
       for (const check of task.verification) {
+        check.cwd ||= ".";
+        const inferredEvidence = inferVerificationEvidencePath(check.command, check.cwd);
+        if (!check.evidencePath && inferredEvidence) check.evidencePath = inferredEvidence;
         relativePath(check.cwd, "Verification cwd");
-        relativePath(check.evidencePath, "Verification evidencePath");
+        if (check.evidencePath) relativePath(check.evidencePath, "Verification evidencePath");
       }
     }
   }
@@ -96,6 +102,9 @@ function build(root: string, draftId: string, fields: PlanDraftFields, previous?
     assigned.add(id);
     return { id, description };
   });
+  const draftVerification = fields.verification?.command && fields.verification.evidencePath && fields.verification.expected
+    ? [{ command: fields.verification.command, cwd: fields.verification.cwd ?? ".", evidencePath: fields.verification.evidencePath, expected: fields.verification.expected }]
+    : [];
   const spec = fields.spec ?? {
     goal: fields.goal ?? "", scope: fields.scope ?? [], exclusions: fields.exclusions ?? [], acceptance,
     questions: [], inspection: fields.inspection ?? [],
@@ -103,14 +112,26 @@ function build(root: string, draftId: string, fields: PlanDraftFields, previous?
       id: "implement", title: fields.goal ?? "", description: fields.goal ?? "", dependsOn: [],
       implements: acceptance.map((item) => item.id), verifies: acceptance.map((item) => item.id),
       files: (fields.files ?? []).map((path) => ({ path, status: "existing" })),
-      verification: fields.verification ? [{ ...fields.verification, cwd: fields.verification.cwd ?? "." }] : [],
+      verification: draftVerification,
     }] }] }],
   } satisfies StructuredPlan;
+  const verificationMissing = fields.spec
+    ? spec.phases.flatMap((phase) => phase.sequences.flatMap((sequence) => sequence.tasks.flatMap((task) => task.verifies.length && !task.verification.length
+      ? [`verification for ${task.id}`]
+      : task.verification.flatMap((check) => [
+        ...(!check.command ? [`verification.command for ${task.id}`] : []),
+        ...(!check.evidencePath ? [`verification.evidencePath for ${task.id}`] : []),
+        ...(!check.expected ? [`verification.expected for ${task.id}`] : []),
+      ]))))
+    : !fields.verification ? ["verification"] : [
+      ...(!fields.verification.command ? ["verification.command"] : []),
+      ...(!fields.verification.evidencePath ? ["verification.evidencePath"] : []),
+      ...(!fields.verification.expected ? ["verification.expected"] : []),
+    ];
   const missing = [
     ...(!spec.goal.trim() ? ["goal"] : []), ...(!spec.scope.length ? ["scope"] : []),
     ...(!spec.acceptance.length ? ["acceptance"] : []), ...(!spec.inspection.length ? ["inspection"] : []),
-    ...(!fields.workingDir ? ["workingDir"] : []),
-    ...(!fields.spec && !fields.verification ? ["verification"] : []),
+    ...(!fields.workingDir ? ["workingDir"] : []), ...verificationMissing,
     ...(fields.attachments ?? []).filter((item) => item.role === "unknown").map((item) => `attachment role: ${item.name}`),
   ];
   const revision = createHash("sha256").update(JSON.stringify({ draftId, fields, spec, previous: previous?.revision })).digest("hex");
@@ -166,7 +187,11 @@ export async function updatePlanDraft(root: string, draftId: string, revision: s
   try {
     const previous = await readPlanDraft(root, draftId);
     if (previous.revision !== revision) throw new Error("Stale draft revision; read the current draft before editing");
-    const fields = validate({ ...previous.fields, ...patch }, target.root);
+    const verification = patch.verification && previous.fields.verification
+      ? { ...previous.fields.verification, ...patch.verification }
+      : patch.verification;
+    const merged = { ...previous.fields, ...patch, ...(verification !== undefined ? { verification } : {}) };
+    const fields = validate(merged, target.root);
     if (previous.fields.spec && patch.spec === undefined) {
       if (patch.files !== undefined || patch.verification !== undefined) throw new Error("Edit task files and verification in the structured spec");
       fields.spec = structuredClone(previous.fields.spec);

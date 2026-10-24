@@ -353,6 +353,16 @@ describe("project and command evidence boundaries", () => {
     Object.assign(check, { command, evidencePath });
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain(command);
   });
+  it("accepts an existing test directory named by a direct test-runner command", async () => {
+    const { root, project, workingDir, spec, check } = await fixture();
+    await mkdir(join(project, "tests"), { recursive: true });
+    await writeFile(join(project, "tests", "test_feature.py"), "def test_feature(): pass\n");
+    Object.assign(check, { command: "pytest tests", evidencePath: "tests" });
+    expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain("pytest tests");
+    await writeFile(join(project, "tests", "lint.php"), "<?php echo 'not executed';\n");
+    Object.assign(check, { command: "php -l tests/lint.php", evidencePath: "tests" });
+    expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain("php -l tests/lint.php");
+  });
 });
 
 describe("structuredPlanSchema", () => {

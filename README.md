@@ -143,9 +143,9 @@ currently exposes no supported secure secret-injection contract for invoking the
 login credentials are never sent through MCP.
 
 Before planning, pending plan artifacts with overlapping file boundaries are
-reported. Native UI offers sequential execution, narrower scope, or a separate
-worktree. Choosing sequential preserves both plans and records the decision in
-the approved plan; neither plan is cancelled automatically.
+reported as a conversational choice: sequence both plans, narrow one scope, or
+use a separate worktree. The tool returns the options without opening a blocking
+selection modal. Choosing sequential preserves both plans; neither is cancelled.
 
 ### Final integration, evidence and release
 
@@ -216,16 +216,21 @@ The `StructuredPlan` contract is:
 | Task `dependsOn[]` | IDs of earlier tasks in phase/sequence/task order; no missing, forward or cyclic dependencies. |
 | Task `implements[]`, `verifies[]` | Acceptance IDs covered by implementation and verification respectively. |
 | Task `files[]` | `{path, status: "existing" \| "proposed"}`; existing files must be confirmed, proposed files must not already exist. |
-| Task `verification[]` | `{command, cwd, evidencePath, expected}` specifying a runnable check, existing command evidence and observable expected result. |
+| Task `verification[]` | `{command, cwd, evidencePath?, expected}` specifying a runnable check, existing command evidence and observable expected result. |
 
 IDs are unique across acceptance criteria, phases, sequences and tasks. Every
 acceptance criterion needs both implementation and verification coverage; a task
 may provide both. Verification tasks need concrete verification entries. Paths are
-project-relative; verification `cwd` may be `"."`. `evidencePath` must already exist
-and substantiate the command, such as `package.json` for a package script; it is not
-a future result log or proof that verification passed. Package-script commands must
-refer to scripts declared in the package at that cwd. Actual result evidence is
-captured during execution, not invented during planning. The contract needs nonempty
+project-relative; verification `cwd` may be `"."`. An omitted `evidencePath` is
+inferred from an npm/pnpm/yarn/bun package manifest or an explicit command target
+such as `php -l path/to/check.php` or `pytest tests`. A supplied evidence path must
+exist and substantiate the command: package scripts require `cwd/package.json`;
+pytest/phpunit may name an existing test directory targeted by the command; direct
+script commands may use the script file or its containing directory. A generic
+directory does not substantiate a package script. Evidence is not a future result
+log or proof that verification passed. Package-script commands must refer to scripts
+declared in the package at that cwd. Actual result evidence is captured during
+execution, not invented during planning. The contract needs nonempty
 scope, inspection, acceptance and executable hierarchy; empty exclusions/questions
 are valid. Phase names are normalized to parser-safe uppercase tokens, and naming
 collisions are rejected. Sequence names must not end in `_planning`, `_research`,

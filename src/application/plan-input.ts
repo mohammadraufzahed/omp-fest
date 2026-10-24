@@ -25,6 +25,34 @@ function unique(base: string, used: Set<string>): string {
   used.add(id);
   return id;
 }
+/** Infer evidence only from an explicit command target or the package manifest used by a package runner. */
+export function inferVerificationEvidencePath(command: string | undefined, cwd = "."): string | undefined {
+  if (!command?.trim()) return undefined;
+  const words = command.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map((word) => word.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
+  const executable = words[0]?.split(/[\\/]/).at(-1);
+  if (!executable) return undefined;
+  if (["npm", "pnpm", "yarn", "bun"].includes(executable)) return `${cwd === "." ? "" : `${cwd.replace(/\/+$/, "")}/`}package.json`;
+  const directory = verificationDirectoryArgument(command);
+  if (directory) return directory.replaceAll("\\", "/");
+  let script: string | undefined;
+  if (executable === "php") script = words[1] === "-l" ? words[2] : words[1];
+  else if (["node", "python", "python3", "ruby", "bash", "sh"].includes(executable)) script = words[1];
+  else if (executable === "deno") script = words[1] === "run" ? words[2] : words[1];
+  else if (words[0]?.includes("/")) script = words[0];
+  if (!script || script.startsWith("-") || !/[./\\]/.test(script)) return undefined;
+  return script.replaceAll("\\", "/");
+}
+function verificationDirectoryArgument(command: string | undefined): string | undefined {
+  if (!command?.trim()) return undefined;
+  const words = command.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map((word) => word.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
+  const executable = words[0]?.split(/[\\/]/).at(-1);
+  const directoryArg = executable === "pytest" || executable === "phpunit"
+    ? words[1]
+    : (executable === "python" || executable === "python3") && words[1] === "-m" && words[2] === "pytest"
+      ? words[3]
+      : undefined;
+  return directoryArg && !directoryArg.startsWith("-") ? directoryArg : undefined;
+}
 
 function projectRelative(root: string, value: string, warnings: string[], label: string): string {
   if (!isAbsolute(value)) return value;
@@ -75,11 +103,18 @@ export function normalizePlanInput(input: StructuredPlan, projectRoot: string): 
         task.implements = task.implements.map((id) => acceptanceMap.get(id) ?? id);
         task.verifies = task.verifies.map((id) => acceptanceMap.get(id) ?? id);
         task.files = task.files.map((file) => ({ ...file, path: projectRelative(projectRoot, file.path, warnings, "task file") }));
-        task.verification = task.verification.map((check) => ({
-          ...check,
-          cwd: projectRelative(projectRoot, check.cwd, warnings, "verification cwd"),
-          evidencePath: projectRelative(projectRoot, check.evidencePath, warnings, "verification evidencePath"),
-        }));
+        task.verification = task.verification.map((check) => {
+          const cwd = check.cwd || ".";
+          const inferred = !check.evidencePath ? inferVerificationEvidencePath(check.command, cwd) : undefined;
+          const evidencePath = check.evidencePath || inferred;
+          if (!evidencePath) throw new Error(`Verification evidencePath is missing and cannot be inferred from command "${check.command}"; provide an existing package manifest, command script, or direct test-runner target.`);
+          if (inferred) warnings.push(`verification evidencePath was inferred from its command: ${inferred}`);
+          return {
+            ...check,
+            cwd: projectRelative(projectRoot, cwd, warnings, "verification cwd"),
+            evidencePath: projectRelative(projectRoot, evidencePath, warnings, "verification evidencePath"),
+          };
+        });
       }
     }
   }

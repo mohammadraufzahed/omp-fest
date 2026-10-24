@@ -332,6 +332,14 @@ describe("visual planning tool handoff", () => {
   });
 
 
+  it("does not open a blocking selection modal when a plan overlap needs human choice", async () => {
+    const { spec, call } = await setup();
+    await call("fest_plan", { name: "modal-first", action: "preview", spec });
+    const select = vi.fn(() => new Promise<string | undefined>(() => undefined));
+    const result = await call("fest_plan", { name: "modal-second", action: "preview", spec }, { select });
+    expect(result).toMatchObject({ kind: "planning_conflict", choices: ["sequence", "narrow", "worktree"] });
+    expect(select).not.toHaveBeenCalled();
+  });
   it("surfaces overlapping pending plans and leaves both untouched until the human chooses", async () => {
     const { root, spec, call } = await setup();
     const first = await call("fest_plan", { name: "plan-one", action: "preview", spec });

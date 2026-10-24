@@ -56,7 +56,7 @@ export function structuredPlanSchema(z: ZodLike): ZodSchema {
           dependsOn: strings(), implements: strings(), verifies: strings(),
           files: z.array(z.object({ path: z.string(), status: z.enum(["existing", "proposed"]) })),
           verification: z.array(z.object({
-            command: z.string(), cwd: z.string(), evidencePath: z.string(), expected: z.string(),
+            command: z.string(), cwd: z.string().optional(), evidencePath: z.string().optional(), expected: z.string(),
           })),
         })),
       })),
@@ -272,16 +272,40 @@ function commandWords(command: string): string[] {
   return words;
 }
 
+function commandScriptArgument(words: string[], executable: string): string | undefined {
+  if (executable === "php") return words[1] === "-l" ? words[2] : words[1];
+  if (["node", "python", "python3", "ruby", "bash", "sh"].includes(executable)) return words[1];
+  if (executable === "deno") return words[1] === "run" ? words[2] : words[1];
+  if (words[0]?.includes("/")) return words[0];
+  return undefined;
+}
+function commandTestDirectoryArgument(words: string[], executable: string): string | undefined {
+  if (executable === "pytest" || executable === "phpunit") {
+    const path = words[1];
+    return path && !path.startsWith("-") ? path : undefined;
+  }
+  if ((executable === "python" || executable === "python3") && words[1] === "-m" && words[2] === "pytest") {
+    const path = words[3];
+    return path && !path.startsWith("-") ? path : undefined;
+  }
+  return undefined;
+}
+
+function testDirectoryArgument(words: string[], executable: string): string | undefined {
+  return commandTestDirectoryArgument(words, executable);
+}
+
 async function validateVerification(root: string, check: StructuredTask["verification"][number]): Promise<void> {
   const cwd = await existingPath(root, check.cwd, "Verification cwd", "directory");
-  const evidence = await existingPath(root, check.evidencePath, "Verification evidencePath", "file");
-  const source = await readFile(evidence, "utf8");
+  const evidencePath = await existingPath(root, check.evidencePath, "Verification evidencePath");
+  const evidenceInfo = await stat(evidencePath);
   const words = commandWords(check.command);
   const executable = words[0];
   if (!executable) throw new Error("Verification command must contain an executable");
   if (["npm", "pnpm", "yarn", "bun"].includes(executable)) {
     const manifest = await existingPath(root, relative(root, resolve(cwd, "package.json")), "Verification package.json", "file");
-    if (evidence !== manifest) throw new Error("Package script verification evidencePath must be cwd/package.json");
+    if (!evidenceInfo.isFile() || evidencePath !== manifest) throw new Error("Package script evidencePath must be cwd/package.json; a test directory does not substantiate package scripts");
+    const source = await readFile(evidencePath, "utf8");
     const explicitRun = words[1] === "run" || (executable === "npm" && words[1] === "run-script");
     if (!explicitRun && (executable === "bun" || !["test", "start", "stop", "restart"].includes(words[1] ?? ""))) throw new Error("Package verification must invoke a script with run (or a supported test/start alias)");
     const script = explicitRun ? words[2] : words[1];
@@ -290,6 +314,23 @@ async function validateVerification(root: string, check: StructuredTask["verific
     if (words.some((word) => /^(?:--(?:prefix|cwd|dir|workspace|workspaces)|-C|-w)(?:=|$)/.test(word))) throw new Error("Verification command must use its declared cwd, not a directory/workspace override");
     return;
   }
+  let evidence = evidencePath;
+  if (evidenceInfo.isDirectory()) {
+    const testDirectory = testDirectoryArgument(words, executable);
+    if (testDirectory) {
+      const commandDirectory = await existingPath(root, relative(root, resolve(cwd, testDirectory)), "Verification test directory", "directory");
+      if (!inside(evidencePath, commandDirectory)) throw new Error(`Verification test directory must be inside evidencePath directory: ${check.evidencePath}`);
+      return;
+    }
+    const script = commandScriptArgument(words, executable);
+    if (!script || script.startsWith("-")) throw new Error("Verification evidencePath is a directory; use a command script inside it or choose an existing evidence file");
+    const commandFile = await existingPath(root, relative(root, resolve(cwd, script)), "Verification command script", "file");
+    if (!inside(evidencePath, commandFile)) throw new Error(`Verification command script must be inside evidencePath directory: ${check.evidencePath}`);
+    evidence = commandFile;
+  } else if (!evidenceInfo.isFile()) {
+    throw new Error("Verification evidencePath must be a regular file or a directory containing the command target");
+  }
+  const source = await readFile(evidence, "utf8");
   const evidenceName = basename(evidence);
   const localManifest = dirname(evidence) === cwd;
   if (localManifest && executable === "go" && words[1] === "test" && evidenceName === "go.mod" && /^module\s+\S+/m.test(source)) return;
@@ -299,14 +340,13 @@ async function validateVerification(root: string, check: StructuredTask["verific
     if (target && /^[A-Za-z0-9_.-]+$/.test(target) && source.split("\n").some((line) => line.split(":")[0]?.split(/\s+/).includes(target))) return;
     throw new Error(`Verification command references missing make target: ${target ?? "(none)"}`);
   }
-  const interpreted = ["node", "python", "python3", "ruby", "bash", "sh", "deno"].includes(executable);
-  const script = interpreted ? (executable === "deno" && words[1] === "run" ? words[2] : words[1]) : executable;
+  const interpreted = ["node", "python", "python3", "php", "ruby", "bash", "sh", "deno"].includes(executable);
+  const script = interpreted ? commandScriptArgument(words, executable) : undefined;
   if (script && !script.startsWith("-") && inside(root, resolve(cwd, script))) {
     const canonical = await realpath(resolve(cwd, script)).catch(() => undefined);
     if (canonical === evidence) return;
   }
-  // A checked-in command reference can substantiate tools without a supported manifest format.
-  if (source.split(/\r?\n/).some((line) => line.trim() === check.command || line.trim() === `\`${check.command}\`` || line.trim() === `$ ${check.command}`)) return;
+  if (source.split(/\r?\n/).some((line) => line.trim() === check.command || line.trim() === "`" + check.command + "`" || line.trim() === `$ ${check.command}`)) return;
   throw new Error(`Verification command is not substantiated by evidencePath: ${check.evidencePath}`);
 }
 

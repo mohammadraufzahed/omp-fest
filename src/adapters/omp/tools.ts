@@ -655,20 +655,20 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_plan",
     label: "Fest Plan (Scaffold From Plan)",
     description:
-      "Single stateful planning API. Use action create/update/read/list for persisted incremental drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
+      "Single stateful planning API. Use action create/update/read/list for persisted incremental drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
     parameters: z.object({
       action: z.enum(["create", "read", "update", "list", "preview", "scaffold"]).optional(),
       name: z.string().optional(), plan: z.string().optional(), draftId: z.string().optional(), draftRevision: z.string().optional(),
       goal: z.string().optional(), scope: z.array(z.string()).optional(), exclusions: z.array(z.string()).optional(),
       acceptance: z.array(z.string()).optional(), inspection: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
       workingDir: z.string().optional(), files: z.array(z.string()).optional(), rules: z.string().optional(),
-      verification: z.object({ command: z.string(), cwd: z.string().optional(), evidencePath: z.string(), expected: z.string() }).optional(),
+      verification: z.object({ command: z.string().optional(), cwd: z.string().optional(), evidencePath: z.string().optional(), expected: z.string().optional() }).optional(),
       attachments: z.array(z.object({ name: z.string(), description: z.string(), role: z.enum(["ui_design", "error_screenshot", "document_pdf", "context", "unknown"]).optional() })).optional(),
       spec: structuredPlanSchema(z).optional(), approvedRevision: z.string().optional(), referencesDir: z.string().optional(),
       visualIntent: z.enum(["ui_visual", "document_or_pdf", "backend_or_api", "bug_diagnostic", "mixed", "unknown"]).optional(),
       referenceAction: z.enum(["preview", "revise"]).optional(), festival: z.string().optional(),
       baseRevision: z.string().optional(), proposalRevision: z.string().optional(),
-      conflictChoice: z.enum(["sequence", "narrow", "worktree"]).optional().describe("Human-selected resolution after planning_conflict: sequence overlapping tasks, narrow one scope, or use a separate worktree"),
+      conflictChoice: z.enum(["sequence", "narrow", "worktree"]).optional().describe("Human-selected resolution after returning planning_conflict options and asking conversationally; never open a blocking selection modal"),
     }),
     async execute(_id: string, params: { action?: "create" | "read" | "update" | "list" | "preview" | "scaffold"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
@@ -748,15 +748,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           if (!spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
           const normalized = normalizePlanInput(spec, resolve(root, project.dir));
           const conflicts = await findPlanningConflicts(root, params.name, project.dir, normalized.spec);
-          let conflictChoice = params.conflictChoice;
-          if (conflicts.length && !conflictChoice && ctx.ui?.select) {
-            const answer = await ctx.ui.select("Overlapping festival plans", [
-              "sequence — keep both plans; execute overlapping files one at a time",
-              "narrow — revise file scope, then preview again",
-              "worktree — target an isolated project worktree and preview again",
-            ]);
-            conflictChoice = answer?.startsWith("sequence") ? "sequence" : answer?.startsWith("narrow") ? "narrow" : answer?.startsWith("worktree") ? "worktree" : undefined;
-          }
+          const conflictChoice = params.conflictChoice;
           if (conflicts.length && !conflictChoice) return textResult({ kind: "planning_conflict", conflicts, choices: ["sequence", "narrow", "worktree"], nextAction: "Ask the human to choose; no plan artifact was written and no existing plan was changed or cancelled. Retry preview with conflictChoice." });
           if (conflicts.length && conflictChoice === "narrow") return textResult({ kind: "planning_conflict", conflicts, resolution: "narrow", nextAction: "Revise the draft/spec to remove overlapping files, then preview again. Existing plans remain unchanged." });
           if (conflicts.length && conflictChoice === "worktree") return textResult({ kind: "planning_conflict", conflicts, resolution: "worktree", nextAction: "Choose an isolated worktree as workingDir, then preview again. This tool does not create or transfer a worktree." });
