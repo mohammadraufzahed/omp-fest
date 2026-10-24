@@ -350,20 +350,30 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             throw error;
           }
         } else {
-          if (!params.assignment) throw new Error("Assignment id is required.");
-          const assignment = supervisor.state(sid).workers.find((worker) => worker.id === params.assignment);
-          if (!assignment) throw new Error("Unknown assignment in this supervisor session.");
+          if (!params.assignment && !params.task) throw new Error("Provide an assignment ID or an exact task path.");
+          const currentLocation = await deps.detect.locate(ctx.cwd);
+          if (currentLocation.campRoot) await supervisorPortfolioQueue(deps, supervisor, sid, ctx.cwd);
+          const workers = supervisor.state(sid).workers;
+          const matchesForTask = () => workers.filter((worker) => worker.task === params.task &&
+            (!params.festival || worker.festival === params.festival || basename(worker.festival) === basename(params.festival)));
+          let assignment = params.assignment ? workers.find((worker) => worker.id === params.assignment) : undefined;
+          if (!assignment && params.task) {
+            const matches = matchesForTask();
+            if (matches.length > 1) throw new Error("Task path matches multiple assignments; provide the exact assignment ID.");
+            assignment = matches[0];
+          }
+          if (!assignment) throw new Error("Festival assignment not found in the selected session. Refresh action=status and use its exact assignment ID or task path.");
           const { dir: assignmentDir, campRoot } = await festivalLocation(deps, sid, ctx.cwd, assignment.festival);
           const ownership = await festivalOwner(assignmentDir);
           if (ownership?.sessionId !== sid) throw new Error("Festival ownership changed; this session cannot mutate its worker assignment.");
           if (params.action === "question") {
-            const row = supervisor.question(sid, params.assignment, params.evidence ?? "");
+            const row = supervisor.question(sid, assignment.id, params.evidence ?? "");
             if ((await readPortfolioState(campRoot)).assignments.some((entry) => entry.id === row.assignmentId)) await updatePortfolioAssignment(campRoot, row.assignmentId, "blocked", { failure: row.question });
             result = row;
           } else if (params.action === "running") {
             const jobs = ctx.getAsyncJobSnapshot?.(), job = [...(jobs?.running ?? []), ...(jobs?.recent ?? [])].find((item) => item.id === params.runtimeId);
             if (job?.type !== "task" || job.status !== "running" || (job.label !== assignment.worker && job.agentId !== assignment.worker)) throw new Error("Bind only a host-observed running task job whose label/agentId matches this assigned worker. Inspect fest_capabilities; do not invent runtime IDs.");
-            const row = supervisor.update(sid, params.assignment, "running", "");
+            const row = supervisor.update(sid, assignment.id, "running", "");
             const observed = supervisor.observeRuntime(sid, { assignmentId: row.id, runtimeId: job.id, status: "running" }, "native_runtime");
             await updatePortfolioAssignment(campRoot, row.id, "running");
             await updatePortfolioAssignmentRuntime(campRoot, row.id, { runtimeId: job.id, runtimeStatus: "running", runtimeObservedAt: observed.runtime?.observedAt });
@@ -375,7 +385,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
               throw new Error("Coordinator attestation requires a completed or explicitly unverifiable worker runtime; reconcile native lifecycle first.");
             }
             if (!["assigned", "running", "blocked"].includes(assignment.status)) {
-              throw new Error(`Coordinator worktree acceptance cannot replace a ${assignment.status} worker report; use the normal independent review for submitted results.`);
+              throw new Error(`Coordinator worktree acceptance cannot replace an existing ${assignment.status} assignment; use the normal independent review for submitted results.`);
             }
             const jobs = ctx.getAsyncJobSnapshot?.();
             if (!jobs) throw new Error("Cannot attest while native worker state is unavailable. Reconcile through fest_supervisor action=resume and retry.");
@@ -401,9 +411,9 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
                 ? await hooks.storeReport(assignmentDir, evidence)
                 : await storeEvidenceBundle(assignmentDir, { kind: "worker", summary: evidence.trim().slice(0, 600), details: evidence });
               evidence = stored.summary; artifact = stored.path;
-              await submitFestivalTask(campRoot, assignmentDir, sid, params.assignment, evidence);
+              await submitFestivalTask(campRoot, assignmentDir, sid, assignment.id, evidence);
             }
-            const row = supervisor.update(sid, params.assignment, params.action, evidence, artifact);
+            const row = supervisor.update(sid, assignment.id, params.action, evidence, artifact);
             if (params.action === "accept" || params.action === "revise") {
               await reviewFestivalTask(campRoot, assignmentDir, sid, row.id, params.action, evidence);
               await updatePortfolioAssignment(campRoot, row.id, params.action === "accept" ? "accepted" : "blocked", {

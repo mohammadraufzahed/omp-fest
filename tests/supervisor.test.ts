@@ -13,7 +13,7 @@ import type { PiLike, ToolDeps } from "../src/adapters/omp/tools.js";
 import { listProjectReservations, reserveProjectFiles, releaseProjectFiles } from "../src/application/project-conflicts.js";
 import { claimFestivalOwnership } from "../src/application/festival-ownership.js";
 import { joinFestivalTeam, readFestivalTeam } from "../src/application/festival-team.js";
-import { readPortfolioState, recordPortfolioFestivalDispatch, reservePortfolioAssignment, setPortfolioPaused } from "../src/application/portfolio-state.js";
+import { readPortfolioState, recordPortfolioFestivalDispatch, reservePortfolioAssignment, setPortfolioPaused, updatePortfolioAssignmentRuntime } from "../src/application/portfolio-state.js";
 import { supervisorPortfolioQueue } from "../src/adapters/omp/supervisor-tools.js";
 import { PAGE, SVG } from "./visual-fixture.js";
 
@@ -394,6 +394,11 @@ describe("festival supervisor", () => {
       expect(confirm).not.toHaveBeenCalled();
 
       running = [];
+      await updatePortfolioAssignmentRuntime(root, assignment.id, {
+        runtimeStatus: "unverifiable", runtimeObservedAt: new Date().toISOString(),
+      });
+      const recoveredSupervisor = new Supervisor();
+      registerSupervisorTools(pi, deps, recoveredSupervisor, { isMainSession: (context) => context.agent?.kind !== "sub" });
       const accepted = await call({
         action: "accept_reviewed",
         assignment: assignment.id,
@@ -405,6 +410,13 @@ describe("festival supervisor", () => {
       });
       expect((accepted.sharedAssignment as { report?: string }).report).toBeUndefined();
       expect(confirm).toHaveBeenCalledOnce();
+      const taskSelectorFallback = await call({
+        action: "accept_reviewed",
+        assignment: "7",
+        task,
+        evidence: "Reviewed via exact task path.",
+      });
+      expect(taskSelectorFallback.error).toContain("cannot replace an existing accepted assignment");
       const portfolioAssignment = (await readPortfolioState(root)).assignments[0];
       expect(portfolioAssignment).toMatchObject({ status: "accepted", reviewSource: "coordinator-worktree" });
       expect(portfolioAssignment?.report).toBeUndefined();
