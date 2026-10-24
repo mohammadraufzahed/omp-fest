@@ -74,8 +74,20 @@ export async function supervisorQueue(deps: ToolDeps, supervisor: Supervisor, si
       const conflict = await checkProjectConflicts(candidate.workingDir, candidate.files);
       if (conflict.kind === "clear") candidates.push(candidate);
       else {
-        const reason = conflict.kind === "busy" ? "Project reservation registry is busy; retry without launching." : "Another session owns overlapping project files; keep work sequential.";
-        queue.waiting.push({ task: candidate.task, reason });
+        const reservations = conflict.kind === "conflict" ? conflict.conflicts.map((row) => ({
+          sessionId: row.sessionId, assignmentId: row.assignmentId,
+          ...(row.worker ? { worker: row.worker } : {}),
+          ...(row.festival ? { festival: row.festival } : {}),
+          ...(row.task ? { task: row.task } : {}),
+          files: row.files, reservedAt: row.reservedAt,
+        })) : undefined;
+        const ownerSummary = reservations?.map((row) =>
+          `${row.worker ?? row.assignmentId} (session ${row.sessionId}; ${row.festival ?? "unknown festival"}/${row.task ?? "unknown task"}; ${row.files.length ? row.files.join(", ") : "whole checkout"})`,
+        ).join("; ");
+        const reason = conflict.kind === "busy"
+          ? "Project reservation registry is busy; retry without launching."
+          : `Another session owns overlapping project files; keep work sequential. Reservation: ${ownerSummary}. Inspect with /fest conflicts; run /fest conflicts reclaim only after confirming the worker has stopped.`;
+        queue.waiting.push({ task: candidate.task, reason, ...(reservations ? { reservations } : {}) });
         if (candidate.task === currentTask) currentReservation = reason;
       }
     }

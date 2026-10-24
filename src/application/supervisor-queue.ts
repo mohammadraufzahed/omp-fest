@@ -4,12 +4,21 @@ import type { WorkerAssignment } from "./supervisor.js";
 
 export interface DispatchTask extends PendingTask { document: string; files?: string[]; workingDir?: string; boundaryError?: string }
 export interface DispatchCandidate { task: string; sequence: string; files: string[]; dependencies: string[]; workingDir?: string }
+export interface ReservationOwner {
+  sessionId: string;
+  assignmentId: string;
+  worker?: string;
+  festival?: string;
+  task?: string;
+  files: string[];
+  reservedAt: string;
+}
 export interface DispatchQueue {
   kind: "dispatch_queue";
   paused: boolean;
   capacity: number;
   candidates: DispatchCandidate[];
-  waiting: { task: string; reason: string }[];
+  waiting: { task: string; reason: string; reservations?: ReservationOwner[] }[];
   barrier?: string;
 }
 

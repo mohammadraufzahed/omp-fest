@@ -274,10 +274,14 @@ describe("festival supervisor", () => {
       expect(reservation.kind).toBe("reserved");
 
       const blocked = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
-      expect(blocked.queue.waiting).toContainEqual({
-        task, reason: "Another session owns overlapping project files; keep work sequential.",
-      });
+      const waiting = blocked.queue.waiting.find((item) => item.task === task);
+      expect(waiting?.reason).toContain("/fest conflicts reclaim");
+      expect(waiting?.reservations).toEqual([expect.objectContaining({
+        sessionId: "session-owner", assignmentId: "other-festival-worker", worker: "Worker",
+        festival: "another-festival", task: "another-task", files: ["src/a.php"],
+      })]);
       expect(tracker.nudge("session-current")).toContain("Do not mark it completed or commit");
+      expect(await listProjectReservations(project)).toHaveLength(1);
 
       await releaseProjectFiles(project, "session-owner", "other-festival-worker");
       const available = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
