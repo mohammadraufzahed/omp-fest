@@ -580,6 +580,30 @@ it("locks exact files only during native write tool execution", async () => {
   await after({ ...write, isError: false }, context);
   expect(await listProjectReservations(project)).toEqual([]);
 });
+it("allows explicit festival-document writes without a project lock", async () => {
+  const root = await makeCamp();
+  const festivalDir = join(root, "festivals", "active", "example-EH0001");
+  const target = join(festivalDir, "FESTIVAL_GOAL.md");
+  await mkdir(festivalDir, { recursive: true });
+  await writeFile(target, "# Existing festival goal\n");
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const before = handlers.get("tool_call") as (event: unknown, ctx: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>;
+
+  const result = await before({ toolName: "write", toolCallId: "festival-write", input: { path: "festivals/active/example-EH0001/FESTIVAL_GOAL.md" } }, ctx);
+  expect(result).toBeUndefined();
+});
+
+it("still requires an explicit path for native writes", async () => {
+  const root = await makeCamp();
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const before = handlers.get("tool_call") as (event: unknown, ctx: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>;
+
+  const result = await before({ toolName: "write", toolCallId: "pathless-write", input: { content: "x" } }, ctx);
+  expect(result?.block).toBe(true);
+  expect(result?.reason).toContain("target path is missing");
+});
 it("allows the supported frozen pnpm install under a transient checkout lock", async () => {
   const root = await makeCamp();
   const project = join(root, "projects", "worktrees", "modules-monorepo");
@@ -747,7 +771,12 @@ it("does not treat discovered browser tools as permission to expose credentials"
   if (!capabilities || !flow) throw new Error("Missing browser flow adapter tools");
   const ctx = { cwd: root, agent: { kind: "sub" }, sessionManager: { getSessionId: () => "worker-session" } };
   const discovery: unknown = JSON.parse((await capabilities("test", {}, undefined, undefined, ctx)).content[0]!.text);
-  expect(discovery).toMatchObject({ browserMcp: [{ name: "browser_login", active: true }] });
+  expect(discovery).toMatchObject({ agentRole: "sub", browserMcp: [{ name: "browser_login", active: true }] });
+  expect(discovery).not.toHaveProperty("nativeSubagent");
+  const mainDiscovery: unknown = JSON.parse((await capabilities("test", {}, undefined, undefined, {
+    cwd: root, agent: { kind: "main" }, sessionManager: { getSessionId: () => "main-session" },
+  })).content[0]!.text);
+  expect(mainDiscovery).toMatchObject({ agentRole: "main" });
   if (discovery && typeof discovery === "object" && "secretInjection" in discovery) {
     expect(discovery.secretInjection).toEqual(expect.stringContaining("no MCP secret injection"));
   }

@@ -400,10 +400,14 @@ export default function ompFest(pi: ExtensionApiLike): void {
         const sid = sessionIdOf(ctx);
         const campRoot = location.campRoot;
         const administrativeRoot = resolve(campRoot, ".ompfest");
-        const targets = targetPaths(event.input, ctx.cwd).filter((path) =>
+        const requestedTargets = targetPaths(event.input, ctx.cwd);
+        if (requestedTargets.length === 0) return { block: true, reason: "omp-fest cannot lock this write because its target path is missing. Use a native write/edit tool with an explicit file path." };
+        const targets = requestedTargets.filter((path) =>
           !path.includes(`${sep}festivals${sep}`) && !path.startsWith(`${administrativeRoot}${sep}`),
         );
-        if (targets.length === 0) return { block: true, reason: "omp-fest cannot lock this write because its target path is missing. Use a native write/edit tool with an explicit file path." };
+        // Festival and .ompfest documents are not project files; an explicit
+        // target there needs no project lock, but must not look like a missing path.
+        if (targets.length === 0) return undefined;
         const grouped = new Map<string, string[]>();
         for (const target of targets) {
           const projectDir = await projectRootForFile(target);

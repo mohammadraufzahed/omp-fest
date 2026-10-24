@@ -92,9 +92,17 @@ festival explicitly owned by this session and dispatches eligible work through
 omp's native parallel/subagent tools in the same turn. The extension does not
 launch an external runtime or run an autonomous background scheduler. The main
 agent owns scope, integration, independent review, task completion, commits and
-gate submission. Subagents cannot select or claim supervisor work, change
-festival state, commit, approve gates, mutate plans, or operate
-credential-backed browser flows; they return evidence and blockers instead.
+gate submission. `fest_capabilities.agentRole` identifies the current executor;
+it does not indicate whether the main session can launch workers. Use the native
+OMP agent tools exposed to the main session. Subagents cannot select or claim
+supervisor work, change festival state, commit, approve gates, mutate plans, or
+operate credential-backed browser flows; they return evidence and blockers
+instead.
+
+Festival and `.ompfest` document writes are explicitly path-checked but do not
+take project-file reservations. The native write/edit tool remains responsible
+for whether its target must already exist; an explicit target in these
+non-project directories is not a missing lock target.
 
 | Command | Behavior |
 | --- | --- |
