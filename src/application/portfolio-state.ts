@@ -19,6 +19,8 @@ export interface PortfolioStateAssignment {
   createdAt: string;
   updatedAt: string;
   report?: string;
+  review?: string;
+  reviewSource?: "worker-submission" | "coordinator-worktree";
   failure?: string;
   runtimeId?: string;
   runtimeStatus?: "running" | "completed" | "failed" | "exited" | "unverifiable";
@@ -49,7 +51,7 @@ function validTimestamp(value: unknown): value is string {
 }
 function validAssignment(value: unknown): value is PortfolioStateAssignment {
   if (!record(value)) return false;
-  const allowed = new Set(["id", "festival", "task", "sessionId", "worker", "workingDir", "files", "status", "createdAt", "updatedAt", "report", "failure", "runtimeId", "runtimeStatus", "runtimeObservedAt"]);
+  const allowed = new Set(["id", "festival", "task", "sessionId", "worker", "workingDir", "files", "status", "createdAt", "updatedAt", "report", "review", "reviewSource", "failure", "runtimeId", "runtimeStatus", "runtimeObservedAt"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) return false;
   for (const key of ["id", "festival", "task", "sessionId", "worker", "workingDir"] as const) {
     if (typeof value[key] !== "string" || !value[key].trim()) return false;
@@ -58,6 +60,8 @@ function validAssignment(value: unknown): value is PortfolioStateAssignment {
     typeof value.status === "string" && STATUSES.has(value.status as PortfolioStateAssignment["status"]) &&
     validTimestamp(value.createdAt) && validTimestamp(value.updatedAt) &&
     (value.report === undefined || typeof value.report === "string") &&
+    (value.review === undefined || typeof value.review === "string") &&
+    (value.reviewSource === undefined || value.reviewSource === "worker-submission" || value.reviewSource === "coordinator-worktree") &&
     (value.failure === undefined || typeof value.failure === "string") &&
     (value.runtimeId === undefined || (typeof value.runtimeId === "string" && !!value.runtimeId.trim())) &&
     (value.runtimeStatus === undefined || (typeof value.runtimeStatus === "string" && RUNTIME_STATUSES.has(value.runtimeStatus))) &&
@@ -238,7 +242,7 @@ export async function reservePortfolioAssignment(campRoot: string, input: Omit<P
     return { state: next, result: assignment };
   });
 }
-export async function updatePortfolioAssignment(campRoot: string, id: string, status: PortfolioStateAssignment["status"], details?: { report?: string; failure?: string; festival?: string }): Promise<PortfolioStateAssignment> {
+export async function updatePortfolioAssignment(campRoot: string, id: string, status: PortfolioStateAssignment["status"], details?: { report?: string; review?: string; reviewSource?: PortfolioStateAssignment["reviewSource"]; failure?: string; festival?: string }): Promise<PortfolioStateAssignment> {
   const paths = await directory(campRoot, true);
   return locked(paths, (state) => {
     const index = state.assignments.findIndex((row) => row.id === id);
@@ -246,6 +250,8 @@ export async function updatePortfolioAssignment(campRoot: string, id: string, st
     if (!prior) throw new Error(`Unknown portfolio assignment: ${id}`);
     if (TERMINAL.has(prior.status)) {
       if (prior.status === status && (details?.report === undefined || details.report === prior.report) &&
+          (details?.review === undefined || details.review === prior.review) &&
+          (details?.reviewSource === undefined || details.reviewSource === prior.reviewSource) &&
           (details?.failure === undefined || details.failure === prior.failure) && (details?.festival === undefined || details.festival === prior.festival)) {
         return { state, result: prior };
       }
@@ -256,7 +262,7 @@ export async function updatePortfolioAssignment(campRoot: string, id: string, st
     if (ACTIVE.has(status) && state.assignments.some((row) => row.id !== id && ACTIVE.has(row.status) && row.festival === festival && row.task === prior.task)) {
       throw new Error(`Portfolio task is already active: ${festival}/${prior.task}`);
     }
-    const assignment: PortfolioStateAssignment = { ...prior, status, festival, updatedAt: now(), ...(details?.report !== undefined ? { report: details.report } : {}), ...(details?.failure !== undefined ? { failure: details.failure } : {}) };
+    const assignment: PortfolioStateAssignment = { ...prior, status, festival, updatedAt: now(), ...(details?.report !== undefined ? { report: details.report } : {}), ...(details?.review !== undefined ? { review: details.review } : {}), ...(details?.reviewSource !== undefined ? { reviewSource: details.reviewSource } : {}), ...(details?.failure !== undefined ? { failure: details.failure } : {}) };
     const assignments = [...state.assignments]; assignments[index] = assignment;
     const next = { ...state, assignments };
     if (activeCount(next) > state.workerLimit) throw new Error(`Portfolio worker limit reached (${state.workerLimit})`);

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, utimes, writeF
 import { hostname, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { claimFestivalTask, joinFestivalTeam, readFestivalTeam, readFestivalTeamInbox, releaseFestivalTask, reviewFestivalTask, sendFestivalTeamMessage, submitFestivalTask, transferFestivalTeamCoordinator } from "../src/application/festival-team.js";
+import { acceptFestivalTaskFromCoordinator, claimFestivalTask, joinFestivalTeam, readFestivalTeam, readFestivalTeamInbox, releaseFestivalTask, reviewFestivalTask, sendFestivalTeamMessage, submitFestivalTask, transferFestivalTeamCoordinator } from "../src/application/festival-team.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -118,6 +118,21 @@ describe("festival team store", () => {
     expect(revised).toMatchObject({ status: "claimed", review: "Add browser evidence", report: "Tests passed\n\nReview: Add browser evidence" });
     await submitFestivalTask(root, festival, "worker", assignment.id, "Browser evidence added");
     expect((await reviewFestivalTask(root, festival, "owner", assignment.id, "accept", "Accepted evidence")).status).toBe("accepted");
+  });
+  it("lets only the coordinator accept inspected shared work without inventing a worker report", async () => {
+    const { root, festival } = await fixture();
+    await joinFestivalTeam(root, festival, "owner", "owner");
+    await joinFestivalTeam(root, festival, "worker", "owner");
+    const assignment = await claimFestivalTask(root, festival, "worker", "task", festival);
+    await expect(acceptFestivalTaskFromCoordinator(root, festival, "worker", assignment.id, "Reviewed")).rejects.toThrow("coordinator");
+    const accepted = await acceptFestivalTaskFromCoordinator(root, festival, "owner", assignment.id, "Inspected the shared changes; all checks passed.");
+    expect(accepted).toMatchObject({
+      status: "accepted",
+      review: "Inspected the shared changes; all checks passed.",
+      reviewSource: "coordinator-worktree",
+    });
+    expect(accepted.report).toBeUndefined();
+    await expect(acceptFestivalTaskFromCoordinator(root, festival, "owner", assignment.id, "Reviewed twice")).rejects.toThrow("claimed");
   });
 
   it("delivers inbox messages and marks read when requested", async () => {

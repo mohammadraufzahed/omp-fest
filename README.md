@@ -133,7 +133,12 @@ relaunched; assign replacement work only after confirming the old runtime stoppe
 Stale assignments are never automatically released or relaunched.
 
 Cross-session team claims, submissions, reviews and messages persist under
-`.ompfest/teams`. Native completion is not supervisor acceptance. Acceptance
+`.ompfest/teams`. Native worker completion is not supervisor acceptance. If a
+worker result is unavailable, a coordinator may use
+`fest_supervisor(action:"accept_reviewed")` only after inspecting the shared
+worktree, providing concrete verification evidence, confirming interactively that
+no matching native worker is still running, and recording a separate
+`coordinator-worktree` acceptance (not a fabricated worker report). Acceptance
 does not complete the Festival task, commit changes or approve a gate.
 
 Exact-file locks are acquired only while native `write`/`edit` calls execute and

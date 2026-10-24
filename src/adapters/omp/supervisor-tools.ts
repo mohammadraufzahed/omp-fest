@@ -4,7 +4,7 @@ import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY, type WorkerAssignment 
 import { dispatchQueue, taskFiles, type DispatchQueue, type DispatchTask, type WriteLockOwner } from "../../application/supervisor-queue.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { festivalOwner } from "../../application/festival-ownership.js";
-import { claimFestivalTask, joinFestivalTeam, readFestivalTeam, releaseFestivalTask, reviewFestivalTask, submitFestivalTask } from "../../application/festival-team.js";
+import { acceptFestivalTaskFromCoordinator, claimFestivalTask, joinFestivalTeam, readFestivalTeam, releaseFestivalTask, reviewFestivalTask, submitFestivalTask } from "../../application/festival-team.js";
 import type { FestivalTeamAssignment } from "../../application/festival-team.js";
 import { referencesForTask } from "../../application/visual-references.js";
 import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
@@ -15,7 +15,7 @@ import { checkProjectConflicts, listProjectReservations } from "../../applicatio
 import { buildPortfolioQueue, type PortfolioFestivalQueue } from "../../application/portfolio-queue.js";
 import { readPortfolioState, reservePortfolioAssignment, updatePortfolioAssignment, releasePortfolioAssignment, recordPortfolioFestivalDispatch, updatePortfolioAssignmentRuntime } from "../../application/portfolio-state.js";
 import { storeEvidenceBundle } from "../../application/evidence-bundles.js";
-interface SupervisorToolContext { cwd: string; sessionManager?: { getSessionId?(): string }; agent?: { kind?: string }; getAsyncJobSnapshot?(): { running?: NativeJob[]; recent?: NativeJob[] } | null }
+interface SupervisorToolContext { cwd: string; sessionManager?: { getSessionId?(): string }; agent?: { kind?: string }; ui?: { confirm?(title: string, message: string): Promise<boolean> }; getAsyncJobSnapshot?(): { running?: NativeJob[]; recent?: NativeJob[] } | null }
 interface NativeJob { id: string; type: string; status: string; label: string; agentId?: string }
 export interface SupervisorToolHooks {
   isMainSession?(ctx: SupervisorToolContext): boolean;
@@ -41,6 +41,7 @@ function teamAssignmentForQueue(assignment: FestivalTeamAssignment, festival: st
     status: assignment.status === "claimed" ? "running" as const : assignment.status === "submitted" ? "ready_for_review" as const : "accepted" as const,
     report: assignment.report ?? "",
     review: assignment.review ?? "",
+    ...(assignment.reviewSource ? { reviewSource: assignment.reviewSource } : {}),
   };
 }
 
@@ -188,6 +189,7 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
           files: task?.files ?? (task ? taskFiles(task.document) : []),
           status: shared.status === "accepted" ? "accepted" : shared.status === "submitted" ? "ready_for_review" : "assigned",
           report: shared.report ?? "", review: shared.review ?? "",
+          ...(shared.reviewSource ? { reviewSource: shared.reviewSource } : {}),
         });
         continue;
       }
@@ -200,7 +202,8 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
         : ledger.status === "running" ? "running" : "assigned";
       recovered.push({
         id: shared.id, festival: id, task: shared.task, worker: shared.label ?? ledger.worker,
-        files: ledger.files, status, report: shared.report ?? ledger.report ?? "", review: shared.review ?? "",
+        files: ledger.files, status, report: shared.report ?? ledger.report ?? "", review: shared.review ?? ledger.review ?? "",
+        ...(shared.reviewSource ?? ledger.reviewSource ? { reviewSource: shared.reviewSource ?? ledger.reviewSource } : {}),
         ...(ledger.runtimeStatus ? { runtime: {
           status: ledger.runtimeStatus, source: "unverified" as const, observedAt: ledger.runtimeObservedAt ?? ledger.updatedAt,
           ...(ledger.runtimeId ? { runtimeId: ledger.runtimeId } : {}),
@@ -242,13 +245,13 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
   const z = pi.zod;
   pi.registerTool({
     name: "fest_supervisor",
-    description: "Queue dependency-eligible tasks across owned festivals, inspect the read-only portfolio and per-file write locks, track native worker reports, reconcile resume, retain worker questions and independently review submissions. Status returns a compact delta for a known revision; omit since for full state. Never launches workers or completes tasks. Main session only.",
+    description: "Queue dependency-eligible tasks across owned festivals, inspect the read-only portfolio and per-file write locks, track native worker reports, reconcile resume, retain worker questions and independently review submissions. If a worker result is unavailable, accept_reviewed lets the coordinator attest to work inspected in the shared worktree after interactive confirmation and checking no native worker is still running. Status returns a compact delta for a known revision; omit since for full state. Never launches workers or completes tasks. Main session only.",
     parameters: z.object({
-      action: z.enum(["status", "queue", "portfolio", "resume", "assign", "running", "submit", "block", "question", "accept", "revise"]),
+      action: z.enum(["status", "queue", "portfolio", "resume", "assign", "running", "submit", "block", "question", "accept", "accept_reviewed", "revise"]),
       festival: z.string().optional(), task: z.string().optional(), worker: z.string().optional(),
       assignment: z.string().optional(), evidence: z.string().optional(), since: z.string().optional(), runtimeId: z.string().optional(),
     }),
-    async execute(_id: string, params: { action: "status" | "queue" | "portfolio" | "resume" | "assign" | "running" | "submit" | "block" | "question" | "accept" | "revise"; festival?: string; task?: string; worker?: string; assignment?: string; evidence?: string; since?: string; runtimeId?: string }, _signal: unknown, _update: unknown, ctx: SupervisorToolContext) {
+    async execute(_id: string, params: { action: "status" | "queue" | "portfolio" | "resume" | "assign" | "running" | "submit" | "block" | "question" | "accept" | "accept_reviewed" | "revise"; festival?: string; task?: string; worker?: string; assignment?: string; evidence?: string; since?: string; runtimeId?: string }, _signal: unknown, _update: unknown, ctx: SupervisorToolContext) {
       const sid = sessionIdOf(ctx);
       const output = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
       try {
@@ -272,9 +275,15 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
               if (festival && (await festivalOwner(festival.path))?.sessionId === sid) {
                 const team = await readFestivalTeam(location.campRoot, festival.path).catch(() => undefined);
                 const shared = team?.assignments.find((entry) => entry.id === row.id);
-                if (row.status === "accepted" && persisted.status === "submitted") {
+                if (row.status === "accepted" && persisted.status !== "accepted" &&
+                    row.reviewSource === "coordinator-worktree" && shared?.status === "accepted" &&
+                    shared.reviewSource === "coordinator-worktree") {
+                  await updatePortfolioAssignment(location.campRoot, row.id, "accepted", {
+                    review: row.review, reviewSource: "coordinator-worktree",
+                  });
+                } else if (row.status === "accepted" && persisted.status === "submitted") {
                   if (shared?.status !== "accepted") await reviewFestivalTask(location.campRoot, festival.path, sid, row.id, "accept", row.review);
-                  await updatePortfolioAssignment(location.campRoot, row.id, "accepted");
+                  await updatePortfolioAssignment(location.campRoot, row.id, "accepted", { review: row.review, reviewSource: "worker-submission" });
                 } else if (shared?.status === "submitted" && row.status === "ready_for_review" &&
                     !["accepted", "failed", "released", "submitted"].includes(persisted.status)) {
                   await updatePortfolioAssignment(location.campRoot, row.id, "submitted", { report: shared.report ?? row.report });
@@ -351,8 +360,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             const row = supervisor.question(sid, params.assignment, params.evidence ?? "");
             if ((await readPortfolioState(campRoot)).assignments.some((entry) => entry.id === row.assignmentId)) await updatePortfolioAssignment(campRoot, row.assignmentId, "blocked", { failure: row.question });
             result = row;
-          }
-          else if (params.action === "running") {
+          } else if (params.action === "running") {
             const jobs = ctx.getAsyncJobSnapshot?.(), job = [...(jobs?.running ?? []), ...(jobs?.recent ?? [])].find((item) => item.id === params.runtimeId);
             if (job?.type !== "task" || job.status !== "running" || (job.label !== assignment.worker && job.agentId !== assignment.worker)) throw new Error("Bind only a host-observed running task job whose label/agentId matches this assigned worker. Inspect fest_capabilities; do not invent runtime IDs.");
             const row = supervisor.update(sid, params.assignment, "running", "");
@@ -360,10 +368,35 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             await updatePortfolioAssignment(campRoot, row.id, "running");
             await updatePortfolioAssignmentRuntime(campRoot, row.id, { runtimeId: job.id, runtimeStatus: "running", runtimeObservedAt: observed.runtime?.observedAt });
             result = observed;
+          } else if (params.action === "accept_reviewed") {
+            const evidence = params.evidence ?? "";
+            if (!evidence.trim()) throw new Error("Provide concrete coordinator review evidence: inspected files, exercised checks, and observed results.");
+            if (!assignment.runtime || !["completed", "unverifiable"].includes(assignment.runtime.status)) {
+              throw new Error("Coordinator attestation requires a completed or explicitly unverifiable worker runtime; reconcile native lifecycle first.");
+            }
+            if (!["assigned", "running", "blocked"].includes(assignment.status)) {
+              throw new Error(`Coordinator worktree acceptance cannot replace a ${assignment.status} worker report; use the normal independent review for submitted results.`);
+            }
+            const jobs = ctx.getAsyncJobSnapshot?.();
+            if (!jobs) throw new Error("Cannot attest while native worker state is unavailable. Reconcile through fest_supervisor action=resume and retry.");
+            const active = (jobs.running ?? []).filter((job) =>
+              job.type === "task" && job.status === "running" &&
+              (job.id === assignment.runtime?.runtimeId || job.label === assignment.worker || job.agentId === assignment.worker));
+            if (active.length) throw new Error(`Worker ${assignment.worker} still has a running native job (${active.map((job) => job.id).join(", ")}); wait for it to stop before reviewing the shared worktree.`);
+            if (!ctx.ui?.confirm) throw new Error("Coordinator worktree acceptance requires an interactive native confirmation; no state changed.");
+            const confirmed = await ctx.ui.confirm(
+              "Accept coordinator-reviewed work?",
+              `Confirm you inspected the shared worktree for ${assignment.task}, verified the stated evidence, and know worker ${assignment.worker} is no longer running. This records coordinator acceptance, not a worker submission. Evidence: ${evidence}`,
+            );
+            if (!confirmed) throw new Error("Coordinator review cancelled; assignment remains open.");
+            const team = await acceptFestivalTaskFromCoordinator(campRoot, assignmentDir, sid, assignment.id, evidence);
+            const row = supervisor.update(sid, assignment.id, "accept_reviewed", evidence);
+            await updatePortfolioAssignment(campRoot, row.id, "accepted", { review: evidence, reviewSource: "coordinator-worktree" });
+            result = { assignment: row, sharedAssignment: team, nextSteps: "Coordinator review recorded; no worker result was fabricated. If the Festival task was manually blocked during recovery, unblock it with fest_task_update action=unblock; then call fest_task_complete for this verified task and continue the queue." };
           } else {
             let evidence = params.evidence ?? "", artifact: string | undefined;
             if (params.action === "submit") {
-              if (assignment.status !== "running") throw new Error("Only a running worker can submit results; record the real dispatch first.");
+              if (assignment.status !== "running") throw new Error(`Only a running worker can submit results (assignment status: ${assignment.status}). Do not submit coordinator notes as worker output. If the worker is completed or unverifiable and you independently reviewed the shared worktree, use action=accept_reviewed with concrete evidence; this requires interactive confirmation.`);
               const stored = hooks.storeReport
                 ? await hooks.storeReport(assignmentDir, evidence)
                 : await storeEvidenceBundle(assignmentDir, { kind: "worker", summary: evidence.trim().slice(0, 600), details: evidence });
@@ -373,7 +406,9 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             const row = supervisor.update(sid, params.assignment, params.action, evidence, artifact);
             if (params.action === "accept" || params.action === "revise") {
               await reviewFestivalTask(campRoot, assignmentDir, sid, row.id, params.action, evidence);
-              await updatePortfolioAssignment(campRoot, row.id, params.action === "accept" ? "accepted" : "blocked", { report: evidence });
+              await updatePortfolioAssignment(campRoot, row.id, params.action === "accept" ? "accepted" : "blocked", {
+                ...(params.action === "accept" ? { review: evidence, reviewSource: "worker-submission" as const } : {}),
+              });
             } else if (params.action === "block") {
               await releaseFestivalTask(campRoot, assignmentDir, sid, row.id, evidence);
               await updatePortfolioAssignment(campRoot, row.id, "blocked", { failure: evidence });

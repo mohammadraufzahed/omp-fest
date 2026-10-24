@@ -32,6 +32,23 @@ describe("festival supervisor", () => {
     expect(supervisor.update("s", row.id, "accept", "Independently exercised empty state").status).toBe("accepted");
     expect(() => supervisor.update("s", row.id, "running", "")).toThrow("cannot be changed");
   });
+  it("records coordinator worktree attestation separately from worker submissions", () => {
+    const supervisor = new Supervisor();
+    const row = supervisor.assign("coordinator", "festival", "task.md", "Worker A", ["src/a.ts"]);
+    expect(() => supervisor.update("coordinator", row.id, "accept_reviewed", "Tests passed")).toThrow("completed or explicitly unverifiable");
+    supervisor.observeRuntime("coordinator", { assignmentId: row.id, status: "unverifiable" }, "unverified");
+    const accepted = supervisor.update("coordinator", row.id, "accept_reviewed", "Inspected src/a.ts; npm test passed.");
+    expect(accepted).toMatchObject({
+      status: "accepted",
+      report: "",
+      review: "Inspected src/a.ts; npm test passed.",
+      reviewSource: "coordinator-worktree",
+    });
+    const restored = new Supervisor();
+    restored.restore("coordinator", [{ customType: SUPERVISOR_ENTRY, data: supervisor.state("coordinator") }]);
+    expect(restored.state("coordinator").workers[0]).toMatchObject({ status: "accepted", reviewSource: "coordinator-worktree", report: "" });
+  });
+
 
   it("returns compact status deltas for known revisions and a full reset for expired revisions", () => {
     const supervisor = new Supervisor();
@@ -315,6 +332,88 @@ describe("festival supervisor", () => {
       expect(await listProjectReservations(project)).toEqual([]);
       expect(appendEntry).toHaveBeenCalled();
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it("lets a coordinator attest to inspected work after an unverifiable worker stops", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fest-supervisor-attest-"));
+    try {
+      const festival = join(root, "festivals", "active", "festival");
+      const project = join(root, "project");
+      const sequence = "001_BUILD/01_implement";
+      const task = `${sequence}/01_task.md`;
+      await mkdir(join(festival, sequence), { recursive: true });
+      await mkdir(project, { recursive: true });
+      await writeFile(join(festival, "fest.yaml"), "id: festival\n");
+      await writeFile(join(festival, task), "Task ID: implementation\nDependencies: none\n- src/a.ts (proposed)");
+      await writeFile(join(festival, sequence, "SEQUENCE_GOAL.md"), `---\nfest_working_dir: ${JSON.stringify(project)}\n---\n`);
+      const ownership = await claimFestivalOwnership(festival, "coordinator");
+      if (ownership.kind !== "claimed") throw new Error(`Could not claim test festival: ${ownership.kind}`);
+      await joinFestivalTeam(root, festival, "coordinator", "coordinator");
+      const current: NextUnit = { kind: "task", path: task, workingDir: project, doc: "", goals: [] };
+      const deps = {
+        detect: {
+          locate: () => Promise.resolve({ campRoot: root }),
+          listFestivals: () => Promise.resolve([{ id: "festival", name: "festival", path: festival }]),
+          pendingTasks: () => Promise.resolve([{ path: task, sequence, done: false }]),
+        },
+        fest: { next: () => Promise.resolve(current) },
+        tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
+      } as unknown as ToolDeps;
+      const schema = (): { optional(): unknown } => ({ optional: schema });
+      type Execute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<{ content: { text: string }[] }>;
+      const tools = new Map<string, Execute>(), supervisor = new Supervisor();
+      const appendEntry = vi.fn();
+      const pi = {
+        zod: { object: schema, string: schema, enum: schema } as never,
+        registerTool: (tool: Record<string, unknown>) => { tools.set(String(tool.name), tool.execute as Execute); },
+        appendEntry,
+      } satisfies PiLike;
+      registerSupervisorTools(pi, deps, supervisor, { isMainSession: (context) => context.agent?.kind !== "sub" });
+      let running: { id: string; type: string; status: string; label: string }[] = [];
+      const confirm = vi.fn(() => Promise.resolve(true));
+      const ctx = {
+        cwd: root,
+        sessionManager: { getSessionId: () => "coordinator" },
+        getAsyncJobSnapshot: () => ({ running }),
+        ui: { confirm },
+      };
+      const call = async (params: Record<string, unknown>) => {
+        const result = await tools.get("fest_supervisor")!("id", { festival: "festival", ...params }, undefined, undefined, ctx);
+        return JSON.parse(result.content[0]!.text) as Record<string, unknown>;
+      };
+      await call({ action: "assign", task, worker: "Worker A" });
+      const assignment = supervisor.state("coordinator").workers[0]!;
+      supervisor.observeRuntime("coordinator", {
+        assignmentId: assignment.id, status: "unverifiable", detail: "No native job currently observed",
+      }, "unverified");
+
+      const workerSubmit = await call({ action: "submit", assignment: assignment.id, evidence: "Coordinator's review" });
+      expect(workerSubmit.error).toContain("accept_reviewed");
+      running = [{ id: "still-writing", type: "task", status: "running", label: "Worker A" }];
+      const active = await call({ action: "accept_reviewed", assignment: assignment.id, evidence: "Reviewed files and checks" });
+      expect(active.error).toContain("still has a running native job");
+      expect(confirm).not.toHaveBeenCalled();
+
+      running = [];
+      const accepted = await call({
+        action: "accept_reviewed",
+        assignment: assignment.id,
+        evidence: "Inspected src/a.ts; 173/173 tests, TypeScript, build and ESLint passed.",
+      });
+      expect(accepted).toMatchObject({
+        assignment: { status: "accepted", report: "", reviewSource: "coordinator-worktree" },
+        sharedAssignment: { status: "accepted", reviewSource: "coordinator-worktree" },
+      });
+      expect((accepted.sharedAssignment as { report?: string }).report).toBeUndefined();
+      expect(confirm).toHaveBeenCalledOnce();
+      const portfolioAssignment = (await readPortfolioState(root)).assignments[0];
+      expect(portfolioAssignment).toMatchObject({ status: "accepted", reviewSource: "coordinator-worktree" });
+      expect(portfolioAssignment?.report).toBeUndefined();
+      const sharedAssignment = (await readFestivalTeam(root, festival))?.assignments[0];
+      expect(sharedAssignment).toMatchObject({ status: "accepted", reviewSource: "coordinator-worktree" });
+      expect(sharedAssignment?.report).toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
   it("suppresses completion nudges while the current task is reserved by another session", async () => {
     const root = await mkdtemp(join(tmpdir(), "fest-supervisor-conflict-"));

@@ -7,7 +7,7 @@ export interface FestivalTeamParticipant { sessionId: string; joinedAt: string; 
 export interface FestivalTeamAssignment {
   id: string; task: string; workingDir: string; sessionId: string; label?: string;
   status: "claimed" | "submitted" | "accepted" | "released"; createdAt: string; updatedAt: string;
-  report?: string; review?: string;
+  report?: string; review?: string; reviewSource?: "worker-submission" | "coordinator-worktree";
 }
 export interface FestivalTeamMessage { id: string; fromSession: string; toSession?: string; body: string; task?: string; createdAt: string; readAt?: string }
 export interface FestivalTeam {
@@ -69,7 +69,8 @@ function validTeam(value: unknown): value is FestivalTeam {
         typeof assignment.updatedAt !== "string" || !Number.isFinite(Date.parse(assignment.updatedAt)) ||
         (assignment.label !== undefined && typeof assignment.label !== "string") ||
         (assignment.report !== undefined && typeof assignment.report !== "string") ||
-        (assignment.review !== undefined && typeof assignment.review !== "string")) return false;
+        (assignment.review !== undefined && typeof assignment.review !== "string") ||
+        (assignment.reviewSource !== undefined && assignment.reviewSource !== "worker-submission" && assignment.reviewSource !== "coordinator-worktree")) return false;
     assignmentIds.push(assignment.id);
   }
   if (new Set(assignmentIds).size !== assignmentIds.length) return false;
@@ -219,12 +220,28 @@ export async function reviewFestivalTask(campRoot: string, festivalDir: string, 
     if (!assignment) throw new Error("Festival assignment not found.");
     if (assignment.status !== "submitted") throw new Error("Only submitted assignments may be reviewed.");
     assignment.review = evidence;
-    if (action === "accept") assignment.status = "accepted";
-    else {
+    if (action === "accept") {
+      assignment.status = "accepted";
+      assignment.reviewSource = "worker-submission";
+    } else {
       assignment.status = "claimed";
       assignment.report ??= "";
       assignment.report += `\n\nReview: ${evidence}`;
     }
+    assignment.updatedAt = timestamp();
+    return { team, result: assignment };
+  });
+}
+export async function acceptFestivalTaskFromCoordinator(campRoot: string, festivalDir: string, coordinatorSessionId: string, assignmentId: string, evidence: string): Promise<FestivalTeamAssignment> {
+  required(evidence, "Coordinator review evidence"); const paths = await storage(campRoot, festivalDir, false);
+  return locked(paths, (team) => {
+    if (team?.coordinatorSessionId !== coordinatorSessionId) throw new Error("Only the festival coordinator may attest to shared-worktree completion.");
+    const assignment = team.assignments.find((item) => item.id === assignmentId);
+    if (!assignment) throw new Error("Festival assignment not found.");
+    if (assignment.status !== "claimed") throw new Error("Coordinator worktree attestation requires a claimed, not worker-submitted, assignment.");
+    assignment.status = "accepted";
+    assignment.review = evidence;
+    assignment.reviewSource = "coordinator-worktree";
     assignment.updatedAt = timestamp();
     return { team, result: assignment };
   });

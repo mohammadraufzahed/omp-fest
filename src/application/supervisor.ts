@@ -10,8 +10,8 @@ export const SUPERVISOR_POLICY = [
   "A failure, cancellation, pause or blocker is local to its festival/task: never cancel, discard or block unrelated festival plans or assignments. Failed/exited native workers become terminal, release capacity and their task claim, and may be replaced by a fresh assignment only after confirming the old runtime is stopped; never relaunch the failed runtime. Pause stops new assignments for the affected scope, not already-running workers; resume reconciles without changing pause.",
   "Exact-file locks are held only while a native write/edit call is executing, never for the lifetime of a task. A live lock means an actual write is in progress; refresh the queue after it clears and never reclaim it while the write is active.",
   "Continue assignment, worker results, independent review, integration, task completion and commits until each festival is complete, reaches a human gate, an explicit pause or a real blocker. Missing native subagent capability means blocked, not launched; the extension requests native tools and does not itself launch agents.",
-  "Submit returned results through fest_supervisor; native completion is not acceptance. Independently review and verify each festival's work, accept with evidence, then fest_task_complete and fest_commit. Keep integration, review, task completion, gates and commits under the main agent's responsibility.",
-  "After each accepted submission record task completion and continue fest_next/queue in the same native agent turn; this is not an autonomous background scheduler. After workers and tasks settle, follow /fest finish and record actual combined checks and visual comparisons through fest_integration before the completion gate. Never approve that gate yourself.",
+  "Submit returned results through fest_supervisor; native completion is not acceptance. Independently review and verify each festival's work, accept submitted results with evidence, then fest_task_complete and fest_commit. Keep integration, review, task completion, gates and commits under the main agent's responsibility.",
+  "If a native worker disappears or becomes unverifiable, never fabricate its submission. After confirming no native job is still active, the coordinator may independently attest to work inspected in the shared worktree with accept_reviewed; this is a separate, interactive, audited acceptance and keeps the worker report empty.",
   "Use host-provided native concurrency within the portfolio limit; omp-fest does not itself launch agents. Team task claims prevent duplicate assignment across sessions, while exact-file write locks are held only during native writes.",
   "Answer worker questions through the shared team inbox and send the answer to the same native worker. Human gates remain human-only.",
 ].join(" ");
@@ -33,6 +33,7 @@ export interface WorkerAssignment {
   /** Supervisor-reported workflow status, not a native lifecycle observation. */
   status: WorkerStatus;
   report: string; review: string;
+  reviewSource?: "worker-submission" | "coordinator-worktree";
   runtime?: WorkerRuntime;
   reportArtifact?: string;
 }
@@ -88,7 +89,7 @@ export class Supervisor {
             !Array.isArray(row.files) || !row.files.every((path: unknown) => typeof path === "string") ||
             !status || !["assigned", "running", "blocked", "ready_for_review", "accepted", "failed"].includes(status) || typeof row.report !== "string" || typeof row.review !== "string") continue;
         const worker: WorkerAssignment = { id: row.id, festival: row.festival, task: row.task, worker: row.worker, files: row.files, status, report: row.report, review: row.review };
-        if (typeof row.reportArtifact === "string") worker.reportArtifact = row.reportArtifact;
+        if (row.reviewSource === "worker-submission" || row.reviewSource === "coordinator-worktree") worker.reviewSource = row.reviewSource;
         
         if (row.runtime && typeof row.runtime === "object" && runtimeStatuses.includes(row.runtime.status) && ["native_runtime", "native_tool_result", "unverified"].includes(row.runtime.source) && typeof row.runtime.observedAt === "string") {
           worker.runtime = { status: row.runtime.status, source: row.runtime.source, observedAt: row.runtime.observedAt };
@@ -126,6 +127,7 @@ export class Supervisor {
           (row.status === "failed" || row.status === "accepted" || row.status === "ready_for_review" || row.status === "blocked")) prior.status = row.status;
       if (!prior.report && row.report) prior.report = row.report;
       if (!prior.review && row.review) prior.review = row.review;
+      if (!prior.reviewSource && row.reviewSource) prior.reviewSource = row.reviewSource;
       if (!prior.runtime && row.runtime) prior.runtime = structuredClone(row.runtime);
     }
     this.sessions.set(session, state);
@@ -147,7 +149,7 @@ export class Supervisor {
     state.workers.push(row); this.sessions.set(session, state); return structuredClone(row);
   }
 
-  update(session: string, id: string, action: "running" | "submit" | "block" | "accept" | "revise", evidence: string, reportArtifact?: string): WorkerAssignment {
+  update(session: string, id: string, action: "running" | "submit" | "block" | "accept" | "accept_reviewed" | "revise", evidence: string, reportArtifact?: string): WorkerAssignment {
     const state = this.state(session), row = state.workers.find((item) => item.id === id);
     if (!row) throw new Error("Unknown assignment in this supervisor session.");
     if (row.status === "accepted") throw new Error("Accepted assignments cannot be changed.");
@@ -158,12 +160,18 @@ export class Supervisor {
       row.status = "running";
     } else {
       if (!evidence.trim()) throw new Error("Provide actual evidence or a concrete blocker.");
-      if (action === "accept" || action === "revise") {
-        if (row.status !== "ready_for_review") throw new Error("Only submitted results can be reviewed.");
-        if (action === "accept" && row.runtime && ["failed", "exited", "unverifiable"].includes(row.runtime.status)) throw new Error("Native lifecycle is failed, exited or unverifiable; reconcile before acceptance.");
-        row.review = evidence; row.status = action === "accept" ? "accepted" : "blocked";
+      if (action === "accept_reviewed") {
+        if (!["assigned", "running", "blocked"].includes(row.status)) throw new Error("Coordinator attestation only applies before a worker submission.");
+        if (!row.runtime || !["completed", "unverifiable"].includes(row.runtime.status)) throw new Error("Coordinator attestation requires a completed or explicitly unverifiable native runtime.");
+        row.review = evidence;
+        row.reviewSource = "coordinator-worktree";
+        row.status = "accepted";
+      } else if (action === "accept" || action === "revise") {
+        if (row.status !== "ready_for_review") throw new Error("Only submitted results can be reviewed. If you inspected the shared worktree after a worker became unavailable, use accept_reviewed.");
+        if (action === "accept" && row.runtime && ["failed", "exited", "unverifiable"].includes(row.runtime.status)) throw new Error("Native lifecycle is failed, exited or unverifiable; reconcile before accepting a worker submission. Use accept_reviewed only for independently inspected work.");
+        row.review = evidence; row.reviewSource = "worker-submission"; row.status = action === "accept" ? "accepted" : "blocked";
       } else {
-        if (action === "submit" && row.status !== "running") throw new Error("Only a running worker can submit results; record the real dispatch first.");
+        if (action === "submit" && row.status !== "running") throw new Error("Only a running worker can submit results; record the real dispatch first. A coordinator review is not a worker submission.");
         row.report = evidence;
         if (reportArtifact) row.reportArtifact = reportArtifact;
         row.status = action === "submit" ? "ready_for_review" : "blocked";
