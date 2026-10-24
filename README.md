@@ -53,10 +53,7 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
  - 🧰 **repair-friendly plan inputs** — plan paths, project-relative inspection/verification paths, and common unstable IDs are normalized before validation. Failures return compact field-level diagnostics instead of dumping the fest CLI transcript.
  - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
  - 🎯 **session festival selection** — `/fest select [festival]` lists available festivals, claims one for the current omp session, persists the selection through resume/branch/tree, and requires explicit confirmation before transferring ownership from another session. Claims use an atomic ownership record.
- - 🛠️ **18 tools + ONE guided command** — `/fest <sub>` is the whole cockpit: `workers`, `dispatch`, `pause`, `review`, `next`, `status`, `show`, `select`, `task`, `plan`, `promote`, `validate`,
-   `markers`, `workflow`, `approve`, `reject`, `parallel`, `doctor`, `cmd`,
-   `camp`, `idea`, `help` — with live autocomplete on subs, task actions, and festival ids.
-   `fest_plan_draft` creates stable IDs and canonical paths before `fest_plan`; nothing hardcoded, everything discovered.
+ - **20 tools + one native command family** — `/fest` includes `draft`, `finish`, `conflicts`, `blockers`, `resume`, and `release` alongside planning, task, approval, and worker controls. `fest_plan_draft` persists editable revisions; `fest_integration` and `fest_evidence` retain verification with compact summaries.
  - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
 
 ### Supervisor execution
@@ -81,20 +78,35 @@ missing native subagent capability is reported as a blocker, not fabricated succ
 | `/fest dispatch` | Resume new dispatch and start a supervisor agent turn for the explicitly selected festival. |
 | `/fest pause` | Pause new assignments/spawns; preserve existing workers and accept their reports. |
 | `/fest review [assignment-id]` | Select a submission, inspect its report, then accept with independent verification evidence or request changes. Escape/cancel preserves pending review. |
+| `/fest resume` | Reconcile unfinished assignments without unpausing or relaunching uncertain workers. |
+| `/fest blockers` | Select a retained worker question, record an answer, and hand it to the supervisor for native delivery. |
+| `/fest conflicts` | Inspect durable project reservations and choose sequential work or request native worktree isolation. |
+| `/fest finish` | Start the final integration/visual comparison pass; record actual results before the completion gate. |
+| `/fest draft [draftId]` | Inspect and incrementally edit persisted planning fields, then request native preview approval. |
+| `/fest release [patch\|minor\|major]` | Preview exact release files/version/checks and request explicit authorization before version, verification, fest commit, and push. |
 
-The supervisor uses `fest_supervisor` to assign, record a real dispatch as
-running, submit returned results, report blockers and record reviews. Assignments
-are session-scoped and persisted as omp transcript entries across resume and
-branch/tree navigation. Worker states are `assigned`, `running`, `blocked`,
-`ready_for_review`, and `accepted`; state is reported explicitly by the supervisor,
-not inferred from a tool invocation or a still-running worker.
+The supervisor uses `fest_supervisor queue` to find eligible tasks and refill
+available capacity after accepted submissions. Phase gates, completed dependencies,
+sequence ordering, file boundaries and project-wide reservations determine eligibility.
+The tool reports candidates; the agent launches them using native omp tools.
+It does not create a background process scheduler.
 
-At most three assignments may be outstanding. Dispatch respects the current
-phase, first pending task per sequence and explicit completed dependencies.
-Unknown file boundaries or overlapping paths force sequential dispatch, including
-across festivals in the same supervisor session. Separate sessions/checkouts are
-not protected by this local assignment registry; use isolated worktrees for
-conflicting concurrent edits.
+Reported workflow status and observed native lifecycle are distinct. Structured
+native subagent results with matching assignment/runtime identity can record
+running/completed/failed/exited observations. Missing runtime capability remains
+unverified; resume never interprets silence as worker exit or permission to relaunch.
+Assignments, blockers, answers, runtime observations and report links persist in
+the session transcript. Native completion never implies supervisor acceptance.
+
+At most three assignments may be outstanding. File reservations are durable and
+atomic across supervisor sessions in the same canonical checkout, including nested
+project folders. Unknown boundaries reserve the checkout; overlaps wait for explicit
+settlement. Isolated worktrees have separate checkout identities. No session may
+release another session's assignment. Ownership transfer compares the exact owner
+token shown in the confirmation dialog and fails safely if ownership changes.
+Git checkout reservations live in the private per-checkout Git metadata directory
+so staging/commits cannot include runtime locks or session records. Non-Git folders
+retain local reservation files.
 
 Workers receive a bounded contract, including Playwright-MCP-first browser
 verification guidance. They return files changed, real verification and blockers
@@ -105,6 +117,47 @@ assignments are settled to avoid committing unfinished shared-checkout work.
 Acceptance does not automatically complete tasks, commit changes or approve gates.
 Human approvals remain separate. The spawn boundary is agent guidance; it is not
 a filesystem sandbox for subagents.
+
+### Final integration, evidence and release
+
+`/fest finish` queues an agent pass over approved acceptance, combined behavior,
+layout, interactions, responsive sizes and console errors. The agent must actually
+exercise the app, using Playwright MCP first when exposed, then record the six
+checks with `fest_integration`. Referenced pages need comparison records with the
+reference/capture paths, route, viewport, browser tool and concrete differences.
+Unresolved differences cannot be marked verified. Missing browser access remains
+untested with its limitation. Backend-only visual checks may be not applicable.
+
+`fest_evidence` stores full reports and festival-relative attachments under private
+`.ompfest/evidence` files. Model responses carry a short summary and artifact path,
+not the entire log. Attachments have content hashes; paths outside the festival
+are rejected. Integration reviews become stale when approved task/source evidence
+changes; failed/stale reviews block gate submission.
+
+`/fest release` requires an owning selected festival, settled workers and a current
+verified final review. For a package at its Git checkout root, it previews the
+semantic bump, exact changed files, existing verification scripts and upstream
+branch, then asks for confirmation and a commit message. Approval is revision-bound.
+It updates npm version metadata, runs test/typecheck/lint/build scripts that exist,
+commits through fest and pushes without force. Check failure stops before commit;
+push failure preserves the local commit. Monorepos must use root release scripts,
+not release from a nested package. No unattended release is authorized by a plan.
+
+### Persisted planning
+
+`fest_plan_draft` creates a private `.draft.json` artifact with `draftId` and
+`revision`. Read or update only the missing/changed fields; stale revisions reject
+concurrent overwrites. Missing runnable verification is an explicit missing field,
+not invented test proof. `/fest draft` offers native field editing and preview.
+Call `fest_plan` with `action:"preview"`, `draftId` and `draftRevision` to consume
+that persisted content without resending a deeply nested spec.
+
+Scaffolding renders festival/overview/phase/sequence/task documents from the
+approved contract, retains independent user notes and constraints, and removes
+obsolete template sections instead of substituting fake placeholder values.
+Working directories are camp-relative, and hierarchy underscores remain literal.
+The scaffold must validate before activation; real validation failures remain
+failures and are not bypassed.
 
 ### Plan from an inspected repository
 

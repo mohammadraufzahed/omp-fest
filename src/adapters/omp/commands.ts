@@ -3,7 +3,7 @@
  * festivals, tasks, projects, intents. Nothing is hardcoded.
  */
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
-import { claimFestivalOwnership, festivalOwner } from "../../application/festival-ownership.js";
+import { claimFestivalOwnership, festivalOwner, type FestivalOwner } from "../../application/festival-ownership.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { LoopTracker } from "../../application/loop-tracker.js";
@@ -19,6 +19,10 @@ import { BROWSER_VERIFICATION_POLICY, IDEA_INTERVIEW, PLAN_GUIDE, markerIntervie
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { supervisorCommands } from "./supervisor-commands.js";
+import { qualityCommands } from "./quality-commands.js";
+import { conflictCommands } from "./conflict-commands.js";
+import { draftCommands } from "./draft-commands.js";
+import { supervisorQueue } from "./supervisor-tools.js";
 
 export interface CommandDeps {
   fest: FestCli;
@@ -242,7 +246,15 @@ async function interactiveSettings(ctx: CommandCtx, dir: string): Promise<boolea
 export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   const supervisor = deps.supervisor ?? new Supervisor();
   const subs: Record<string, Sub> = {
-    ...supervisorCommands(pi, supervisor),
+    ...supervisorCommands(pi, supervisor, {
+      queue: async (ctx) => {
+        if (!deps.tracker) throw new Error("Supervisor session tracker unavailable");
+        return (await supervisorQueue({ ...deps, tracker: deps.tracker }, supervisor, sessionIdOf(ctx), ctx.cwd)).queue;
+      },
+    }),
+    ...qualityCommands(pi, { ...deps, supervisor }),
+    ...conflictCommands(pi, deps),
+    ...draftCommands(pi, deps),
     "": {
       desc: "festival dashboard: camp, active festival, progress, gates",
       run: async (_args, ctx) => {
@@ -591,7 +603,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         }
         const sid = sessionIdOf(ctx);
         const current = await festivalOwner(match.festival.path);
-        let transfer = false;
+        let transfer: FestivalOwner | undefined;
         if (current && current.sessionId !== sid) {
           const confirmed = typeof ctx.ui.confirm === "function"
             ? await ctx.ui.confirm("Transfer festival ownership", `${match.festival.id} is owned by omp session ${current.sessionId}. Transfer it to this session?`)
@@ -600,7 +612,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
             send(pi, "fest-status", `Ownership unchanged — ${match.festival.id} remains with ${current.sessionId}.`);
             return;
           }
-          transfer = true;
+          transfer = current;
         }
         const ownership = await claimFestivalOwnership(match.festival.path, sid, transfer);
         if (ownership.kind !== "claimed") {
@@ -670,7 +682,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Guided festival control: /fest [workers|dispatch|pause|review|next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
+    description: "Guided festival control: /fest [draft|finish|conflicts|blockers|resume|release|workers|dispatch|pause|review|next|status|show|select|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")

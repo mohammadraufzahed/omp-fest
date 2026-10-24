@@ -316,7 +316,9 @@ function markdownText(value: string): string {
 
 /** Exact label supplied to upstream hierarchy parsing, before its filename normalization. */
 export function structuredHierarchyName(value: string): string {
-  return markdownText(text(value, "Hierarchy name").replace(/[`()]/g, ""));
+  const label = text(value, "Hierarchy name").replace(/[`()]/g, "").replace(/[\\*{}<>#|[\]]/g, " ").replace(/\s+/g, " ").trim();
+  if (!label) throw new Error("Hierarchy name must contain parser-safe text");
+  return label;
 }
 
 /** Shared by preview, STRUCTURE.md, and the scaffold's persisted task contract. */

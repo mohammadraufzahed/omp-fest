@@ -23,13 +23,18 @@ import { installVisualReferences, prepareVisualReferences, referencesForTask, ta
 import { createWireframe, WireframeInputError, type WireframeSpec } from "../../application/visual-wireframe.js";
 import { structuredPlanSchema, type StructuredPlan } from "../../application/structured-plan.js";
 import { normalizePlanInput } from "../../application/plan-input.js";
-import { approvedPlan, installApprovedTasks, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
+import { approvedPlan, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
+import { finalizeApprovedScaffold } from "../../application/plan-scaffold.js";
+import { readPlanDraft } from "../../application/plan-drafts.js";
+import { registerDraftTools } from "./draft-tools.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import type { ZodLike } from "./zod-types.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { registerSupervisorTools } from "./supervisor-tools.js";
+import { registerQualityTools } from "./quality-tools.js";
+import { INTEGRATION_GUIDE, integrationReviewStatus } from "../../application/integration-review.js";
 
 export interface ToolDeps {
   fest: FestCli;
@@ -303,6 +308,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const z = pi.zod;
   const supervisor = deps.supervisor ?? new Supervisor();
   registerSupervisorTools(pi, deps, supervisor);
+  registerQualityTools(pi, { ...deps, supervisor });
+  registerDraftTools(pi, deps);
 
 
   pi.registerTool({
@@ -342,6 +349,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           supervisor: SUPERVISOR_POLICY,
           ...(visualReferences.length > 0 ? { visualReferences } : {}),
         });
+      }
+      if (unit.kind === "complete" || unit.kind === "gate_step") {
+        return textResult({ ...unit, integration: await integrationReviewStatus(dir, deps.detect), nextSteps: INTEGRATION_GUIDE });
       }
       return unit.kind === "blocked" ? compactBlockedUnit(unit) : textResult(unit);
     },
@@ -572,6 +582,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (verification.issues.length) {
         return textResult({ kind: "gate_blocked", issues: verification.issues, hint: "Reverify changed or missing checks before submitting this gate." });
       }
+      const integration = await integrationReviewStatus(dir, deps.detect);
+      if (integration.status === "failed" || integration.status === "stale") {
+        return textResult({ kind: "gate_blocked", integration, hint: INTEGRATION_GUIDE });
+      }
       const constraints = await festivalConstraints(dir);
       const ui = ctx.ui;
       if (!config.pauseAtGates || ui === undefined || typeof ui.confirm !== "function") {
@@ -637,75 +651,6 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     },
   });
 
-  pi.registerTool({
-    name: "fest_plan_draft",
-    label: "Draft Fest Plan",
-    description:
-      "Build a compact, normalized plan draft from plain-language fields. Generates stable IDs and the canonical camp plan path without writing files or starting a festival.",
-    parameters: z.object({
-      name: z.string().describe("Festival name/slug"),
-      goal: z.string().describe("Outcome the plan should produce"),
-      scope: z.array(z.string()).describe("Included work"),
-      acceptance: z.array(z.string()).describe("Observable Done-When statements"),
-      inspection: z.array(z.object({ path: z.string(), reason: z.string() })).describe("Project-relative paths actually inspected"),
-      workingDir: z.string().optional().describe("Camp-relative or absolute project path"),
-      exclusions: z.array(z.string()).optional().describe("Explicitly excluded work"),
-      files: z.array(z.string()).optional().describe("Existing project-relative files touched by the task"),
-      verification: z.object({ command: z.string(), evidencePath: z.string(), expected: z.string() }).optional(),
-      visualIntent: z.enum(["ui_visual", "document_or_pdf", "backend_or_api", "bug_diagnostic", "mixed", "unknown"]).optional(),
-    }),
-    async execute(_id: string, params: {
-      name: string; goal: string; scope: string[]; acceptance: string[];
-      inspection: { path: string; reason: string }[]; workingDir?: string; exclusions?: string[];
-      files?: string[]; verification?: { command: string; evidencePath: string; expected: string };
-      visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown";
-    }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
-      const root = await campRootOf(deps, ctx);
-      if (!root) return await idleResult(deps, ctx);
-      const project = await resolveWorkingDir(root, deps.camp, params.workingDir);
-      const missing = [
-        ...(params.scope.length ? [] : ["scope"]),
-        ...(params.acceptance.length ? [] : ["acceptance"]),
-        ...(params.inspection.length ? [] : ["inspection"]),
-      ];
-      if (!project.dir || missing.length > 0) {
-        return textResult({
-          kind: "plan_draft_incomplete",
-          missing,
-          projects: project.candidates,
-          hint: "Supply only the listed missing fields; do not construct nested phase/task IDs manually.",
-        });
-      }
-      const acceptance = params.acceptance.map((description, index) => ({ id: `ac-${index + 1}`, description }));
-      const files = (params.files ?? []).map((path) => ({ path, status: "existing" as const }));
-      const task = {
-        id: "implement",
-        title: params.goal,
-        description: params.goal,
-        dependsOn: [],
-        implements: acceptance.map((item) => item.id),
-        verifies: acceptance.map((item) => item.id),
-        files,
-        verification: params.verification ? [{ ...params.verification, cwd: "." }] : [],
-      };
-      return textResult({
-        kind: "plan_draft",
-        plan: join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`),
-        workingDir: project.dir,
-        visualIntent: params.visualIntent ?? "unknown",
-        spec: {
-          goal: params.goal,
-          scope: params.scope,
-          exclusions: params.exclusions ?? [],
-          acceptance,
-          questions: [],
-          inspection: params.inspection,
-          phases: [{ id: "build", name: "BUILD", type: "implementation", sequences: [{ id: "implement", name: "IMPLEMENT", tasks: [task] }] }],
-        },
-        nextSteps: "Review this draft, then pass its spec unchanged to fest_plan action:'preview'.",
-      });
-    },
-  });
 
   pi.registerTool({
     name: "fest_plan",
@@ -719,10 +664,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       "The parser and generated tree must match the approved counts. One phase and sequence are valid for simple tasks. " +
       "Visual references are optional; referenceAction handles existing visual reference revisions.",
     parameters: z.object({
-      name: z.string().describe("Festival name/slug, e.g. 'prenatal-form-groups'"),
-      plan: z.string().describe("Absolute path to the STRUCTURE.md plan document"),
+      name: z.string().optional().describe("Festival slug; omitted when using draftId"),
+      plan: z.string().optional().describe("Canonical plan path; generated from draftId or name when omitted"),
+      draftId: z.string().optional().describe("Persisted draft id returned by fest_plan_draft"),
+      draftRevision: z.string().optional().describe("Exact persisted draft revision to preview"),
       action: z.enum(["preview", "scaffold"]).optional().describe("preview validates and writes planning artifacts only; scaffold consumes an approved preview"),
-      spec: structuredPlanSchema(z).optional().describe("Structured plan required for preview; omit during scaffold"),
+      spec: structuredPlanSchema(z).optional().describe("Direct structured spec for preview; omit when consuming draftId/draftRevision and during scaffold"),
       approvedRevision: z.string().optional().describe("planRevision from the preview the human approved; required for scaffold"),
       workingDir: z.string().optional().describe("Camp-relative project dir or an absolute path to a linked checkout; required when the camp has multiple projects"),
       rules: z.string().optional().describe("Constraints/rules the human agreed to during planning, as bullet lines — written verbatim into FESTIVAL_RULES.md so fest rules shows them"),
@@ -733,11 +680,22 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       baseRevision: z.string().optional().describe("Original reference digest from the approved revision preview"),
       proposalRevision: z.string().optional().describe("Proposed reference digest from the approved revision preview"),
     }),
-    async execute(_id: string, params: { name: string; plan: string; action?: "preview" | "scaffold"; spec?: StructuredPlan; approvedRevision?: string; workingDir?: string; rules?: string; referencesDir?: string; visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown"; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { name: string; plan: string; draftId?: string; draftRevision?: string; action?: "preview" | "scaffold"; spec?: StructuredPlan; approvedRevision?: string; workingDir?: string; rules?: string; referencesDir?: string; visualIntent?: "ui_visual" | "document_or_pdf" | "backend_or_api" | "bug_diagnostic" | "mixed" | "unknown"; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
       }
+      if (params.draftId) {
+        try {
+          if (params.action !== "preview" || params.spec) throw new Error("draftId is for persisted preview; omit spec");
+          const draft = await readPlanDraft(root, params.draftId);
+          if (draft.revision !== params.draftRevision) throw new Error("Draft changed; read current draft and approve the new revision");
+          if (draft.missing.length) throw new Error(`Draft is incomplete: ${draft.missing.join(", ")}`);
+          params = { ...params, name: draft.fields.name, plan: draft.plan, spec: draft.spec, workingDir: draft.fields.workingDir, rules: draft.fields.rules, referencesDir: draft.fields.referencesDir ? resolve(root, draft.fields.referencesDir) : undefined, visualIntent: draft.fields.visualIntent };
+        } catch (error) { return planFailure(error); }
+      }
+      if (!params.name || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(params.name)) return planFailure("name must be a lowercase festival slug", { field: "name" });
+      if (!params.plan) params.plan = join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
       const canonicalPlan = join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
       const planPath = resolve(params.plan) === resolve(canonicalPlan) ? params.plan : canonicalPlan;
       const planWarnings = params.plan === planPath ? [] : [`plan was normalized to ${planPath}`];
@@ -879,7 +837,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       let stamped = 0;
       let gateRules = 0;
       try {
-        await installApprovedTasks(festivalDir, approved.artifact);
+        await finalizeApprovedScaffold(root, festivalDir, approved.artifact);
       } catch (error) {
         return textResult({ kind: "plan_failed", error: String(error), festivalDir, hint: "Scaffold differs from the approved structure. Files retained; repair before promotion." });
       }
@@ -902,6 +860,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (rulesSeed.constraints) {
         gateRules = await stampGateRules(festivalDir);
       }
+      const scaffoldValidation = await deps.fest.validate(festivalDir);
+      if (scaffoldValidation.score !== 100) {
+        return planFailure("Generated scaffold did not pass validation; retained for repair, not activation", { festivalDir, score: scaffoldValidation.score, validation: scaffoldValidation.output.slice(0, 2000) });
+      }
       const skipped = gates.output.match(/Skipping sequence "[^"]+"/g) ?? [];
       const needsWorkingDir = !workingDir;
       return textResult({
@@ -917,6 +879,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         rules: { ...rulesSeed, gateFilesStamped: gateRules },
         ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
         qualityGates: gates,
+        validation: { score: scaffoldValidation.score },
         ...(skipped.length > 0
           ? {
               gateSkippedSequences: skipped,
@@ -933,9 +896,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           : {}),
         nextSteps: [
           ...(bundle ? ["Link each relevant task doc with 'Visual reference: references/pages/<page>/PAGE.md' and component-level Done-When checks; fest_validate will reject unlinked pages."] : []),
-          `Fill unfilled markers: fest_markers {list:true, festival:"${festId}"}`,
-          `Run fest_validate {festival:"${festId}"} — it should report only unfilled markers, no missing fest_working_dir`,
-          "The plan has already been approved. If filling markers changes scope or acceptance, obtain new approval before promotion.",
+          `Run fest_validate {festival:"${festId}"} — generated contract documents must contain zero template markers and valid camp-relative working directories`,
+          "Generated documents have already been validated. If scope or acceptance changes, obtain new approval before promotion.",
           `fest_promote {festival:"${festId}"} twice: planning -> ready -> active`,
         ],
       });

@@ -1,0 +1,95 @@
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, readFile, rename, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { CampDetect } from "../ports.js";
+import { evidenceDirectory, storeEvidenceBundle } from "./evidence-bundles.js";
+import { validateVisualReferences } from "./visual-references.js";
+
+export const INTEGRATION_GUIDE = "Run the final integration pass before presenting the completion gate: inspect combined changes and approved acceptance; exercise target routes, interactions, responsive sizes and console errors. Prefer Playwright MCP when exposed. Compare real rendered captures to reference at the original viewport, list concrete layout/typography/spacing differences and fix them. Inspect UI-exported PDFs directly. Record actual checks with fest_integration; mark unavailable checks untested, never passed. Small cleanup stays within approved scope; larger scope changes need approval.";
+export interface IntegrationCheck { id: string; status: "verified" | "failed" | "untested" | "not_applicable"; proof: string }
+export interface VisualComparison {
+  page: string; route: string; viewport: string; browserTool: string;
+  reference: string; capture: string; differences: string[]; status: "verified" | "failed" | "untested";
+}
+export const INTEGRATION_CHECKS = ["acceptance", "integration", "layout", "interactions", "responsive", "console"] as const;
+
+async function reviewRevision(festivalDir: string, detect: CampDetect) {
+  const hash = createHash("sha256");
+  const tasks = await detect.pendingTasks(festivalDir);
+  for (const task of [...tasks].sort((a, b) => a.path.localeCompare(b.path))) {
+    hash.update(task.path).update(String(task.done)).update(await readFile(join(festivalDir, task.path), "utf8"));
+  }
+  for (const file of ["APPROVED_PLAN.json", "references/verification.json"]) {
+    try { hash.update(await readFile(join(festivalDir, file), "utf8")); }
+    catch (error) { if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error; }
+    if (file === "APPROVED_PLAN.json") {
+      const artifact: unknown = JSON.parse(await readFile(join(festivalDir, file), "utf8").catch(() => "null"));
+      if (artifact && typeof artifact === "object" && "workingDir" in artifact && typeof artifact.workingDir === "string" && "spec" in artifact && artifact.spec && typeof artifact.spec === "object" && "phases" in artifact.spec && Array.isArray(artifact.spec.phases)) {
+        const project = isAbsolute(artifact.workingDir) ? artifact.workingDir : resolve(festivalDir, "../../..", artifact.workingDir);
+        const sourcePaths = new Set<string>();
+        const phases: unknown[] = artifact.spec.phases;
+        for (const phase of phases) {
+          if (!phase || typeof phase !== "object" || !("sequences" in phase) || !Array.isArray(phase.sequences)) continue;
+          for (const sequence of phase.sequences as unknown[]) {
+            if (!sequence || typeof sequence !== "object" || !("tasks" in sequence) || !Array.isArray(sequence.tasks)) continue;
+            for (const task of sequence.tasks as unknown[]) {
+              if (!task || typeof task !== "object" || !("files" in task) || !Array.isArray(task.files)) continue;
+              for (const entry of task.files as unknown[]) if (entry && typeof entry === "object" && "path" in entry && typeof entry.path === "string") sourcePaths.add(entry.path);
+            }
+          }
+        }
+        for (const path of [...sourcePaths].sort()) {
+          const target = resolve(project, path);
+          const rel = relative(project, target);
+          if (isAbsolute(path) || rel === ".." || rel.startsWith(`..${sep}`)) throw new Error("Approved source file escapes project");
+          hash.update(path);
+          try { hash.update(await readFile(target)); }
+          catch (error) { if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") hash.update("missing"); else throw error; }
+        }
+      }
+    }
+  }
+  return hash.digest("hex");
+}
+
+export async function recordIntegrationReview(festivalDir: string, detect: CampDetect, input: { sessionId: string; checks: IntegrationCheck[]; comparisons: VisualComparison[]; summary: string; details: string }) {
+  if (input.checks.length !== INTEGRATION_CHECKS.length || new Set(input.checks.map((check) => check.id)).size !== INTEGRATION_CHECKS.length || input.checks.some((check) => !INTEGRATION_CHECKS.some((id) => id === check.id) || !check.proof.trim())) throw new Error(`Integration checks must cover exactly ${INTEGRATION_CHECKS.join(", ")} with real evidence or an explicit limitation`);
+  if (input.checks.some((check) => !["verified", "failed", "untested", "not_applicable"].includes(check.status) || (["acceptance", "integration"].includes(check.id) && check.status === "not_applicable"))) throw new Error("Acceptance/integration cannot be not_applicable; use actual verified, failed or untested evidence");
+  const visual = await validateVisualReferences(festivalDir, detect);
+  if (visual.issues.length) throw new Error(`Repair visual references: ${visual.issues.slice(0, 3).join("; ")}`);
+  const comparisons = new Set(input.comparisons.map((comparison) => comparison.page));
+  if (comparisons.size !== input.comparisons.length || visual.pages.some((page) => !comparisons.has(page))) throw new Error("Visual integration needs one comparison per referenced page, including explicit untested limitations");
+  const files: string[] = [];
+  for (const comparison of input.comparisons) {
+    if (![comparison.page, comparison.route, comparison.viewport, comparison.browserTool, comparison.reference].every((value) => value.trim()) || (comparison.status !== "untested" && !comparison.capture.trim())) throw new Error("Visual comparison needs page, route, viewport, browser tool, reference and actual capture (capture may be empty only when untested)");
+    if (comparison.status === "verified" && comparison.differences.length) throw new Error("Visual comparison with unresolved differences cannot be verified");
+    if (!["verified", "failed", "untested"].includes(comparison.status) || (comparison.status === "untested" && !comparison.differences.length)) throw new Error("Untested visual comparisons need an explicit limitation in differences");
+    files.push(comparison.reference, ...(comparison.capture ? [comparison.capture] : []));
+  }
+  const bundle = await storeEvidenceBundle(festivalDir, { kind: "integration", summary: input.summary, details: JSON.stringify({ checks: input.checks, comparisons: input.comparisons, notes: input.details }, null, 2), attachments: files });
+  const record = { sessionId: input.sessionId, revision: await reviewRevision(festivalDir, detect), checks: input.checks, comparisons: input.comparisons, evidence: bundle, createdAt: new Date().toISOString() };
+  const directory = await evidenceDirectory(festivalDir);
+  const temporary = join(directory, `${randomUUID()}.tmp`);
+  await writeFile(temporary, JSON.stringify(record, null, 2), { mode: 0o600, flag: "wx" });
+  await rename(temporary, join(directory, "integration.json"));
+  return { status: input.checks.some((check) => check.status === "failed") || input.comparisons.some((comparison) => comparison.status === "failed") ? "failed" : input.checks.some((check) => check.status === "untested") || input.comparisons.some((comparison) => comparison.status === "untested") ? "untested" : "verified", evidence: bundle };
+}
+
+export async function integrationReviewStatus(festivalDir: string, detect: CampDetect) {
+  const path = join(await evidenceDirectory(festivalDir), "integration.json");
+  const info = await lstat(path).catch((error: unknown) => {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!info) return { status: "missing", hint: INTEGRATION_GUIDE };
+  if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) throw new Error("Unsafe integration review record");
+  const record: unknown = JSON.parse(await readFile(path, "utf8"));
+  if (!record || typeof record !== "object" || !("revision" in record) || !("checks" in record) || !Array.isArray(record.checks) || !("comparisons" in record) || !Array.isArray(record.comparisons)) throw new Error("Invalid integration review record");
+  if (record.revision !== await reviewRevision(festivalDir, detect)) return { status: "stale", hint: INTEGRATION_GUIDE };
+  const checks: unknown[] = record.checks;
+  const comparisons: unknown[] = record.comparisons;
+  const results = [...checks, ...comparisons];
+  const failed = results.some((item) => item && typeof item === "object" && "status" in item && item.status === "failed");
+  const untested = results.some((item) => item && typeof item === "object" && "status" in item && item.status === "untested");
+  return { status: failed ? "failed" : untested ? "untested" : "verified", path };
+}

@@ -17,7 +17,7 @@ import { basename, isAbsolute, resolve, sep } from "node:path";
 import { CachedDetect } from "./src/application/detect-cache.js";
 import { watchCampTransitions } from "./src/application/camp-watcher.js";
 import { LoopTracker } from "./src/application/loop-tracker.js";
-import { Supervisor, SUPERVISOR_POLICY } from "./src/application/supervisor.js";
+import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY } from "./src/application/supervisor.js";
 import { orientSession } from "./src/application/orient.js";
 import { restoreClaimFromBranch } from "./src/application/session-claim.js";
 import { claimedFestivalDir } from "./src/application/fest-resolve.js";
@@ -34,6 +34,7 @@ import { loadConfig } from "./src/domain/config.js";
 import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 import { planInterviewKickoff } from "./src/domain/orientation.js";
 import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
+import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
 
 interface ExtensionContextLike {
   cwd: string;
@@ -69,6 +70,7 @@ interface InputEventShape {
 
 interface ToolResultEventShape extends ToolCallEvent {
   isError?: boolean;
+  result?: unknown;
 }
 
 interface ToolCallResult {
@@ -275,7 +277,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return undefined;
     }
     const state = supervisor.state(sessionIdOf(ctx));
-    return { message: { customType: "fest-state", content: `${digest}\n${SUPERVISOR_POLICY}\nDispatch: ${state.paused ? "paused" : "enabled"}; workers: ${state.workers.filter((worker) => worker.status !== "accepted").length} outstanding.`, display: false } };
+    return { message: { customType: "fest-state", content: `${digest}\n${SUPERVISOR_POLICY}\n${INTEGRATION_GUIDE}\nDispatch: ${state.paused ? "paused" : "enabled"}; workers: ${state.workers.filter((worker) => worker.status !== "accepted").length} outstanding.`, display: false } };
   });
 
   // Pre-execution nudges for bypass paths (raw fest/camp, ad hoc todos,
@@ -326,6 +328,12 @@ export default function ompFest(pi: ExtensionApiLike): void {
   // pending work but no unit was opened via fest_next — the exact "implemented
   // without fest_next" failure.
   pi.on("tool_result", async (event, ctx) => {
+    if (/^(?:task|subagent|subagents)$/.test(event.toolName ?? "")) {
+      const observed = supervisor.observeNativeResult(sessionIdOf(ctx), event.result);
+      if (observed.observed.length) {
+        pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sessionIdOf(ctx)));
+      }
+    }
     if (event.isError) {
       return undefined;
     }
