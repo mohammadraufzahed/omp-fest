@@ -332,7 +332,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         const visualReferences = await referencesForTask(dir, unit.doc);
         const sid = sessionIdOf(ctx);
         const stale = deps.tracker.unfinishedFor(sid) ? deps.tracker.openTaskPathFor(sid) : undefined;
-        deps.tracker.taskOpened(sid, unit.path);
+        deps.tracker.taskOpened(sid, festivalRelativeTaskPath(dir, unit.path) ?? unit.path);
         if (stale) {
           return textResult({
             ...unit,
@@ -378,6 +378,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const dir = r.dir;
       const sid = sessionIdOf(ctx);
       const opened = deps.tracker.openTaskPathFor(sid);
+      const pausedTask = params.task ? festivalRelativeTaskPath(dir, params.task) : opened;
+      const pausedReason = deps.tracker.pausedReasonFor(sid, pausedTask);
+      if (pausedReason) return textResult({
+        kind: "completion_blocked", task: pausedTask, blocker: pausedReason,
+        hint: "This task is paused by a project reservation conflict. Do not mark it complete or commit; wait until the supervisor queue clears the reservation.",
+      });
       const visual = await validateVisualReferences(dir, deps.detect);
       if (visual.issues.length) {
         return textResult({ kind: "completion_blocked", issues: visual.issues });
@@ -444,15 +450,28 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
   pi.registerTool({
     name: "fest_task_update",
     label: "Update Fest Task State",
-    description: "Update task progress or state: percent, blocked, defer, unblock, or reset.",
+    description: "Update task progress or state. Provide a reason for blocked/defer, a percentage for update, and an optional executor note for unblock.",
     parameters: z.object({
       action: z.enum(["blocked", "defer", "unblock", "reset", "update"]),
       task: z.string().optional(),
-      reason: z.string().optional(),
-      percent: z.string().optional(),
+      reason: z.string().optional().describe("Reason for blocked/defer; on unblock, becomes the note to the executor."),
+      percent: z.string().optional().describe("Required for update: progress percentage below 100."),
       festival: z.string().optional().describe("Festival name/id override"),
     }),
     async execute(_id: string, params: { action: "blocked" | "defer" | "unblock" | "reset" | "update"; task?: string; reason?: string; percent?: string; festival?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const unsupportedField = params.reason?.trim() && !["blocked", "defer", "unblock"].includes(params.action) ? "reason"
+        : params.percent?.trim() && params.action !== "update" ? "percent"
+          : undefined;
+      const requiredField = params.action === "update" && !params.percent?.trim() ? "percent"
+        : (params.action === "blocked" || params.action === "defer") && !params.reason?.trim() ? "reason"
+          : undefined;
+      const field = unsupportedField ?? requiredField;
+      if (field) return textResult({
+        kind: "task_update_invalid", action: params.action, field,
+        error: unsupportedField
+          ? `Action "${params.action}" does not accept ${field}. No festival state was changed.`
+          : `Action "${params.action}" requires ${field}. No festival state was changed.`,
+      });
       const r = await dirOrResult(pi, deps, ctx, params.festival);
       if ("result" in r) {
         return r.result;

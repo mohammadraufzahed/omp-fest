@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
 import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { dispatchQueue, taskFiles, type DispatchQueue, type DispatchTask } from "../../application/supervisor-queue.js";
@@ -61,6 +61,10 @@ export async function supervisorQueue(deps: ToolDeps, supervisor: Supervisor, si
   }
   const queue = dispatchQueue({ festivalDir: dir, festival: basename(dir), current, tasks, workers: state.workers, paused: state.paused });
   const projectDir = current.kind === "task" && current.workingDir ? await realpath(resolve(campRoot, current.workingDir)) : undefined;
+  const currentTask = current.kind === "task"
+    ? (isAbsolute(current.path) ? relative(dir, current.path) : current.path)
+    : undefined;
+  let currentReservation: string | undefined;
   {
     const candidates = [];
     for (const candidate of queue.candidates) {
@@ -69,10 +73,16 @@ export async function supervisorQueue(deps: ToolDeps, supervisor: Supervisor, si
       }
       const conflict = await checkProjectConflicts(candidate.workingDir, candidate.files);
       if (conflict.kind === "clear") candidates.push(candidate);
-      else queue.waiting.push({ task: candidate.task, reason: conflict.kind === "busy" ? "Project reservation registry is busy; retry without launching." : "Another session owns overlapping project files; keep work sequential." });
+      else {
+        const reason = conflict.kind === "busy" ? "Project reservation registry is busy; retry without launching." : "Another session owns overlapping project files; keep work sequential.";
+        queue.waiting.push({ task: candidate.task, reason });
+        if (candidate.task === currentTask) currentReservation = reason;
+      }
     }
     queue.candidates = candidates;
   }
+  if (currentTask && currentReservation) deps.tracker.taskPaused(sid, currentTask, currentReservation);
+  else if (currentTask && queue.candidates.some((candidate) => candidate.task === currentTask)) deps.tracker.taskResumed(sid, currentTask);
   return { dir, current, tasks, projectDir, queue };
 }
 

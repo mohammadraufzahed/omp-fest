@@ -47,8 +47,20 @@ export class FestCliAdapter implements FestCli {
     if (opts.task) {
       args.push(opts.task);
     }
-    if (opts.reason) {
-      args.push("--reason", opts.reason);
+    if ((action === "blocked" || action === "defer") && !opts.reason?.trim()) {
+      throw new Error(`fest task ${action} requires a reason`);
+    }
+    if (action === "update" && !opts.percent?.trim()) {
+      throw new Error("fest task update requires a progress percentage");
+    }
+    if (opts.reason?.trim() && !["blocked", "defer", "unblock"].includes(action)) {
+      throw new Error(`fest task ${action} does not accept a reason or note`);
+    }
+    if (opts.percent?.trim() && action !== "update") {
+      throw new Error(`fest task ${action} does not accept a percentage`);
+    }
+    if (opts.reason?.trim()) {
+      args.push(action === "unblock" ? "--note" : "--reason", opts.reason);
     }
     if (action === "update" && opts.percent) {
       args.push(opts.percent);

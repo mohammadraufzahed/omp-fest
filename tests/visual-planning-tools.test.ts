@@ -113,10 +113,29 @@ async function setup() {
     await handler?.(args, { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
     return sent.at(-1) ?? "";
   }
-  return { root, referencesDir, festival, plan, spec, taskPath, scaffoldFromPlan, promote, taskComplete, workflowAdvance, workflowApprove, call, command, scaffold, fest };
+  return { root, referencesDir, festival, plan, spec, taskPath, scaffoldFromPlan, promote, taskComplete, workflowAdvance, workflowApprove, call, command, scaffold, fest, tracker };
 }
 
 describe("visual planning tool handoff", () => {
+  it("refuses completion while the current task is paused by a project reservation", async () => {
+    const { plan, taskPath, taskComplete, tracker, call, scaffold } = await setup();
+    await scaffold({ name: "feature", plan });
+    tracker.taskOpened("session-1", taskPath);
+    tracker.taskPaused("session-1", taskPath, "Another session owns overlapping project files.");
+    const result = await call("fest_task_complete", { evidence: "No work was performed.", task: taskPath });
+    expect(result).toMatchObject({ kind: "completion_blocked", blocker: "Another session owns overlapping project files." });
+    expect(taskComplete).not.toHaveBeenCalled();
+  });
+  it("reports missing task mutation fields before invoking fest", async () => {
+    const { plan, scaffold, call } = await setup();
+    await scaffold({ name: "feature", plan });
+    expect(await call("fest_task_update", { action: "update" })).toMatchObject({
+      kind: "task_update_invalid", field: "percent",
+    });
+    expect(await call("fest_task_update", { action: "blocked" })).toMatchObject({
+      kind: "task_update_invalid", field: "reason",
+    });
+  });
   it("previews within the plan flow and applies reviewed revisions without scaffolding again", async () => {
     const { referencesDir, festival, plan, scaffoldFromPlan, call, scaffold } = await setup();
     const preview = await call("fest_plan", { name: "feature", plan, referencesDir, referenceAction: "preview" });

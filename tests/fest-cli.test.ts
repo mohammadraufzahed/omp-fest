@@ -34,17 +34,34 @@ describe("FestCliAdapter", () => {
     await fest.raw("/f", ["task", "completed", "01_task.md"]);
     expect(exec.calls[2]?.args).toContain("--yes");
   });
-  it("omits --yes for unblock and other non-confirming task mutations", async () => {
+  it("uses only flags supported by each task subcommand", async () => {
     const exec = fakeExec({});
     const fest = new FestCliAdapter(exec);
     await fest.taskMutate("/f", "unblock", {});
     await fest.taskMutate("/f", "update", { percent: "50%" });
+    await fest.taskMutate("/f", "unblock", { reason: "Retry the database query" });
+    await fest.taskMutate("/f", "blocked", { reason: "Dependency service is unavailable" });
+    await fest.taskMutate("/f", "defer", { reason: "Waiting for the vendor response" });
     await fest.taskMutate("/f", "reset", {});
     expect(exec.calls.map((call) => call.args)).toEqual([
       ["task", "unblock", "--json"],
       ["task", "update", "50%", "--json"],
+      ["task", "unblock", "--note", "Retry the database query", "--json"],
+      ["task", "blocked", "--reason", "Dependency service is unavailable", "--yes", "--json"],
+      ["task", "defer", "--reason", "Waiting for the vendor response", "--yes", "--json"],
       ["task", "reset", "--yes", "--json"],
     ]);
+  });
+
+  it("rejects task mutation inputs that the fest CLI requires", async () => {
+    const exec = fakeExec({});
+    const fest = new FestCliAdapter(exec);
+    await expect(fest.taskMutate("/f", "blocked", {})).rejects.toThrow("requires a reason");
+    await expect(fest.taskMutate("/f", "defer", {})).rejects.toThrow("requires a reason");
+    await expect(fest.taskMutate("/f", "update", {})).rejects.toThrow("requires a progress percentage");
+    await expect(fest.taskMutate("/f", "reset", { reason: "not supported" })).rejects.toThrow("does not accept a reason");
+    await expect(fest.taskMutate("/f", "update", { percent: "50%", reason: "not supported" })).rejects.toThrow("does not accept a reason");
+    expect(exec.calls).toEqual([]);
   });
 
 

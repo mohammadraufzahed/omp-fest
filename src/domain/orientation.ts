@@ -70,7 +70,7 @@ export const RECOVERY_PLAYBOOK = [
   "- kind 'idle': at camp root with no festival — call camp_status to list festivals; for NEW work, start the plan workflow instead of writing your own todo list",
   "- kind 'blocked': fix the listed files/markers, then call fest_next again",
   "- kind 'gate_step': gather evidence and call fest_gate_submit — it asks the human directly; never approve",
-  "- kind 'task': work in the returned working_dir, then fest_task_complete + fest_commit",
+  "- kind 'task': work in the returned working_dir only after fest_supervisor queue confirms the current task is eligible; if the queue reports a project reservation conflict, stop before edits/dispatch and do NOT mark the task completed or commit. Retry only after the reservation clears.",
   "- never run bare `git commit` in a linked project — use fest_commit",
 ].join("\n");
 

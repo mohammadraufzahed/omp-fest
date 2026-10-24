@@ -24,6 +24,20 @@ describe("LoopTracker", () => {
     expect(tracker.nudge("s1")).toContain("fest commit");
     expect(tracker.nudge("s1")).not.toContain("task completed");
   });
+  it("warns against task completion while a project reservation blocks work", () => {
+    const tracker = new LoopTracker();
+    const task = "001_BUILD/01_implement/01_task.md";
+    tracker.taskOpened("s1", task);
+    tracker.taskPaused("s1", task, "Another session owns overlapping project files.");
+    expect(tracker.unfinishedFor("s1")).toBe(false);
+    expect(tracker.nudge("s1")).toContain("Do not mark it completed or commit");
+    expect(tracker.nudge("s1")).toContain("Another session owns overlapping project files");
+    tracker.taskOpened("s1", task);
+    expect(tracker.nudge("s1")).toContain("Do not mark it completed");
+    tracker.taskResumed("s1", task);
+    expect(tracker.unfinishedFor("s1")).toBe(true);
+    expect(tracker.nudge("s1")).toContain("fest task completed");
+  });
 
   it("scopes open units, warns and festival claims per session", () => {
     const tracker = new LoopTracker();

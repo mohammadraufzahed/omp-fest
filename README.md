@@ -101,9 +101,12 @@ the session transcript. Native completion never implies supervisor acceptance.
 At most three assignments may be outstanding. File reservations are durable and
 atomic across supervisor sessions in the same canonical checkout, including nested
 project folders. Unknown boundaries reserve the checkout; overlaps wait for explicit
-settlement. Isolated worktrees have separate checkout identities. No session may
-release another session's assignment. Ownership transfer compares the exact owner
-token shown in the confirmation dialog and fails safely if ownership changes.
+settlement. When the current task is blocked by a reservation, the loop warning
+states that it must not be completed or committed; the completion tool rejects it
+until the queue confirms the reservation has cleared. Isolated worktrees have
+separate checkout identities. No session may release another session's assignment.
+Ownership transfer compares the exact owner token shown in the confirmation dialog
+and fails safely if ownership changes.
 Git checkout reservations live in the private per-checkout Git metadata directory
 so staging/commits cannot include runtime locks or session records. Non-Git folders
 retain local reservation files.

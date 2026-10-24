@@ -14,6 +14,7 @@ export interface LoopState {
   openTask?: string;
   taskCompleted: boolean;
   commitDone: boolean;
+  pausedReason?: string;
 }
 
 const EMPTY: LoopState = { taskCompleted: false, commitDone: false };
@@ -89,12 +90,34 @@ export class LoopTracker {
   }
 
   taskOpened(sessionId: string, path: string): void {
-    this.states.set(sessionId, { openTask: path, taskCompleted: false, commitDone: false });
+    const previous = this.stateOf(sessionId);
+    this.states.set(sessionId, {
+      openTask: path, taskCompleted: false, commitDone: false,
+      ...(previous.openTask === path && previous.pausedReason ? { pausedReason: previous.pausedReason } : {}),
+    });
+  }
+
+  taskPaused(sessionId: string, path: string, reason: string): void {
+    const previous = this.stateOf(sessionId);
+    this.states.set(sessionId, {
+      openTask: path, taskCompleted: previous.openTask === path && previous.taskCompleted,
+      commitDone: previous.openTask === path && previous.commitDone, pausedReason: reason,
+    });
+  }
+
+  taskResumed(sessionId: string, path: string): void {
+    const previous = this.stateOf(sessionId);
+    if (previous.openTask === path && previous.pausedReason) {
+      this.states.set(sessionId, { openTask: path, taskCompleted: previous.taskCompleted, commitDone: previous.commitDone });
+    }
   }
 
   taskCompleted(sessionId: string): void {
-    const s = { ...this.stateOf(sessionId), taskCompleted: true };
-    this.states.set(sessionId, s);
+    const previous = this.stateOf(sessionId);
+    this.states.set(sessionId, {
+      ...(previous.openTask ? { openTask: previous.openTask } : {}),
+      taskCompleted: true, commitDone: previous.commitDone,
+    });
   }
 
   committed(sessionId: string): void {
@@ -109,19 +132,24 @@ export class LoopTracker {
   openTaskPathFor(sessionId: string): string | undefined {
     return this.stateOf(sessionId).openTask;
   }
-
-  /** A task was opened via fest_next but complete+commit haven't both landed. */
-  unfinishedFor(sessionId: string): boolean {
-    const s = this.stateOf(sessionId);
-    return s.openTask !== undefined && !(s.taskCompleted && s.commitDone);
+  pausedReasonFor(sessionId: string, path: string | undefined): string | undefined {
+    const state = this.stateOf(sessionId);
+    return path && state.openTask === path ? state.pausedReason : undefined;
   }
 
-  /** Nudge message when the record is stale, or undefined when clean. */
+  /** A task is actionable only when opened and not explicitly paused by the supervisor. */
+  unfinishedFor(sessionId: string): boolean {
+    const s = this.stateOf(sessionId);
+    return s.openTask !== undefined && !s.pausedReason && !(s.taskCompleted && s.commitDone);
+  }
+
+  /** Nudge only with an action appropriate to the task's actual state. */
   nudge(sessionId: string): string | undefined {
-    const { openTask, taskCompleted, commitDone } = this.stateOf(sessionId);
+    const { openTask, taskCompleted, commitDone, pausedReason } = this.stateOf(sessionId);
     if (!openTask || (taskCompleted && commitDone)) {
       return undefined;
     }
+    if (pausedReason) return `Festival task ${openTask} is paused: ${pausedReason}. Do not mark it completed or commit while blocked.`;
     const missing = [
       taskCompleted ? undefined : "fest task completed",
       commitDone ? undefined : "fest commit",

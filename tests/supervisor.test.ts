@@ -7,8 +7,10 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerSupervisorTools } from "../src/adapters/omp/supervisor-tools.js";
+import { supervisorQueue } from "../src/adapters/omp/supervisor-tools.js";
+import { LoopTracker } from "../src/application/loop-tracker.js";
 import type { PiLike, ToolDeps } from "../src/adapters/omp/tools.js";
-import { listProjectReservations } from "../src/application/project-conflicts.js";
+import { listProjectReservations, reserveProjectFiles, releaseProjectFiles } from "../src/application/project-conflicts.js";
 
 describe("festival supervisor", () => {
   it("requires a real dispatch and independent review before acceptance", () => {
@@ -206,7 +208,7 @@ describe("festival supervisor", () => {
           pendingTasks: () => Promise.resolve([{ path: task, sequence, done: false }]),
         },
         fest: { next: () => Promise.resolve(current) },
-        tracker: { taskOpened: vi.fn() },
+        tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
       } as unknown as ToolDeps;
       const schema = (): { optional(): unknown } => ({ optional: schema });
       type Execute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<{ content: { text: string }[] }>;
@@ -241,5 +243,48 @@ describe("festival supervisor", () => {
       expect(await listProjectReservations(project)).toEqual([]);
       expect(appendEntry).toHaveBeenCalled();
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+  it("suppresses completion nudges while the current task is reserved by another session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fest-supervisor-conflict-"));
+    try {
+      const festival = join(root, "festivals", "active", "festival");
+      const project = join(root, "project");
+      const sequence = "001_BUILD/01_implement";
+      const task = `${sequence}/01_task.md`;
+      await mkdir(join(festival, sequence), { recursive: true });
+      await mkdir(project);
+      await writeFile(join(festival, task), "Task ID: implementation\nDependencies: none\n- src/a.php (existing)");
+      await writeFile(join(festival, sequence, "SEQUENCE_GOAL.md"), `---\nfest_working_dir: ${JSON.stringify(project)}\n---\n`);
+      const current: NextUnit = { kind: "task", path: task, workingDir: project, doc: "", goals: [] };
+      const tracker = new LoopTracker();
+      tracker.taskOpened("session-current", task);
+      const deps = {
+        detect: {
+          locate: () => Promise.resolve({ campRoot: root }),
+          listFestivals: () => Promise.resolve([{ id: "festival", name: "festival", status: "active", path: festival }]),
+          pendingTasks: () => Promise.resolve([{ path: task, sequence, done: false }]),
+        },
+        fest: { next: () => Promise.resolve(current) },
+        tracker,
+      } as unknown as ToolDeps;
+      const reservation = await reserveProjectFiles(project, {
+        sessionId: "session-owner", assignmentId: "other-festival-worker", festival: "another-festival",
+        task: "another-task", worker: "Worker", files: ["src/a.php"],
+      });
+      expect(reservation.kind).toBe("reserved");
+
+      const blocked = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
+      expect(blocked.queue.waiting).toContainEqual({
+        task, reason: "Another session owns overlapping project files; keep work sequential.",
+      });
+      expect(tracker.nudge("session-current")).toContain("Do not mark it completed or commit");
+
+      await releaseProjectFiles(project, "session-owner", "other-festival-worker");
+      const available = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
+      expect(available.queue.candidates.map((candidate) => candidate.task)).toContain(task);
+      expect(tracker.nudge("session-current")).toContain("fest task completed");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
