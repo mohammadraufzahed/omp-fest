@@ -157,6 +157,33 @@ describe("persisted plan drafts", () => {
     await expect(previewPlanDraft(root, draft.draftId, draft.revision)).rejects.toThrow("Draft is incomplete");
   });
 
+  it("requires visual references to use the final draft slug's canonical directory", async () => {
+    const { root, fields } = await fixture();
+    await expect(createPlanDraft(root, {
+      ...fields,
+      referencesDir: ".ompfest/plans/digikala-style-search-flow.references",
+      visualIntent: "ui_visual",
+      attachments: [{ name: "design", role: "ui_design", reason: "User-provided screen design" }],
+    })).rejects.toThrow(
+      'referencesDir must be ".ompfest/plans/feature.references" to match the final festival name',
+    );
+  });
+  it("blocks legacy drafts whose reference directory belongs to a different plan slug", async () => {
+    const { root, fields } = await fixture();
+    const compact = await createPlanDraft(root, fields);
+    const structured = await updatePlanDraft(root, compact.draftId, compact.revision, { spec: compact.spec });
+    const path = join(root, ".ompfest", "plans", `${structured.draftId}.draft.json`);
+    const saved = JSON.parse(await readFile(path, "utf8")) as { fields: Record<string, unknown> };
+    saved.fields.referencesDir = ".ompfest/plans/digikala-style-search-flow.references";
+    await writeFile(path, JSON.stringify(saved));
+
+    const current = await readPlanDraft(root, structured.draftId);
+    expect(current.missing).toContain(
+      'referencesDir must be ".ompfest/plans/feature.references" to match the final festival name; generate the wireframes after choosing the name',
+    );
+    await expect(previewPlanDraft(root, current.draftId, current.revision)).rejects.toThrow("Draft is incomplete");
+  });
+
   it("rejects unsafe IDs, paths, and symlinked storage", async () => {
     const { root, fields } = await fixture();
     await expect(createPlanDraft(root, { ...fields, name: "../escape" })).rejects.toThrow("lowercase slug");

@@ -180,7 +180,7 @@ export async function prepareVisualReferences(campRoot: string, plan: string, re
   }
   const expected = join(plansRoot, `${basename(plan).slice(0, -".STRUCTURE.md".length)}.references`);
   if (!isAbsolute(referencesDir) || resolve(referencesDir) !== expected || !(await lstat(expected)).isDirectory()) {
-    throw new Error("referencesDir must be the matching, non-symlink .references directory beside the plan");
+    throw new Error(`referencesDir must be the matching, non-symlink .references directory beside the plan; expected ${expected}`);
   }
   const pagesDir = join(expected, "pages");
   if (!(await lstat(pagesDir)).isDirectory()) {

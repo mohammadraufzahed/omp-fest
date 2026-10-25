@@ -462,6 +462,17 @@ describe("project and command evidence boundaries", () => {
     check.command = "invented-tool test";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("not substantiated");
   });
+  it("accepts node --check when evidence is the checked source file", async () => {
+    const { root, project, workingDir, spec, check } = await fixture();
+    await mkdir(join(project, "Modules", "Storefront", "Resources", "assets", "public", "js", "layouts", "header"), { recursive: true });
+    const file = "Modules/Storefront/Resources/assets/public/js/layouts/header/HeaderSearch.js";
+    await writeFile(join(project, file), "const search = true;\n");
+    Object.assign(check, {
+      command: `node --check ${file}`,
+      evidencePath: file,
+    });
+    expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain(`node --check ${file}`);
+  });
 
   it.each([
     ["go test ./...", "go.mod", "module example.test/project\n"],

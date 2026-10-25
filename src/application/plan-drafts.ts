@@ -44,6 +44,14 @@ function relativePath(value: string, label: string): void {
   }
 }
 
+function referencePathIssue(fields: PlanDraftFields): string | undefined {
+  if (!fields.referencesDir) return undefined;
+  const expected = `.ompfest/plans/${fields.name}.references`;
+  return fields.referencesDir === expected
+    ? undefined
+    : `referencesDir must be "${expected}" to match the final festival name; generate the wireframes after choosing the name`;
+}
+
 function validate(fields: PlanDraftFields, root: string): PlanDraftFields {
   const result = structuredClone(fields);
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(result.name)) throw new Error("Festival name must be a lowercase slug");
@@ -57,6 +65,8 @@ function validate(fields: PlanDraftFields, root: string): PlanDraftFields {
   for (const path of result.files ?? []) relativePath(path, "File");
   for (const item of result.inspection ?? []) relativePath(item.path, "Inspection path");
   if (result.referencesDir) {
+    const referenceIssue = referencePathIssue(result);
+    if (referenceIssue) throw new Error(referenceIssue);
     relativePath(result.referencesDir, "referencesDir");
     if (result.visualIntent !== "ui_visual" || !result.attachments?.some((item) => item.role === "ui_design")) throw new Error("Wireframes require explicit ui_visual intent and at least one attachment classified as ui_design.");
   }
@@ -191,9 +201,13 @@ export async function readPlanDraft(root: string, draftId: string): Promise<Plan
       && phase.deliverables.every((item) => typeof item === "string" && !!item.trim())
       && Array.isArray(phase.completionCriteria) && phase.completionCriteria.length > 0
       && phase.completionCriteria.every((item) => typeof item === "string" && !!item.trim()));
-    return hasMilestoneContracts
-      ? saved
-      : { ...saved, missing: [...new Set([...saved.missing, "full structured spec with phase objectives, deliverables and completion criteria"])] };
+    const referencesIssue = referencePathIssue(saved.fields);
+    const missing = [
+      ...saved.missing,
+      ...(!hasMilestoneContracts ? ["full structured spec with phase objectives, deliverables and completion criteria"] : []),
+      ...(referencesIssue ? [referencesIssue] : []),
+    ];
+    return missing.length === saved.missing.length ? saved : { ...saved, missing: [...new Set(missing)] };
   } catch (error) {
     throw new Error("Invalid persisted plan draft", { cause: error });
   }

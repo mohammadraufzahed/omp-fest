@@ -50,6 +50,13 @@ describe("plan input normalization", () => {
     const verification = planningDiagnostic(new Error("Verification evidencePath is missing and cannot be inferred from command"));
     expect(verification.code).toBe("INVALID_VERIFICATION");
     expect(verification.message).toBe("Verification command or evidence is invalid.");
+    expect(verification.received).toBe("Verification evidencePath is missing and cannot be inferred from command");
+  });
+  it("explains verification-before-implementation ordering", () => {
+    expect(planningDiagnostic(new Error("Verification task step-01-popular precedes implementation step-05-rtl for ac-1"))).toMatchObject({
+      code: "VERIFICATION_ORDER",
+      nextAction: "Place each verification task after the implementation it verifies and add an explicit dependency when it crosses a sequence; preserve other task order.",
+    });
   });
 
   it("returns an actionable diagnostic when a development phase is too coarse", () => {

@@ -137,7 +137,7 @@ function planFailure(error: unknown, extra: Record<string, unknown> = {}): ToolR
     code: diagnostic.code,
     ...(diagnostic.field ? { field: diagnostic.field } : {}),
     ...(diagnostic.expected ? { expected: diagnostic.expected } : {}),
-    received: diagnostic.message,
+    received: diagnostic.received ?? diagnostic.message,
     error: diagnostic.message,
     diagnostics: [diagnostic],
     nextAction: diagnostic.nextAction,
@@ -1204,7 +1204,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description:
       "Create a categorized wireframe.svg and PAGE.md only for an explicitly classified UI design reference. " +
       "Never use error screenshots, PDFs/documents, backend evidence, context, or unknown-role images as wireframe input. " +
-      "outputDirectory is camp-root-relative under .ompfest/plans; sourcePaths are relative to the selected project workingDir. " +
+      "Choose the final festival slug before generation; outputDirectory must be .ompfest/plans/<name>.references/pages/<slug>, " +
+      "matching fest_plan name and referencesDir exactly. If the name changes, regenerate under the new canonical path. " +
+      "outputDirectory is camp-root-relative; sourcePaths are relative to the selected project workingDir. " +
       "Supply workingDir (for example projects/web) when the camp has multiple projects or the current camp context is ambiguous. " +
       "If the attachment role is ambiguous, ask the user before calling this tool.",
     parameters: z.object({

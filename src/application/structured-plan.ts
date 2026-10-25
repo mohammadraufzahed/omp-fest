@@ -288,6 +288,7 @@ function commandWords(command: string): string[] {
 
 function commandScriptArgument(words: string[], executable: string): string | undefined {
   if (executable === "php") return words[1] === "-l" ? words[2] : words[1];
+  if (executable === "node" && words[1] === "--check") return words[2];
   if (["node", "python", "python3", "ruby", "bash", "sh"].includes(executable)) return words[1];
   if (executable === "deno") return words[1] === "run" ? words[2] : words[1];
   if (words[0]?.includes("/")) return words[0];

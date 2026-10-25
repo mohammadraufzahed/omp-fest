@@ -1,5 +1,6 @@
 export interface PlanningDiagnostic { code: string; field?: string; expected?: string; received?: string; message: string; nextAction: string }
 const rules: [RegExp, string, string, string, string][] = [
+  [/verification task .* precedes implementation|verification .* precedes implementation/i, "VERIFICATION_ORDER", "implementation before verification", "A verification task is ordered before implementation of its acceptance criterion.", "Place each verification task after the implementation it verifies and add an explicit dependency when it crosses a sequence; preserve other task order."],
   [/implementation phase .* (?:more than three tasks|contains implementation tasks)|phase .*objective must describe this milestone|phase .* but contains (?:implementation|verification) tasks|validation phase .* must contain verification work|single implementation phase is only valid/i, "PHASES_TOO_COARSE", "explicit, bounded milestone phases", "The plan has an oversized or mislabeled phase, or does not define a distinct milestone outcome.", "Split development into reviewable implementation milestones; give each phase its own objective, deliverables and observable completion criteria."],
   [/phase.*(?:objective|deliverables|completionCriteria).*must be|phase .*objective must describe this milestone/i, "PHASE_CONTRACT_REQUIRED", "a distinct objective, deliverables and completion criteria for every phase", "The phase is missing its own milestone contract.", "Update the structured spec with a phase-specific objective, concrete deliverables and observable completion criteria, then preview again for approval."],
   [/stable identifier|duplicate id/i, "INVALID_IDENTIFIER", "a stable lowercase ID", "The plan contains an invalid or duplicate identifier.", "Fix the named ID; retain existing IDs for already accepted plan elements."],
@@ -20,6 +21,7 @@ export function planningDiagnostic(error: unknown, field?: string): PlanningDiag
     code: match?.[1] ?? "PLAN_VALIDATION_FAILED",
     ...(field ? { field } : {}),
     ...(match ? { expected: match[2] } : {}),
+    ...(match?.[1] === "INVALID_VERIFICATION" ? { received: raw.slice(0, 240) } : {}),
     message: match?.[3] ?? raw.slice(0, 240),
     nextAction: match?.[4] ?? "Correct the stated input, preserve other draft fields, and retry only the failed planning action.",
   };
