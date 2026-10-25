@@ -1,10 +1,9 @@
 /**
- * Classifies raw `fest next` output into a typed NextUnit so the agent
- * branches on `kind` instead of parsing prose. Handles both the human
- * rendering (default) and `--json` payloads; every branch is tested against
- * output captured from a real fest v0.9.7 run.
+ * Classifies native `fest next --json` results and the text emitted by v0.9.8
+ * for festival workflows, phase gates, validation and lifecycle refusals.
+ * Failures remain blocked units: they must never look like idle/finished work.
  */
-import type { Autonomy, NextUnit } from "./types.js";
+import type { Autonomy, NextUnit, ValidationIssue } from "./types.js";
 import { parseValidationIssues } from "./validation.js";
 
 const MARKER_RE = /\[(?:REPLACE|FILL):[^\]]*\]/g;
@@ -12,7 +11,7 @@ const MARKER_RE = /\[(?:REPLACE|FILL):[^\]]*\]/g;
 export function classifyNextOutput(output: string, exitCode = 0): NextUnit {
   const text = output.trim();
   if (text.startsWith("{") || text.startsWith("[")) {
-    const jsonUnit = classifyJson(text);
+    const jsonUnit = classifyJson(text, exitCode);
     if (jsonUnit) {
       return jsonUnit;
     }
@@ -20,49 +19,104 @@ export function classifyNextOutput(output: string, exitCode = 0): NextUnit {
   return classifyText(text, exitCode);
 }
 
-function classifyJson(text: string): NextUnit | undefined {
+function classifyJson(text: string, exitCode: number): NextUnit | undefined {
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
-    return undefined;
+    return blocked(text, "Malformed fest next JSON");
   }
-  if (typeof data !== "object" || data === null) {
-    return undefined;
+  const record = objectField(data);
+  if (!record) return blocked(text, "Expected a fest next JSON object");
+  const blockers = Array.isArray(record.blocked_tasks) ? record.blocked_tasks : [];
+  if (exitCode !== 0 || record.ok === false || record.error || record.valid === false ||
+      Array.isArray(record.errors) && record.errors.length > 0 || record.status === "error" ||
+      record.blocked === true || blockers.length > 0 ||
+      record.kind === "blocked" || record.status === "blocked") {
+    const issues = jsonIssues(record.errors ?? record.issues ?? blockers);
+    return { kind: "blocked", errors: issues.length ? issues : [{ file: "", markers: [],
+      error: stringField(record.error) ?? stringField(record.reason) ?? `fest next refused (exit ${exitCode})` }], raw: text };
   }
-  const record = data as Record<string, unknown>;
-  if (record.complete === true || record.status === "complete") {
+  if (record.festival_complete === true || record.complete === true || record.status === "complete" ||
+      record.render_mode === "complete") {
     return { kind: "complete", reason: stringField(record.reason) };
   }
-  const task = stringField(record.task) ?? stringField(record.path);
-  if (task) {
+  if (record.mode === "standalone-tracked" || record.mode === "standalone-anonymous") {
+    const step = numberField(record.current_step);
+    if (!step) return blocked(text, "Workflow result has no current step");
     return {
-      kind: "task",
-      path: task,
-      phase: stringField(record.phase),
-      sequence: stringField(record.sequence),
-      workingDir: stringField(record.working_dir ?? record.workingDir),
-      autonomy: parseAutonomy(record.autonomy),
-      doc: stringField(record.doc ?? record.content) ?? "",
-      goals: arrayOfStrings(record.goals),
+      kind: "wf_step", phase: stringField(record.workflow_doc) ?? "", step,
+      totalSteps: numberField(record.total_steps), title: stringField(record.step_name) ?? "",
+      goal: stringField(record.step_goal) ?? "", actions: arrayOfStrings(record.step_actions),
+      checkpoint: record.blocked === true || record.step_checkpoint === "approval_required",
+      doc: stringField(record.doc ?? record.content) ?? text,
     };
   }
-  return undefined;
+  const taskRecord = objectField(record.task);
+  const task = stringField(taskRecord?.path) ?? stringField(record.task) ?? stringField(record.path);
+  if (task) {
+    const festival = stringField(objectField(record.location)?.festival_path);
+    const path = festival && task.startsWith(`${festival}/`) ? task.slice(festival.length + 1) : task;
+    const goals = objectField(record.layered_goals);
+    return {
+      kind: "task", path,
+      phase: stringField(taskRecord?.phase_name ?? record.phase),
+      sequence: stringField(taskRecord?.sequence_name ?? record.sequence),
+      workingDir: stringField(record.working_dir_absolute ?? record.working_dir ?? record.workingDir),
+      autonomy: parseAutonomy(taskRecord?.autonomy_level ?? record.autonomy),
+      doc: stringField(record.task_content ?? record.doc ?? record.content ?? record.gate_content) ?? "",
+      goals: goals ? [goals.festival_goal, goals.phase_goal, goals.sequence_goal]
+        .filter((value): value is string => typeof value === "string" && value.length > 0) : arrayOfStrings(record.goals),
+    };
+  }
+  return blocked(text, stringField(record.reason) ?? "Unrecognized fest next JSON result");
+}
+
+function objectField(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined;
+}
+
+function numberField(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return 0;
+  return value;
+}
+
+function jsonIssues(value: unknown): ValidationIssue[] {
+  if (typeof value === "string") return [{ file: "", markers: [], error: value }];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ValidationIssue[] => {
+    if (typeof item === "string") return [{ file: "", markers: [], error: item }];
+    const issue = objectField(item);
+    if (!issue || issue.level === "warning" || issue.level === "info") return [];
+    return [{ file: stringField(issue.path ?? issue.file ?? issue.task) ?? "", markers: arrayOfStrings(issue.markers),
+      error: stringField(issue.message ?? issue.error ?? issue.blocker_message) ?? "Native fest blocker" }];
+  });
+}
+
+function blocked(raw: string, error: string): NextUnit {
+  return { kind: "blocked", errors: [{ file: "", markers: [], error }], raw };
 }
 
 function classifyText(text: string, exitCode: number): NextUnit {
   if (text.length === 0) {
-    return { kind: "idle", reason: "empty output" };
+    return exitCode === 0 ? { kind: "idle", reason: "empty output" } : blocked(text, `fest next exited ${exitCode} without output`);
   }
   if (/STOP:\s*FESTIVAL VALIDATION FAILED/i.test(text)) {
     return { kind: "blocked", errors: parseValidationIssues(text), raw: text };
+  }
+  if (exitCode !== 0 || /STOP:|^Error:|^error:/im.test(text)) {
+    return blocked(text, `fest next exited ${exitCode}: ${firstLine(text)}`);
+  }
+  if (/This step is BLOCKED:/i.test(text)) {
+    return blocked(text, /This step is BLOCKED:\s*(.+)/i.exec(text)?.[1] ?? "Workflow step blocked");
   }
   if (/Festival Complete/i.test(text) || /All tasks .* completed/i.test(text)) {
     const reason = /Reason\s+(.+)/.exec(text)?.[1]?.trim();
     return { kind: "complete", ...(reason ? { reason } : {}) };
   }
   if (/not inside a festival/i.test(text)) {
-    return { kind: "idle", reason: "not inside a festival" };
+    return blocked(text, "not inside a festival");
   }
   if (/BLOCKING CHECKPOINT/i.test(text)) {
     return parseBlockingCheckpoint(text);
@@ -78,10 +132,7 @@ function classifyText(text: string, exitCode: number): NextUnit {
   if (/NEXT TASK/i.test(text)) {
     return parseTask(text);
   }
-  if (exitCode !== 0) {
-    return { kind: "idle", reason: `fest next exited ${exitCode}: ${firstLine(text)}` };
-  }
-  return { kind: "idle", reason: "unrecognized fest next output" };
+  return blocked(text, "unrecognized fest next output");
 }
 
 function parseTask(text: string): NextUnit {
@@ -108,7 +159,7 @@ function parseWorkflowStep(text: string, match: RegExpExecArray): NextUnit {
   const title = new RegExp(`##\\s*Step\\s+${step}:\\s*(.+)`).exec(text)?.[1]?.trim() ?? "";
   return {
     kind: "wf_step",
-    phase: match[1]?.trim() ?? "",
+    phase: /Phase:\s*(\S+)/.exec(text)?.[1] ?? match[1]?.trim() ?? "",
     step,
     totalSteps,
     title,
@@ -125,10 +176,10 @@ function parseGateStep(text: string, match: RegExpExecArray): NextUnit {
   const question = new RegExp(`##\\s*Step\\s+${step}:\\s*(.+)`).exec(text)?.[1]?.trim() ?? "";
   return {
     kind: "gate_step",
-    phase: match[1]?.trim() ?? "",
+    phase: /Phase:\s*(\S+)/.exec(text)?.[1] ?? match[1]?.trim() ?? "",
     step,
+    question: boldField(text, "Question") || question,
     totalSteps,
-    question,
     doc: text,
   };
 }

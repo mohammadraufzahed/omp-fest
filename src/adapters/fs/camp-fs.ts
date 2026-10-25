@@ -7,14 +7,11 @@
 import { watch } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import { parseProgressLine } from "../../domain/progress.js";
+import { canonicalTaskPath, latestTaskStates, parseProgressLine } from "../../domain/progress.js";
+import { FESTIVAL_STATUS_DIRECTORIES, isFestivalDateBucket, LIVE_FESTIVAL_STATUSES } from "../../domain/festival-lifecycle.js";
 import type { CampLocation, FestivalSummary, PendingTask, ProgressEvent } from "../../domain/types.js";
 import type { CampDetect } from "../../ports.js";
 
-/** Resolution priority when picking "the" festival at camp root — the live one first. */
-const ACTIVE_FIRST = ["active", "ready", "planning", "parked", "ritual"];
-/** Every status dir a festival can live under (completed added for selectors). */
-const ALL_STATUSES = [...ACTIVE_FIRST, "completed"];
 
 async function safeReaddir(dir: string): Promise<string[]> {
   try {
@@ -40,9 +37,9 @@ export class CampFsDetect implements CampDetect {
         };
       }
       if (await this.isCampRoot(dir)) {
-        const rel = cwd.slice(dir.length);
+        const rel = relative(dir, cwd);
         return {
-          kind: rel.startsWith("/projects") ? "project" : "camp-root",
+          kind: rel === "projects" || rel.startsWith(`projects/`) ? "project" : "camp-root",
           campRoot: dir,
           campName: basename(dir),
         };
@@ -56,14 +53,12 @@ export class CampFsDetect implements CampDetect {
   }
 
   async activeFestival(campRoot: string): Promise<string | undefined> {
-    for (const status of ACTIVE_FIRST) {
+    for (const status of LIVE_FESTIVAL_STATUSES) {
       const dir = join(campRoot, "festivals", status);
-      const entries = await readDirSafe(dir);
-      const active = entries.find((name) => !name.startsWith("."));
-      if (active) {
-        const candidate = join(dir, active);
-        if (await this.isFestivalDir(candidate)) {
-          return candidate;
+      for (const name of await safeReaddir(dir)) {
+        if (!name.startsWith(".")) {
+          const candidate = join(dir, name);
+          if (await this.isFestivalDir(candidate)) return candidate;
         }
       }
     }
@@ -72,15 +67,21 @@ export class CampFsDetect implements CampDetect {
 
   async listFestivals(campRoot: string): Promise<FestivalSummary[]> {
     const found: FestivalSummary[] = [];
-    for (const status of ALL_STATUSES) {
-      const dir = join(campRoot, "festivals", status);
+    for (const { status, directory } of FESTIVAL_STATUS_DIRECTORIES) {
+      const dir = join(campRoot, "festivals", directory);
       for (const name of await safeReaddir(dir)) {
-        if (name.startsWith(".")) {
-          continue;
-        }
+        if (name.startsWith(".")) continue;
         const path = join(dir, name);
         if (await this.isFestivalDir(path)) {
           found.push({ id: name, name, status, path });
+        } else if ((directory.includes("/") || status === "completed") && isFestivalDateBucket(name)) {
+          for (const id of await safeReaddir(path)) {
+            if (id.startsWith(".")) continue;
+            const festivalPath = join(path, id);
+            if (await this.isFestivalDir(festivalPath)) {
+              found.push({ id, name: id, status, path: festivalPath });
+            }
+          }
         }
       }
     }
@@ -93,35 +94,31 @@ export class CampFsDetect implements CampDetect {
 
   async pendingTasks(festivalDir: string): Promise<PendingTask[]> {
     const events = await this.readProgress(festivalDir);
-    const done = new Set(
-      events
-        .filter((e) => e.event === "completed" && typeof e.task === "string")
-        .map((e) => e.task),
-    );
+    const states = latestTaskStates(events);
     const tasks: PendingTask[] = [];
-    for (const phase of await safeReaddir(festivalDir)) {
-      if (!/^\d{3}_/.test(phase)) {
-        continue;
-      }
-      const phaseDir = join(festivalDir, phase);
+    const scanSequences = async (phase: string, phaseDir: string, includeCompleted = true): Promise<void> => {
       for (const seq of await safeReaddir(phaseDir)) {
-        const seqDir = join(phaseDir, seq);
-        if (!(await stat(seqDir).catch(() => undefined))?.isDirectory()) {
+        if (seq === "completed" && includeCompleted) {
+          await scanSequences(phase, join(phaseDir, seq), false);
           continue;
         }
+        if (!/^\d{2,3}_/.test(seq)) continue;
+        const seqDir = join(phaseDir, seq);
+        if (!(await stat(seqDir).catch(() => undefined))?.isDirectory()) continue;
         for (const file of await safeReaddir(seqDir)) {
-          if (!/^\d{2}_.*\.md$/.test(file)) {
-            continue;
-          }
+          if (!/^\d{2}_.*\.md$/.test(file)) continue;
           const full = join(seqDir, file);
           const head = await readFile(full, "utf8").catch(() => "");
           const festType = /^fest_type:\s*(\w+)/m.exec(head)?.[1];
-          if (festType && festType !== "task") {
-            continue;
-          }
+          if (festType && festType !== "task") continue;
           const rel = relative(festivalDir, full);
-          tasks.push({ sequence: `${phase}/${seq}`, path: rel, done: done.has(rel) });
+          tasks.push({ sequence: `${phase}/${seq}`, path: rel, done: states.get(canonicalTaskPath(rel)) === "completed" });
         }
+      }
+    };
+    for (const base of [festivalDir, join(festivalDir, "completed")]) {
+      for (const phase of await safeReaddir(base)) {
+        if (/^\d{3}_/.test(phase)) await scanSequences(phase, join(base, phase));
       }
     }
     return tasks;
@@ -212,11 +209,3 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function readDirSafe(dir: string): Promise<string[]> {
-  try {
-    const { readdir } = await import("node:fs/promises");
-    return await readdir(dir);
-  } catch {
-    return [];
-  }
-}

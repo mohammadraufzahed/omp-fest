@@ -2,6 +2,50 @@ import { createHash } from "node:crypto";
 import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { ZodLike, ZodSchema } from "../adapters/omp/zod-types.js";
+import { readdir } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { loadConfig } from "../domain/config.js";
+import { planningDiagnostic, PlanningValidationError, type PlanningDiagnostic } from "./planning-errors.js";
+
+export const NATIVE_PHASE_TYPES = ["implementation", "planning", "research", "ingest", "review", "non_coding_action"] as const;
+export interface PlanVerification {
+  id?: string;
+  kind?: "command" | "browser" | "manual" | "research";
+  command?: string;
+  cwd?: string;
+  /** Existing command origin, never a future completion result. */
+  provenancePath?: string;
+  procedure?: string;
+  expected: string;
+}
+export interface PlanWorkflow {
+  position: "before" | "after";
+  steps: { id: string; title: string; goal: string; actions: string[]; output: string; checkpoint?: boolean }[];
+}
+export interface StructuredPhase {
+  id: string;
+  name: string;
+  type: string;
+  mode?: "workflow" | "freeform" | "hybrid";
+  objective: string;
+  deliverables: string[];
+  completionCriteria: string[];
+  workflow?: PlanWorkflow;
+  sequences: { id: string; name: string; tasks: StructuredTask[] }[];
+}
+
+export async function discoverNativePhaseTypes(root: string): Promise<string[]> {
+  const types = new Set<string>(NATIVE_PHASE_TYPES);
+  for (const base of [join(root, "festivals", ".festival", "templates", "phases"), join(root, ".festival", "templates", "phases"), join(homedir(), ".obey", "fest", "festivals", ".festival", "templates", "phases")]) {
+    const entries = await readdir(base, { withFileTypes: true }).catch((error: unknown) => {
+      if (errorCode(error) === "ENOENT") return [];
+      throw error;
+    });
+    for (const entry of entries) if (entry.isDirectory() && /^[a-z][a-z0-9_]*$/.test(entry.name) && entry.name !== "validation") types.add(entry.name);
+  }
+  return [...types].sort();
+}
 
 export interface StructuredTask {
   id: string;
@@ -12,7 +56,7 @@ export interface StructuredTask {
   implements: string[];
   verifies: string[];
   files: { path: string; status: "existing" | "proposed" }[];
-  verification: { command: string; cwd: string; evidencePath: string; expected: string }[];
+  verification: PlanVerification[];
 }
 
 export interface StructuredPlan {
@@ -22,15 +66,7 @@ export interface StructuredPlan {
   acceptance: { id: string; description: string }[];
   questions: { question: string; blocking: boolean }[];
   inspection: { path: string; reason: string }[];
-  phases: {
-    id: string;
-    name: string;
-    type: "implementation" | "planning" | "research" | "validation";
-    objective: string;
-    deliverables: string[];
-    completionCriteria: string[];
-    sequences: { id: string; name: string; tasks: StructuredTask[] }[];
-  }[];
+  phases: StructuredPhase[];
 }
 
 export interface PreparedStructuredPlan {
@@ -52,7 +88,9 @@ export function structuredPlanSchema(z: ZodLike): ZodSchema {
     inspection: z.array(z.object({ path: z.string(), reason: z.string() })),
     phases: z.array(z.object({
       id: z.string(), name: z.string(),
-      type: z.enum(["implementation", "planning", "research", "validation"]),
+      type: z.string().describe("Native phase type: implementation, planning, research, ingest, review, non_coding_action, or a discovered custom template type. validation is not a type."),
+      mode: z.enum(["workflow", "freeform", "hybrid"]).optional(),
+      workflow: z.object({ position: z.enum(["before", "after"]), steps: z.array(z.object({ id: z.string(), title: z.string(), goal: z.string(), actions: strings(), output: z.string(), checkpoint: z.boolean().optional() })) }).optional(),
       objective: z.string(), deliverables: strings(), completionCriteria: strings(),
       sequences: z.array(z.object({
         id: z.string(), name: z.string(),
@@ -62,10 +100,12 @@ export function structuredPlanSchema(z: ZodLike): ZodSchema {
           dependsOn: strings(), implements: strings(), verifies: strings(),
           files: z.array(z.object({ path: z.string(), status: z.enum(["existing", "proposed"]) })),
           verification: z.array(z.object({
-            command: z.string(), cwd: z.string().optional(), evidencePath: z.string().optional(), expected: z.string(),
+            kind: z.enum(["command", "browser", "manual", "research"]).optional(),
+            id: z.string().optional(),
+            command: z.string().optional(), cwd: z.string().optional(), provenancePath: z.string().optional(), procedure: z.string().optional(), expected: z.string(),
           })),
         })),
-      })),
+      })).optional(),
     })),
   });
 }
@@ -98,7 +138,7 @@ function stringList(value: unknown, label: string, required = false): string[] {
   return result;
 }
 
-function parsePlan(value: unknown): StructuredPlan {
+export function parseStructuredPlan(value: unknown): StructuredPlan {
   const ids = new Set<string>();
   const id = (value: unknown, label: string, acceptance = false) => {
     const result = text(value, label);
@@ -109,6 +149,7 @@ function parsePlan(value: unknown): StructuredPlan {
     return result;
   };
   const plan = record(value, "plan");
+  const hasImplementation = Array.isArray(plan.phases) && plan.phases.some((phase: unknown) => !!phase && typeof phase === "object" && "type" in phase && phase.type === "implementation");
   return {
     goal: text(plan.goal, "goal"),
     scope: stringList(plan.scope, "scope", true),
@@ -116,28 +157,37 @@ function parsePlan(value: unknown): StructuredPlan {
     acceptance: list(plan.acceptance, "acceptance", (value, label) => {
       const item = record(value, label);
       return { id: id(item.id, `${label}.id`, true), description: text(item.description, `${label}.description`) };
-    }, true),
+    }, hasImplementation),
     questions: list(plan.questions, "questions", (value, label) => {
       const item = record(value, label);
       if (typeof item.blocking !== "boolean") throw new Error(`${label}.blocking must be a boolean`);
       const question = text(item.question, `${label}.question`);
-      if (item.blocking) throw new Error(`Unresolved blocking question: ${question}`);
       return { question, blocking: item.blocking };
     }),
     inspection: list(plan.inspection, "inspection", (value, label) => {
       const item = record(value, label);
       return { path: text(item.path, `${label}.path`), reason: text(item.reason, `${label}.reason`) };
-    }, true),
+    }, hasImplementation),
     phases: list(plan.phases, "phases", (value, label) => {
       const phase = record(value, label);
       const type = text(phase.type, `${label}.type`);
-      if (type !== "implementation" && type !== "planning" && type !== "research" && type !== "validation") throw new Error(`${label}.type is unsupported`);
+      if (!/^[a-z][a-z0-9_]*$/.test(type) || type === "validation") throw new Error(`${label}.type is unsupported; use review instead of validation`);
+      const mode = phase.mode;
+      if (mode !== undefined && mode !== "workflow" && mode !== "freeform" && mode !== "hybrid") throw new Error(`${label}.mode must be workflow, freeform, or hybrid`);
+      const workflow = phase.workflow === undefined ? undefined : record(phase.workflow, `${label}.workflow`);
+      if (workflow && workflow.position !== "before" && workflow.position !== "after") throw new Error(`${label}.workflow.position must be before or after`);
       return {
         id: id(phase.id, `${label}.id`), name: text(phase.name, `${label}.name`), type,
+        ...(mode ? { mode } : {}),
+        ...(workflow ? { workflow: { position: workflow.position as "before" | "after", steps: list(workflow.steps, `${label}.workflow.steps`, (value, label) => {
+          const step = record(value, label);
+          if (step.checkpoint !== undefined && typeof step.checkpoint !== "boolean") throw new Error(`${label}.checkpoint must be a boolean`);
+          return { id: id(step.id, `${label}.id`), title: text(step.title, `${label}.title`), goal: text(step.goal, `${label}.goal`), actions: stringList(step.actions, `${label}.actions`, true), output: text(step.output, `${label}.output`), ...(step.checkpoint === undefined ? {} : { checkpoint: step.checkpoint }) };
+        }, true) } } : {}),
         objective: text(phase.objective, `${label}.objective`),
         deliverables: stringList(phase.deliverables, `${label}.deliverables`, true),
         completionCriteria: stringList(phase.completionCriteria, `${label}.completionCriteria`, true),
-        sequences: list(phase.sequences, `${label}.sequences`, (value, label) => {
+        sequences: list(phase.sequences ?? [], `${label}.sequences`, (value, label) => {
           const sequence = record(value, label);
           return {
             id: id(sequence.id, `${label}.id`), name: text(sequence.name, `${label}.name`),
@@ -160,15 +210,21 @@ function parsePlan(value: unknown): StructuredPlan {
                 }),
                 verification: list(task.verification, `${label}.verification`, (value, label) => {
                   const check = record(value, label);
+                  const kind = check.kind ?? "command";
+                  if (kind !== "command" && kind !== "browser" && kind !== "manual" && kind !== "research") throw new Error(`${label}.kind must be command, browser, manual, or research`);
+                  if ("evidencePath" in check) throw new Error(`${label}.evidencePath was removed; use provenancePath for command origin, and record actual completion evidence at execution`);
                   return {
-                    command: text(check.command, `${label}.command`), cwd: text(check.cwd, `${label}.cwd`),
-                    evidencePath: text(check.evidencePath, `${label}.evidencePath`), expected: text(check.expected, `${label}.expected`),
+                    kind,
+                    ...(check.id === undefined ? {} : { id: id(check.id, `${label}.id`) }),
+                    ...(kind === "command" ? { command: text(check.command, `${label}.command`), cwd: check.cwd === undefined ? "." : text(check.cwd, `${label}.cwd`) } : { procedure: text(check.procedure, `${label}.procedure`) }),
+                    ...(check.provenancePath === undefined ? {} : { provenancePath: text(check.provenancePath, `${label}.provenancePath`) }),
+                    expected: text(check.expected, `${label}.expected`),
                   };
                 }),
               };
             }, true),
           };
-        }, true),
+        }, type === "implementation"),
       };
     }, true),
   };
@@ -306,15 +362,22 @@ function commandTestDirectoryArgument(words: string[], executable: string): stri
   return undefined;
 }
 
-function testDirectoryArgument(words: string[], executable: string): string | undefined {
-  return commandTestDirectoryArgument(words, executable);
-}
-
-async function validateVerification(root: string, check: StructuredTask["verification"][number]): Promise<void> {
-  const cwd = await existingPath(root, check.cwd, "Verification cwd", "directory");
-  const evidencePath = await existingPath(root, check.evidencePath, "Verification evidencePath");
+async function validateVerification(root: string, check: PlanVerification): Promise<void> {
+  if ((check.kind ?? "command") !== "command") {
+    text(check.procedure, "Verification procedure");
+    if (check.provenancePath) await existingPath(root, check.provenancePath, "Verification provenancePath");
+    return;
+  }
+  const command = text(check.command, "Verification command");
+  const cwd = await existingPath(root, check.cwd ?? ".", "Verification cwd", "directory");
+  const words = commandWords(command);
+  const target = commandScriptArgument(words, words[0] ?? "") ?? commandTestDirectoryArgument(words, words[0] ?? "");
+  const manifest = ["npm", "pnpm", "yarn", "bun"].includes(words[0] ?? "") ? "package.json"
+    : words[0] === "go" ? "go.mod" : words[0] === "cargo" ? "Cargo.toml" : words[0] === "make" ? "Makefile" : target;
+  const provenance = check.provenancePath ?? (manifest ? relative(root, resolve(cwd, manifest)) : undefined);
+  if (!provenance) throw new Error(`Verification command provenancePath cannot be inferred for ${command}; provide an existing manifest, script or documented command`);
+  const evidencePath = await existingPath(root, provenance, "Verification provenancePath");
   const evidenceInfo = await stat(evidencePath);
-  const words = commandWords(check.command);
   const executable = words[0];
   if (!executable) throw new Error("Verification command must contain an executable");
   if (["npm", "pnpm", "yarn", "bun"].includes(executable)) {
@@ -331,16 +394,16 @@ async function validateVerification(root: string, check: StructuredTask["verific
   }
   let evidence = evidencePath;
   if (evidenceInfo.isDirectory()) {
-    const testDirectory = testDirectoryArgument(words, executable);
+    const testDirectory = commandTestDirectoryArgument(words, executable);
     if (testDirectory) {
       const commandDirectory = await existingPath(root, relative(root, resolve(cwd, testDirectory)), "Verification test directory", "directory");
-      if (!inside(evidencePath, commandDirectory)) throw new Error(`Verification test directory must be inside evidencePath directory: ${check.evidencePath}`);
+      if (!inside(evidencePath, commandDirectory)) throw new Error(`Verification test directory must be inside evidencePath directory: ${check.provenancePath}`);
       return;
     }
     const script = commandScriptArgument(words, executable);
     if (!script || script.startsWith("-")) throw new Error("Verification evidencePath is a directory; use a command script inside it or choose an existing evidence file");
     const commandFile = await existingPath(root, relative(root, resolve(cwd, script)), "Verification command script", "file");
-    if (!inside(evidencePath, commandFile)) throw new Error(`Verification command script must be inside evidencePath directory: ${check.evidencePath}`);
+    if (!inside(evidencePath, commandFile)) throw new Error(`Verification command script must be inside evidencePath directory: ${check.provenancePath}`);
     evidence = commandFile;
   } else if (!evidenceInfo.isFile()) {
     throw new Error("Verification evidencePath must be a regular file or a directory containing the command target");
@@ -361,8 +424,8 @@ async function validateVerification(root: string, check: StructuredTask["verific
     const canonical = await realpath(resolve(cwd, script)).catch(() => undefined);
     if (canonical === evidence) return;
   }
-  if (source.split(/\r?\n/).some((line) => line.trim() === check.command || line.trim() === "`" + check.command + "`" || line.trim() === `$ ${check.command}`)) return;
-  throw new Error(`Verification command is not substantiated by evidencePath: ${check.evidencePath}`);
+  if (source.split(/\r?\n/).some((line) => line.trim() === command || line.trim() === `\`${command}\`` || line.trim() === `$ ${command}`)) return;
+  throw new Error(`Verification command is not substantiated by provenancePath: ${check.provenancePath}`);
 }
 
 function markdownText(value: string): string {
@@ -392,7 +455,7 @@ export function renderTaskContract(spec: StructuredPlan, task: StructuredTask): 
     "", "Verification:",
   ];
   for (const check of task.verification) {
-    lines.push(`- Command: ${markdownText(check.command)}`, `  Cwd: ${markdownText(check.cwd)}`, `  Evidence: ${markdownText(check.evidencePath)}`, `  Expected: ${markdownText(check.expected)}`);
+    lines.push(`- ${verificationDescription(check)}`, `  Expected: ${markdownText(check.expected)}`, "  Completion evidence: not yet recorded.");
   }
   if (!task.verification.length) lines.push("- Covered by the linked acceptance verification tasks.");
   lines.push("", "Done When:");
@@ -401,17 +464,33 @@ export function renderTaskContract(spec: StructuredPlan, task: StructuredTask): 
   for (const id of new Set([...task.implements, ...task.verifies])) {
     if (id.includes("/")) lines.push(`- [ ] Acceptance: ${markdownText(id)} — ${markdownText(descriptions.get(id) ?? id)}`);
   }
-  for (const check of task.verification) lines.push(`- [ ] ${markdownText(check.expected)} (${markdownText(check.command)} in ${markdownText(check.cwd)})`);
+  for (const check of task.verification) lines.push(`- [ ] ${markdownText(check.expected)} (${verificationDescription(check)})`);
   if (!task.implements.length && !task.verifies.length && !task.verification.length) lines.push(`- [ ] ${markdownText(task.description)}`);
   return `${lines.join("\n")}\n`;
 }
 
+function verificationDescription(check: PlanVerification): string {
+  return (check.kind ?? "command") === "command"
+    ? `Command: ${markdownText(check.command ?? "")}; Cwd: ${markdownText(check.cwd ?? ".")}; Provenance: ${markdownText(check.provenancePath ?? "inferred from command")}`
+    : `${check.kind}: ${markdownText(check.procedure ?? "")}`;
+}
+
+export function implementationReady(spec: StructuredPlan): boolean {
+  return spec.phases.some((phase) => phase.type === "implementation") && !spec.questions.some((question) => question.blocking);
+}
+
 export async function prepareStructuredPlan(root: string, workingDir: string, name: string, spec: StructuredPlan): Promise<PreparedStructuredPlan> {
-  const plan = parsePlan(spec);
+  const plan = parseStructuredPlan(spec);
   const festivalName = text(name, "Festival name");
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(festivalName)) throw new Error("Festival name must be a lowercase slug");
   const camp = await realpath(root);
-  const project = await resolveProjectRoot(camp, text(workingDir, "workingDir"));
+  await resolveProjectRoot(camp, text(workingDir, "workingDir"));
+  const allowedTypes = new Set(await discoverNativePhaseTypes(camp));
+  const maxTasks = (await loadConfig(camp)).planning?.maxAuthoredTasksPerPhase;
+  const hasImplementation = plan.phases.some((phase) => phase.type === "implementation");
+  if (hasImplementation && plan.questions.some((question) => question.blocking)) throw new Error(`Unresolved blocking question: ${plan.questions.filter((question) => question.blocking).map((question) => question.question).join("; ")}; resolve it before authoring implementation execution`);
+  const diagnostics = await validatePlanRepository(root, workingDir, plan);
+  if (diagnostics.length) throw new PlanningValidationError(diagnostics);
   const tasks = plan.phases.flatMap((phase) => phase.sequences.flatMap((sequence) => sequence.tasks));
   const positions = new Map(tasks.map((task, index) => [task.id, index]));
   const acceptanceIds = new Set(plan.acceptance.map((item) => item.id));
@@ -422,6 +501,10 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
   const implementations = new Map<string, { task: StructuredTask; index: number }[]>();
   uniqueNames(plan.phases.map((phase) => structuredPhaseName(phase.name)), "phases");
   for (const phase of plan.phases) {
+    if (!allowedTypes.has(phase.type)) throw new Error(`Phase ${phase.id}.type is unsupported: ${phase.type}; discover native phase templates before selecting a custom type`);
+    if (phase.mode === "workflow" && phase.sequences.length) throw new Error(`Phase ${phase.id} uses workflow mode with sequences; select hybrid mode`);
+    if ((phase.mode === "workflow" || phase.mode === "hybrid") && !phase.workflow) throw new Error(`Phase ${phase.id} requires a native workflow definition`);
+    if (phase.mode === "freeform" && (phase.workflow || phase.sequences.length)) throw new Error(`Phase ${phase.id} freeform mode cannot contain workflow or numbered sequences`);
     uniqueNames(phase.sequences.map((sequence) => nameKey(structuredHierarchyName(sequence.name))), `phase ${phase.id}`);
     for (const sequence of phase.sequences) {
       const sequenceName = nameKey(structuredHierarchyName(sequence.name));
@@ -430,7 +513,7 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
       for (const task of sequence.tasks) sequenceByTask.set(task.id, sequence.id);
     }
   }
-  for (const item of plan.inspection) await existingPath(project, item.path, "Inspection path");
+  // Repository diagnostics are aggregated before structural dependency validation.
   for (const [index, task] of tasks.entries()) {
     const prerequisites = new Set<string>();
     for (const dependency of task.dependsOn) {
@@ -453,16 +536,11 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
       entries.push({ task, index });
       implementations.set(id, entries);
     }
-    if (task.verifies.length && !task.verification.length) throw new Error(`Verification task ${task.id} requires a command, cwd, evidencePath and expected result`);
-    for (const file of task.files) {
-      if (file.status === "existing") await existingPath(project, file.path, "Existing file", "file");
-      else await proposedPath(project, file.path);
-    }
-    for (const check of task.verification) await validateVerification(project, check);
+    if (task.verifies.length && !task.verification.length) throw new Error(`Verification task ${task.id} requires a command, browser, manual or research procedure and expected result`);
   }
   for (const item of plan.acceptance) {
-    if (!implemented.has(item.id)) throw new Error(`Acceptance ${item.id} has no implementation task`);
-    if (!verified.has(item.id)) throw new Error(`Acceptance ${item.id} has no verification task`);
+    if (hasImplementation && !implemented.has(item.id)) throw new Error(`Acceptance ${item.id} has no implementation task`);
+    if (hasImplementation && !verified.has(item.id)) throw new Error(`Acceptance ${item.id} has no verification task`);
   }
   const necessary = new Set<string>();
   for (const [index, task] of tasks.entries()) {
@@ -480,7 +558,7 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
     }
   }
   for (const task of tasks) {
-    if (!necessary.has(task.id)) throw new Error(`Unnecessary task ${task.id}: link acceptance coverage or make it a prerequisite of covered work`);
+    if (hasImplementation && !necessary.has(task.id)) throw new Error(`Unnecessary task ${task.id}: link acceptance coverage or make it a prerequisite of covered work`);
   }
   for (const phase of plan.phases) {
     const phaseTasks = phase.sequences.flatMap((sequence) => sequence.tasks);
@@ -491,16 +569,9 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
       if (!phaseTasks.some((task) => task.implements.length)) {
         throw new Error(`Implementation phase ${phase.id} must contain implementation work`);
       }
-      if (phaseTasks.length > 3) {
-        throw new Error(`Implementation phase ${phase.id} contains more than three tasks; split it at independently reviewable milestones`);
-      }
-    } else if (phaseTasks.some((task) => task.implements.length)) {
-      throw new Error(`Phase ${phase.id} is ${phase.type} but contains implementation tasks; use an implementation phase`);
-    } else if (phase.type !== "validation" && phaseTasks.some((task) => task.verifies.length)) {
-      throw new Error(`Phase ${phase.id} is ${phase.type} but contains verification tasks; use a validation phase`);
     }
-    if (phase.type === "validation" && !phaseTasks.some((task) => task.verifies.length)) {
-      throw new Error(`Validation phase ${phase.id} must contain verification work`);
+    if (maxTasks !== undefined && phaseTasks.length > maxTasks) {
+      throw new Error(`Phase ${phase.id} exceeds configured maxAuthoredTasksPerPhase ${maxTasks}; split at a cohesive reviewable milestone or change the explicit camp policy`);
     }
   }
   const counts = { phases: plan.phases.length, sequences: plan.phases.reduce((total, phase) => total + phase.sequences.length, 0), tasks: tasks.length };
@@ -509,7 +580,7 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
     "", "## Exclusions", ...(plan.exclusions.length ? plan.exclusions.map((item) => `- ${markdownText(item)}`) : ["- None."]),
     "", "## Acceptance", ...plan.acceptance.map((item) => `- ${markdownText(item.id)}: ${markdownText(item.description)}`),
     "", "## Repository Inspection", ...plan.inspection.map((item) => `- ${markdownText(item.path)}: ${markdownText(item.reason)}`),
-    "", "## Open Questions", ...(plan.questions.length ? plan.questions.map((item) => `- Nonblocking: ${markdownText(item.question)}`) : ["- None."]),
+    "", "## Open Questions", ...(plan.questions.length ? plan.questions.map((item) => `- ${item.blocking ? "Blocking before implementation" : "Nonblocking"}: ${markdownText(item.question)}`) : ["- None."]),
   ];
   const hierarchy = ["## Hierarchy", `- **Festival:** ${festivalName}`];
   const contracts = ["## Task Contracts"];
@@ -521,6 +592,10 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
     hierarchy.push(`    - Deliverables: ${phase.deliverables.map(markdownText).join("; ")}`);
     hierarchy.push(`    - Completion: ${phase.completionCriteria.map(markdownText).join("; ")}`);
     work.push(`### ${structuredPhaseName(phase.name)} (${phase.type})`, "", `Objective: ${markdownText(phase.objective)}`, "", "Deliverables:", ...phase.deliverables.map((item) => `- ${markdownText(item)}`), "", "Completion criteria:", ...phase.completionCriteria.map((item) => `- ${markdownText(item)}`));
+    if (phase.workflow) {
+      work.push(`Workflow position: ${phase.workflow.position} sequences`);
+      for (const step of phase.workflow.steps) work.push(`- Workflow ${markdownText(step.id)}: ${markdownText(step.title)} — ${markdownText(step.goal)}; Actions: ${step.actions.map(markdownText).join("; ")}; Output: ${markdownText(step.output)}; Checkpoint: ${step.checkpoint ? "human approval required" : "none"}`);
+    }
     for (const [sequenceIndex, sequence] of phase.sequences.entries()) {
       hierarchy.push(`    - Sequence ${sequenceIndex + 1}: ${structuredHierarchyName(sequence.name)}`);
       work.push(`Sequence: ${markdownText(sequence.name)}`);
@@ -530,13 +605,30 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
         work.push(`- ${markdownText(task.id)}: ${markdownText(task.title)}; Priority: ${task.priority ?? "normal"}; Dependencies: ${task.dependsOn.map(markdownText).join(", ") || "none"}; Implements: ${task.implements.map(markdownText).join(", ") || "none"}; Verifies: ${task.verifies.map(markdownText).join(", ") || "none"}`);
         if (task.files.length) work.push(`  Files: ${task.files.map((file) => `${markdownText(file.path)} (${file.status})`).join("; ")}`);
         for (const check of task.verification) {
-          verificationSummary.push(`- ${markdownText(task.id)}: ${markdownText(check.command)}; Cwd: ${markdownText(check.cwd)}; Evidence: ${markdownText(check.evidencePath)}; Expected: ${markdownText(check.expected)}`);
+          verificationSummary.push(`- ${markdownText(task.id)}: ${verificationDescription(check)}; Expected: ${markdownText(check.expected)}; Completion evidence: not yet recorded`);
         }
       }
     }
   }
   const markdown = ["# Festival Structure", "", ...overview, "", ...hierarchy, "", ...contracts, ""].join("\n");
-  const preview = [`# Approval Preview: ${festivalName}`, `Project: ${markdownText(workingDir)}`, `${counts.phases} phases · ${counts.sequences} sequences · ${counts.tasks} tasks`, "", ...overview, "", ...work, "", ...verificationSummary, ""].join("\n");
+  const preview = [`# Approval Preview: ${festivalName}`, `Project: ${markdownText(workingDir)}`, `${counts.phases} phases · ${counts.sequences} sequences · ${counts.tasks} tasks`, `Readiness: ${hasImplementation ? "implementation-ready" : "progressive planning; implementation execution not yet authorized"}`, "Guidance: keep each phase cohesive and independently reviewable; task count is not a proxy for readiness.", "", ...overview, "", ...work, "", ...verificationSummary, ""].join("\n");
   const digest = createHash("sha256").update(JSON.stringify({ workingDir, plan, markdown })).digest("hex");
   return { markdown, preview, counts, digest };
+}
+
+/** Read-only semantic checks are also used for incomplete editable drafts. Never runs commands. */
+export async function validatePlanRepository(root: string, workingDir: string, spec: StructuredPlan): Promise<PlanningDiagnostic[]> {
+  const diagnostics: PlanningDiagnostic[] = [];
+  let project: string;
+  try { project = await resolveProjectRoot(await realpath(root), workingDir); }
+  catch (error) { return [planningDiagnostic(error, "workingDir")]; }
+  const capture = async (field: string, operation: () => Promise<unknown>) => {
+    try { await operation(); } catch (error) { diagnostics.push(planningDiagnostic(error, field)); }
+  };
+  for (const [index, item] of spec.inspection.entries()) await capture(`inspection[${index}].path`, () => existingPath(project, item.path, "Inspection path"));
+  for (const phase of spec.phases) for (const sequence of Array.isArray(phase.sequences) ? phase.sequences : []) for (const task of sequence.tasks) {
+    for (const [index, file] of task.files.entries()) await capture(`task.${task.id}.files[${index}]`, () => file.status === "existing" ? existingPath(project, file.path, "Existing file", "file") : proposedPath(project, file.path));
+    for (const [index, check] of task.verification.entries()) await capture(`task.${task.id}.verification[${index}]`, () => validateVerification(project, check));
+  }
+  return diagnostics;
 }

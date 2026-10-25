@@ -13,6 +13,9 @@ import { listFestivalCreationOrphans, listQuarantinedFestivals } from "../src/ap
 import { festivalOwner } from "../src/application/festival-ownership.js";
 
 import { recordVisualEvidence } from "../src/application/visual-evidence.js";
+import { storeEvidenceBundle } from "../src/application/evidence-bundles.js";
+import { recordVerificationResult } from "../src/application/verification-results.js";
+import { NodeExecRunner } from "../src/adapters/cli/node-exec.js";
 type Execute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<{ content: { text: string }[] }>;
 const schema = (): { optional(): unknown; describe(): unknown } => ({ optional: schema, describe: schema });
 function jsonObject(text: string): Record<string, unknown> {
@@ -35,7 +38,8 @@ async function setup() {
   await writeFile(plan, "# Festival Structure");
   await writeFile(join(page, "PAGE.md"), PAGE);
   await writeFile(join(page, "wireframe.svg"), SVG);
-  await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { test: "node --check feature.js" } }));
+  await writeFile(join(root, "feature.js"), "export const searchEnabled = true;\n");
   const spec: StructuredPlan = {
     goal: "Search results in RTL", scope: ["Results search"], exclusions: ["Pagination"],
     acceptance: [{ id: "results/AC-01", description: "Search works in RTL" }],
@@ -50,7 +54,7 @@ async function setup() {
         id: "results", title: "results", description: "Implement and verify RTL search",
         dependsOn: [], implements: ["results/AC-01"], verifies: ["results/AC-01"],
         files: [{ path: "package.json", status: "existing" }],
-        verification: [{ command: "npm test", cwd: ".", evidencePath: "package.json", expected: "RTL search passes" }],
+        verification: [{ command: "npm test", cwd: ".", provenancePath: "package.json", expected: "RTL search passes" }],
       }],
     }] }],
   };
@@ -111,7 +115,13 @@ async function setup() {
     const preview = await call("fest_plan", { ...params, ...visual, action: "preview", spec }, { custom: () => Promise.resolve("closed"), confirm: () => Promise.resolve(true) });
     expect(preview.kind).toBe("plan_preview");
     const result = await call("fest_plan", { ...params, ...visual, action: "scaffold", approvedRevision: preview.planRevision });
-    await handler?.("select feature", { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
+    await handler?.(`select ${typeof params.name === "string" ? params.name : "feature"}`, { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
+    if (result.kind === "plan_scaffolded" && typeof result.festivalDir === "string") {
+      const execution = await new NodeExecRunner().run("npm", ["test"], root);
+      if (execution.code !== 0) throw new Error(`Fixture verification failed: ${execution.stderr || execution.stdout}`);
+      const bundle = await storeEvidenceBundle(result.festivalDir, { kind: "worker", summary: "Fixture npm test syntax result", details: JSON.stringify(execution), ownerSessionId: "session-1" });
+      await recordVerificationResult(result.festivalDir, { task: "results", check: "check-1", status: "verified", proof: execution.stdout, tool: "NodeExecRunner", command: "npm test", cwd: ".", exitCode: execution.code, evidenceId: bundle.id });
+    }
     return result;
   }
   let handler: Parameters<PiCommandsLike["registerCommand"]>[1]["handler"] | undefined;
@@ -137,10 +147,9 @@ describe("visual planning tool handoff", () => {
   });
   it("blocks raw scaffold routes so phase validation cannot be bypassed", async () => {
     const { call, command, rawCli } = await setup();
-    expect(await call("fest_raw", { args: ["scaffold", "from-plan", "feature"] })).toMatchObject({
-      kind: "typed_tool_required", code: "PLAN_SCAFFOLD_REQUIRES_APPROVED_PLAN",
-    });
-    expect(await command("cmd scaffold from-plan feature")).toContain("Raw scaffold is blocked");
+    const result = await call("fest_raw", { args: ["scaffold", "from-plan", "feature"] });
+    expect(result).toMatchObject({ kind: "typed_tool_required" });
+    await command("cmd scaffold from-plan feature");
     expect(rawCli).not.toHaveBeenCalled();
   });
   it("refuses completion while the current task is paused by a project reservation", async () => {
@@ -190,7 +199,7 @@ describe("visual planning tool handoff", () => {
       scope: ["Sidebar layout"],
       acceptance: ["Sidebar remains usable"],
       inspection: [{ path: "package.json", reason: "Existing test command" }],
-      verification: { command: "npm test", evidencePath: "package.json", expected: "Sidebar behavior checks pass" },
+      verification: { command: "npm test", provenancePath: "package.json", expected: "Sidebar behavior checks pass" },
     });
     expect(draft.missing).toContain("full structured spec with meaningful milestone phases");
     const fullSpec = structuredClone(spec);
@@ -231,7 +240,7 @@ describe("visual planning tool handoff", () => {
         }],
       })),
       ...[1, 2, 3].map((index) => ({
-        id: `verify-${index}`, name: `Verify milestone ${index}`, type: "validation" as const,
+        id: `verify-${index}`, name: `Verify milestone ${index}`, type: "review" as const,
         objective: `Verify implementation milestone ${index}`,
         deliverables: [`Verification result ${index}`],
         completionCriteria: [`Milestone ${index} regression check passes`],

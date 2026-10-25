@@ -16,6 +16,10 @@ import { joinFestivalTeam, readFestivalTeam, transferFestivalTeamCoordinator } f
 import { readPortfolioState, recordPortfolioFestivalDispatch, reservePortfolioAssignment, setPortfolioPaused, updatePortfolioAssignment, updatePortfolioAssignmentRuntime } from "../src/application/portfolio-state.js";
 import { supervisorPortfolioQueue } from "../src/adapters/omp/supervisor-tools.js";
 import { PAGE, SVG } from "./visual-fixture.js";
+import { nativeSchedulingResult, nativeReadyResponse } from "./native-dependencies-fixture.js";
+import { parseNativeReadyTasks } from "../src/application/native-dependencies.js";
+
+const readySet = (paths: string[]) => parseNativeReadyTasks("/festival", JSON.parse(nativeReadyResponse("/festival", paths)));
 
 describe("festival supervisor", () => {
   it("requires a real dispatch and independent review before acceptance", () => {
@@ -108,7 +112,7 @@ describe("festival supervisor", () => {
     expect(messages.at(-1)).toContain("must still integrate");
   });
 
-  it("queues only current-phase sequence heads with completed dependencies and no gate bypass", () => {
+  it("filters the native ready set by current-phase sequence heads without gate bypass", () => {
     const tasks: DispatchTask[] = [
       { path: "001_BUILD/01_a/01_first.md", sequence: "001_BUILD/01_a", done: false, document: "Task ID: a\nDependencies: setup\n- src/a.ts (existing)" },
       { path: "001_BUILD/01_a/02_second.md", sequence: "001_BUILD/01_a", done: false, document: "Task ID: b\nDependencies: none\n- src/b.ts (existing)" },
@@ -116,12 +120,15 @@ describe("festival supervisor", () => {
       { path: "002_SHIP/01_a/01_first.md", sequence: "002_SHIP/01_a", done: false, document: "Task ID: d\nDependencies: none\n- src/d.ts (existing)" },
     ];
     const current: NextUnit = { kind: "task", path: tasks[0]!.path, doc: "", goals: [] };
-    const input = { festivalDir: "/festival", festival: "festival", current, tasks, workers: [], paused: false };
-    expect(dispatchQueue(input).candidates.map((row) => row.task)).toEqual([tasks[2]!.path]);
-    tasks.push({ path: "000_SETUP/01_a/01_setup.md", sequence: "000_SETUP/01_a", done: true, document: "Task ID: setup" });
+    const input = { festivalDir: "/festival", festival: "festival", current, tasks, workers: [], paused: false, nativeReady: readySet([tasks[1]!.path, tasks[2]!.path, tasks[3]!.path]) };
+    // Native may release a successor after a deferred blocker; local prose is not a second DAG.
+    expect(dispatchQueue(input).candidates.map((row) => row.task)).toEqual([tasks[1]!.path, tasks[2]!.path]);
+    input.nativeReady = readySet(tasks.map((task) => task.path));
     expect(dispatchQueue(input).candidates.map((row) => row.task)).toEqual([tasks[0]!.path, tasks[2]!.path]);
     expect(dispatchQueue({ ...input, current: { kind: "gate_step", phase: "001_BUILD", step: 1, totalSteps: 1, question: "Approve?", doc: "" } }).candidates).toEqual([]);
     expect(dispatchQueue({ ...input, paused: true }).candidates).toEqual([]);
+    expect(dispatchQueue({ ...input, chainBlocker: "Native chain prerequisites incomplete" }).barrier).toContain("chain prerequisites");
+    expect(dispatchQueue({ ...input, nativeReady: readySet([]) }).candidates).toEqual([]);
   });
   it("frees worker capacity for blocked assignments but still holds their task", () => {
     const task: DispatchTask = { path: "001_BUILD/01_a/01_task.md", sequence: "001_BUILD/01_a", done: false, document: "Task ID: a\nDependencies: none" };
@@ -129,7 +136,7 @@ describe("festival supervisor", () => {
     const queue = dispatchQueue({
       festivalDir: "/festival", festival: "festival",
       current: { kind: "task", path: task.path, doc: "", goals: [] },
-      tasks: [task], workers: [blocked], paused: false, limit: 1,
+      tasks: [task], workers: [blocked], paused: false, nativeReady: readySet([task.path]), limit: 1,
     });
     expect(queue.capacity).toBe(1);
     expect(queue.candidates).toEqual([]);
@@ -141,7 +148,7 @@ describe("festival supervisor", () => {
       path: `001_BUILD/0${index + 1}_${name}/01_task.md`, sequence: `001_BUILD/0${index + 1}_${name}`,
       done: false, document: `Task ID: ${name}\nDependencies: none\n- src/${name}.ts (existing)`,
     }));
-    const input = { festivalDir: "/festival", festival: "festival", current: { kind: "task" as const, path: tasks[0]!.path, doc: "", goals: [] }, tasks, workers: [], paused: false };
+    const input = { festivalDir: "/festival", festival: "festival", current: { kind: "task" as const, path: tasks[0]!.path, doc: "", goals: [] }, tasks, workers: [], paused: false, nativeReady: readySet(tasks.map((task) => task.path)) };
     expect(dispatchQueue(input).candidates).toHaveLength(4);
     tasks[1]!.document = "Dependencies: none\n- src (existing)";
     const overlapping = dispatchQueue(input);
@@ -265,6 +272,7 @@ describe("festival supervisor", () => {
       const sequence = "001_BUILD/01_a", task = `${sequence}/01_task.md`;
       const pageDir = join(festival, "references", "pages", "results");
       await mkdir(join(festival, sequence), { recursive: true });
+      await writeFile(join(festival, "fest.yaml"), "id: festival\n");
       await mkdir(pageDir, { recursive: true });
       await mkdir(project);
       await writeFile(join(pageDir, "PAGE.md"), PAGE);
@@ -280,7 +288,7 @@ describe("festival supervisor", () => {
           listFestivals: () => Promise.resolve([{ id: "festival", name: "festival", path: festival }]),
           pendingTasks: () => Promise.resolve([{ path: task, sequence, done: false }]),
         },
-        fest: { next: () => Promise.resolve(current) },
+        fest: { next: () => Promise.resolve(current), raw: (dir: string, args: string[]) => Promise.resolve(nativeSchedulingResult(dir, args, [task])) },
         tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
       } as unknown as ToolDeps;
       const schema = (): { optional(): unknown } => ({ optional: schema });
@@ -368,7 +376,7 @@ describe("festival supervisor", () => {
           listFestivals: () => Promise.resolve([{ id: "festival", name: "festival", path: festival }]),
           pendingTasks: () => Promise.resolve([{ path: task, sequence, done: false }]),
         },
-        fest: { next: () => Promise.resolve(current) },
+        fest: { next: () => Promise.resolve(current), raw: (dir: string, args: string[]) => Promise.resolve(nativeSchedulingResult(dir, args, [task])) },
         tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
       } as unknown as ToolDeps;
       const schema = (): { optional(): unknown } => ({ optional: schema });
@@ -471,6 +479,7 @@ describe("festival supervisor", () => {
       const sequence = "001_BUILD/01_implement";
       const task = `${sequence}/01_task.md`;
       await mkdir(join(festival, sequence), { recursive: true });
+      await writeFile(join(festival, "fest.yaml"), "id: festival\n");
       await mkdir(project);
       await writeFile(join(festival, task), "Task ID: implementation\nDependencies: none\n- src/a.php (existing)");
       await writeFile(join(festival, sequence, "SEQUENCE_GOAL.md"), `---\nfest_working_dir: ${JSON.stringify(project)}\n---\n`);
@@ -483,7 +492,7 @@ describe("festival supervisor", () => {
           listFestivals: () => Promise.resolve([{ id: "festival", name: "festival", status: "active", path: festival }]),
           pendingTasks: () => Promise.resolve([{ path: task, sequence, done: false }]),
         },
-        fest: { next: () => Promise.resolve(current) },
+        fest: { next: () => Promise.resolve(current), raw: (dir: string, args: string[]) => Promise.resolve(nativeSchedulingResult(dir, args, [task])) },
         tracker,
       } as unknown as ToolDeps;
       const reservation = await reserveProjectFiles(project, {
@@ -506,6 +515,18 @@ describe("festival supervisor", () => {
       const available = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
       expect(available.queue.candidates.map((candidate) => candidate.task)).toContain(task);
       expect(tracker.nudge("session-current")).toContain("fest task completed");
+      deps.fest.raw = (dir: string, args: string[]) => Promise.resolve(nativeSchedulingResult(dir, args, []));
+      const notReady = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
+      expect(notReady.queue.candidates).toEqual([]);
+      expect(notReady.queue.waiting[0]?.reason).toContain("Native fest deps");
+      deps.fest.raw = (dir: string, args: string[]) => Promise.resolve(args[0] === "chain"
+        ? { code: 9, stdout: "", stderr: "chain prerequisite incomplete" }
+        : nativeSchedulingResult(dir, args, [task]));
+      const chained = await supervisorQueue(deps, new Supervisor(), "session-current", root, "festival");
+      expect(chained.queue.candidates).toEqual([]);
+      expect(chained.queue.barrier).toContain("exit 9");
+      deps.fest.raw = () => Promise.resolve({ code: 8, stdout: "", stderr: "native dependencies unavailable" });
+      await expect(supervisorQueue(deps, new Supervisor(), "session-current", root, "festival")).rejects.toThrow("exit 8");
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -521,6 +542,7 @@ describe("festival supervisor", () => {
         const project = join(root, "projects", id);
         await mkdir(project, { recursive: true });
         await mkdir(festival, { recursive: true });
+        await writeFile(join(festival, "fest.yaml"), `id: ${id}\n`);
         const ownership = await claimFestivalOwnership(festival, index === 22 ? "other" : "s");
         if (ownership.kind !== "claimed") throw new Error(`Cannot claim ${id}`);
         festivals.push({ id, name: id, status: "active", path: festival });
@@ -552,7 +574,7 @@ describe("festival supervisor", () => {
             ? Promise.reject(new Error("broken festival"))
             : Promise.resolve(taskRows.get(dir) ?? []),
         },
-        fest: { next: (dir: string) => Promise.resolve(currentRows.get(dir)!) },
+        fest: { next: (dir: string) => Promise.resolve(currentRows.get(dir)!), raw: (dir: string, args: string[]) => Promise.resolve(nativeSchedulingResult(dir, args, (taskRows.get(dir) ?? []).map((task) => task.path))) },
         tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
       } as unknown as ToolDeps;
       const portfolio = await supervisorPortfolioQueue(deps, new Supervisor(), "s", root);
@@ -593,6 +615,7 @@ describe("festival supervisor", () => {
       const festival = join(root, "festivals", "active", "festival"), project = join(root, "project");
       const sequence = "001_BUILD/01_work", task = `${sequence}/01_task.md`;
       await mkdir(join(festival, sequence), { recursive: true });
+      await writeFile(join(festival, "fest.yaml"), "id: festival\n");
       await mkdir(project);
       await writeFile(join(festival, sequence, "SEQUENCE_GOAL.md"), `---\nfest_working_dir: ${JSON.stringify(project)}\n---\n`);
       await writeFile(join(festival, task), "Task ID: task\nDependencies: none\n- src/task.ts (proposed)\n");
@@ -615,7 +638,7 @@ describe("festival supervisor", () => {
             return [{ path: task, sequence, done: false }];
           },
         },
-        fest: { next: () => Promise.resolve(current) },
+        fest: { next: () => Promise.resolve(current), raw: (dir: string, args: string[]) => Promise.resolve(nativeSchedulingResult(dir, args, [task])) },
         tracker: { taskOpened: vi.fn(), taskPaused: vi.fn(), taskResumed: vi.fn() },
       } as unknown as ToolDeps;
       const schema = (): { optional(): unknown } => ({ optional: schema });

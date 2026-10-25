@@ -16,7 +16,7 @@ async function fixture() {
   const fields: PlanDraftFields = {
     name: "feature", goal: "Make the feature usable", scope: ["Feature behavior"], acceptance: ["Feature works"],
     workingDir: "projects/app", inspection: [{ path: "package.json", reason: "Inspected existing verification command" }],
-    verification: { command: "npm run test", evidencePath: "package.json", expected: "Feature regression passes" },
+    verification: { command: "npm run test", provenancePath: "package.json", expected: "Feature regression passes" },
   };
   return { root, fields };
 }
@@ -115,7 +115,7 @@ describe("persisted plan drafts", () => {
       ...fields,
       verification: { command: "npm run test", expected: "Feature regression passes" },
     });
-    expect(withoutEvidence.fields.verification?.evidencePath).toBe("package.json");
+    expect(withoutEvidence.fields.verification?.provenancePath).toBe("package.json");
     expect(withoutEvidence.missing).toContain("full structured spec with meaningful milestone phases");
     await mkdir(join(root, fields.workingDir!, "tests"), { recursive: true });
     await writeFile(join(root, fields.workingDir!, "tests", "sample_test.py"), "def test_feature(): pass\n");
@@ -123,7 +123,7 @@ describe("persisted plan drafts", () => {
       ...fields,
       verification: { command: "pytest tests", expected: "Feature regression passes" },
     });
-    expect(testTarget.fields.verification?.evidencePath).toBe("tests");
+    expect(testTarget.fields.verification?.provenancePath).toBe("tests");
     expect(testTarget.missing).toContain("full structured spec with meaningful milestone phases");
 
     const partialUpdate = await updatePlanDraft(root, withoutEvidence.draftId, withoutEvidence.revision, {
@@ -132,20 +132,44 @@ describe("persisted plan drafts", () => {
     expect(partialUpdate.fields.verification).toEqual({
       command: "npm run test",
       cwd: ".",
-      evidencePath: "package.json",
+      provenancePath: "package.json",
       expected: "Updated regression result",
     });
     expect(partialUpdate.missing).toContain("full structured spec with meaningful milestone phases");
   });
 
-  it("reports an unresolved evidence field instead of building a misleading verification check", async () => {
+  it("reports task-specific missing provenance early while keeping the draft editable", async () => {
     const { root, fields } = await fixture();
     const draft = await createPlanDraft(root, {
       ...fields,
       verification: { command: "custom-check", expected: "The check succeeds" },
     });
-    expect(draft.missing).toContain("verification.evidencePath");
-    expect(draft.spec.phases[0]!.sequences[0]!.tasks[0]!.verification).toEqual([]);
+    expect(draft.diagnostics).toEqual(expect.arrayContaining([expect.objectContaining({ code: "INVALID_VERIFICATION", field: "task.implement.verification[0]" })]));
+    expect(draft.spec.phases[0]!.sequences[0]!.tasks[0]!.verification).toHaveLength(1);
+    const fixed = await updatePlanDraft(root, draft.draftId, draft.revision, { verification: { command: "npm run test" } });
+    expect(fixed.diagnostics).toEqual([]);
+  });
+
+  it("returns all selected-repository diagnostics on create/update without discarding incomplete work", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, { ...fields, files: ["missing-a.ts", "missing-b.ts"], verification: { command: "npm run missing", expected: "The suite passes" } });
+    expect(draft.diagnostics).toHaveLength(3);
+    expect(draft.diagnostics.map((item) => item.field)).toEqual(["task.implement.files[0]", "task.implement.files[1]", "task.implement.verification[0]"]);
+    const fixed = await updatePlanDraft(root, draft.draftId, draft.revision, { files: [], verification: { command: "npm run test" } });
+    expect(fixed.diagnostics).toEqual([]);
+    expect(fixed.fields.goal).toBe(fields.goal);
+  });
+
+  it("keeps planning-stage uncertainty editable and previewable without invented implementation coverage", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, { name: "research", workingDir: fields.workingDir, spec: {
+      goal: "Choose the correct implementation approach", scope: ["Repository investigation"], exclusions: [], acceptance: [], inspection: [],
+      questions: [{ question: "Which approach preserves the contract?", blocking: true }],
+      phases: [{ id: "research", name: "Investigate", type: "research", mode: "freeform", objective: "Collect evidence for a reviewed design", deliverables: ["Research findings"], completionCriteria: ["Human reviews the evidence"], sequences: [] }],
+    } });
+    expect(draft.missing).toEqual([]);
+    expect(draft.diagnostics).toEqual([]);
+    expect((await previewPlanDraft(root, draft.draftId, draft.revision)).preview).toContain("progressive planning");
   });
 
 

@@ -24,6 +24,7 @@ export async function loadConfig(dir: string): Promise<OmpFestConfig> {
     conventions,
     autonomyCeiling: sanitizeAutonomy(parsed.autonomyCeiling) ?? DEFAULT_CONFIG.autonomyCeiling,
     delegateMode: sanitizeDelegateMode(parsed.delegateMode) ?? DEFAULT_CONFIG.delegateMode,
+    planning: sanitizePlanning(parsed.planning),
     configWarnings: conventionWarnings(conventions),
   };
 }
@@ -64,6 +65,14 @@ function sanitizeAutonomy(value: unknown): Autonomy | undefined {
 
 function sanitizeDelegateMode(value: unknown): OmpFestConfig["delegateMode"] | undefined {
   return value === "auto" || value === "always" || value === "never" ? value : undefined;
+}
+
+function sanitizePlanning(value: unknown): OmpFestConfig["planning"] {
+  if (!value || typeof value !== "object" || !("maxAuthoredTasksPerPhase" in value)) return undefined;
+  const limit = value.maxAuthoredTasksPerPhase;
+  return typeof limit === "number" && Number.isSafeInteger(limit) && limit > 0
+    ? { maxAuthoredTasksPerPhase: limit }
+    : undefined;
 }
 
 function sanitizeConventions(value: unknown): Conventions {

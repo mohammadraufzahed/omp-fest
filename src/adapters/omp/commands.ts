@@ -25,7 +25,7 @@ import { statusLineText, summarizeProgress } from "../../domain/progress.js";
 import { DEFAULT_CONFIG, DEFAULT_CONVENTIONS, type Conventions, type OmpFestConfig } from "../../domain/types.js";
 import { conventionsEcho, conventionWarnings, parseConventionWords } from "../../application/conventions.js";
 import { BROWSER_VERIFICATION_POLICY, IDEA_INTERVIEW, PLAN_GUIDE, markerInterviewKickoff, planInterviewKickoff } from "../../domain/orientation.js";
-import type { CampCli, CampDetect, FestCli } from "../../ports.js";
+import type { CampCli, CampDetect, FestCli, ExecRunner } from "../../ports.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { supervisorCommands } from "./supervisor-commands.js";
 import { qualityCommands } from "./quality-commands.js";
@@ -34,6 +34,8 @@ import { draftCommands } from "./draft-commands.js";
 import { supervisorPortfolioQueue, supervisorQueue } from "./supervisor-tools.js";
 import { flowCommands } from "./flow-commands.js";
 import type { PortfolioCommandData } from "./supervisor-commands.js";
+import { classifyNativeCommand } from "../../application/native-command-policy.js";
+import { detectCliCapabilities } from "../../application/cli-capabilities.js";
 
 export interface CommandDeps {
   fest: FestCli;
@@ -41,6 +43,7 @@ export interface CommandDeps {
   detect: CampDetect;
   tracker?: LoopTracker;
   supervisor?: Supervisor;
+  exec?: ExecRunner;
 }
 
 export interface PiCommandsLike {
@@ -118,7 +121,6 @@ async function coordinatorOnly(pi: PiCommandsLike, deps: CommandDeps, ctx: Comma
   return false;
 }
 
-const RAW_READ_COMMANDS: Record<string, true> = { list: true, show: true, status: true, rules: true, context: true, markers: true, version: true, types: true, chain: true, feedback: true, links: true, watch: true, deps: true, parse: true, tokens: true, "--help": true };
 
 interface AutocompleteItemLike {
   value: string;
@@ -392,7 +394,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       run: async (args, ctx) => {
         const dir = await festivalDirOf(deps, ctx, args[0]);
         const events = await deps.detect.readProgress(dir);
-        const line = statusLineText({ progress: summarizeProgress(events) });
+        const line = statusLineText({ progress: summarizeProgress(events, await deps.detect.pendingTasks(dir)) });
         send(pi, "fest-status", `${line}\n\n${await deps.fest.status(dir)}`);
       },
     },
@@ -639,6 +641,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       desc: "check fest/camp install, camp health, and judge configuration",
       run: async (_args, ctx) => {
         const lines: string[] = [];
+        if (deps.exec) {
+          const capabilities = await detectCliCapabilities(deps.exec, { cwd: ctx.cwd });
+          for (const [binary, status] of Object.entries(capabilities.binaries)) lines.push(`${binary}: ${status.path ?? status.executable}; ${status.version ?? "unknown version"}; required ${status.requiredVersion}; ready=${status.ready}`, ...status.diagnostics);
+        }
         lines.push(`fest: ${(await deps.fest.version()) ?? "NOT INSTALLED — npm i -g @obedience-corp/festival"}`);
         lines.push(`camp: ${(await deps.camp.available()) ? "installed" : "NOT INSTALLED"}`);
         const location = await deps.detect.locate(ctx.cwd);
@@ -652,10 +658,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     cmd: {
       desc: "raw fest passthrough: /fest cmd <args> — e.g. /fest cmd list --json; scaffold is blocked in favor of approved fest_plan",
       run: async (args, ctx) => {
-        if (args[0] === "scaffold") {
-          send(pi, "fest-status", "Raw scaffold is blocked. Use fest_plan {action:'scaffold'} with the approved planRevision so structured phase validation and human approval are preserved.");
-          return;
-        }
+        const policy = classifyNativeCommand("fest", args);
+        if (policy.blocked) { send(pi, "fest-status", policy.blocked); return; }
+        if (policy.access !== "read" && ctx.agent?.kind === "sub") { send(pi, "fest-status", "Only the main supervisor may mutate native Festival state."); return; }
+        if (policy.access === "human" && !await ctx.ui.confirm?.("Native Festival operation", `${policy.reason}\n\nfest ${args.join(" ")}`)) { send(pi, "fest-status", "Native operation was not authorized."); return; }
         const location = await deps.detect.locate(ctx.cwd);
         const cwd = location.festivalDir ?? (location.campRoot && deps.tracker
           ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)
@@ -664,9 +670,9 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           send(pi, "fest-status", "Not inside a camp.");
           return;
         }
-        if (location.campRoot && resolve(cwd) !== resolve(location.campRoot)) {
+        if (policy.access !== "read" && location.campRoot && resolve(cwd) !== resolve(location.campRoot)) {
           if (!(await coordinatorOnly(pi, deps, ctx, cwd))) return;
-        } else if (!RAW_READ_COMMANDS[args[0] ?? ""]) {
+        } else if (policy.access !== "read") {
           send(pi, "fest-status", "Mutating raw fest commands require an explicitly selected festival. Use /fest select <festival> first; read-only camp commands remain available.");
           return;
         }
@@ -677,6 +683,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
     camp: {
       desc: "raw camp passthrough: /fest camp <args> — e.g. /fest camp idea list",
       run: async (args, ctx) => {
+        const policy = classifyNativeCommand("camp", args);
+        if (policy.blocked) { send(pi, "camp-cmd", policy.blocked); return; }
+        if (policy.access !== "read" && ctx.agent?.kind === "sub") { send(pi, "camp-cmd", "Only the main supervisor may mutate native Camp state."); return; }
+        if (policy.access === "human" && !await ctx.ui.confirm?.("Native Camp operation", `${policy.reason}\n\ncamp ${args.join(" ")}`)) { send(pi, "camp-cmd", "Native operation was not authorized."); return; }
         const location = await deps.detect.locate(ctx.cwd);
         if (!location.campRoot) {
           send(pi, "fest-status", "Not inside a camp.");

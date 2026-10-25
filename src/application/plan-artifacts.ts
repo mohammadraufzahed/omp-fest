@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { prepareStructuredPlan, type StructuredPlan, type PreparedStructuredPlan } from "./structured-plan.js";
+import { parseStructuredPlan, prepareStructuredPlan, type StructuredPlan, type PreparedStructuredPlan } from "./structured-plan.js";
 import { prepareVisualReferences } from "./visual-references.js";
 import { withStaleAwareLock } from "./fs-lock.js";
 import { writeAtomically } from "./fs-atomic.js";
+import { captureNativeWorkflowTemplates } from "./plan-scaffold.js";
 
 export interface PlanArtifact {
   name: string;
@@ -12,6 +13,10 @@ export interface PlanArtifact {
   rules: string;
   referencesDir?: string;
   spec: StructuredPlan;
+  /** Explicit values for camp-specific template marker hints; included in human approval digest. */
+  templateMarkers?: Record<string, string>;
+  /** Native workflow documents reviewed with this exact revision, not live templates at execution. */
+  nativeWorkflowTemplates?: Record<string, string>;
   previewId?: string;
 }
 
@@ -84,7 +89,13 @@ function planRevision(artifact: PlanArtifact, markdown: string, references: { pa
 }
 
 export async function previewPlan(root: string, plan: string, artifact: PlanArtifact, references: { path: string; content: string }[] = []) {
+  artifact = { ...artifact, spec: parseStructuredPlan(artifact.spec) };
+  const nativeWorkflowTemplates = artifact.nativeWorkflowTemplates ?? await captureNativeWorkflowTemplates(root, artifact.spec);
+  artifact = { ...artifact, nativeWorkflowTemplates };
   const prepared = await prepareStructuredPlan(root, artifact.workingDir, artifact.name, artifact.spec);
+  const nativeWorkflows = Object.entries(nativeWorkflowTemplates).map(([id, content]) => `## Native Workflow: ${id}\n\n${content}`).join("\n\n");
+  if (nativeWorkflows) prepared.preview += `\n${nativeWorkflows}\n`;
+  if (artifact.templateMarkers && Object.keys(artifact.templateMarkers).length) prepared.preview += `\n## Reviewed Template Marker Values\n\n${Object.entries(artifact.templateMarkers).map(([hint, value]) => `- ${JSON.stringify(hint)}: ${JSON.stringify(value)}`).join("\n")}\n`;
   const path = await artifactPath(root, plan, artifact.name);
   return withArtifactLock(path, async () => {
     const previewArtifact = { ...artifact, previewId: randomUUID() };

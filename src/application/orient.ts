@@ -34,8 +34,11 @@ export async function orientSession(
     };
   }
   const resolved: CampLocation = { ...location, festivalDir, festivalId: basename(festivalDir) };
-  const events = await detect.readProgress(festivalDir);
-  const progress = summarizeProgress(events);
+  const [events, tasks] = await Promise.all([
+    detect.readProgress(festivalDir),
+    detect.pendingTasks(festivalDir),
+  ]);
+  const progress = summarizeProgress(events, tasks);
   const statusLine = statusLineText({
     campName: location.campName,
     festivalId: resolved.festivalId,

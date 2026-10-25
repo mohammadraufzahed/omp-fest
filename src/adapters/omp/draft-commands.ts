@@ -15,7 +15,7 @@ export function draftCommands(pi: PiCommandsLike, deps: CommandDeps) {
         if (!id) { send(drafts.map((draft) => `${draft.draftId}: ${draft.fields.name}`).join("\n") || "No persisted drafts. Start /fest plan."); return; }
         for (;;) {
           const draft = await readPlanDraft(root, id);
-          send(JSON.stringify({ draftId: draft.draftId, revision: draft.revision, name: draft.fields.name, goal: draft.fields.goal, missing: draft.missing, plan: draft.plan }));
+          send(JSON.stringify({ draftId: draft.draftId, revision: draft.revision, name: draft.fields.name, goal: draft.fields.goal, missing: draft.missing, diagnostics: draft.diagnostics, plan: draft.plan }));
           if (!ctx.ui.select) return;
           const field = await ctx.ui.select("Edit draft or preview", ["goal", "scope", "exclusions", "acceptance", "workingDir", "rules", "files", "inspection", "verification", "visualIntent", "Preview", "Done"]);
           if (!field || field === "Done") return;
@@ -26,15 +26,25 @@ export function draftCommands(pi: PiCommandsLike, deps: CommandDeps) {
           }
           if (!ctx.ui.input) return;
           if (field === "verification") {
-            const command = await ctx.ui.input("Verification command", "Existing runnable command, e.g. npm test");
-            if (command === undefined) continue;
-            const cwd = await ctx.ui.input("Verification cwd", "Project-relative directory, e.g. .");
-            if (cwd === undefined) continue;
-            const evidencePath = await ctx.ui.input("Command evidence path", "Existing project-relative manifest/script, e.g. package.json");
-            if (evidencePath === undefined) continue;
-            const expected = await ctx.ui.input("Observable expected result", "Behavior/output proving acceptance");
+            const selected = await ctx.ui.select("Verification kind", ["command", "browser", "manual", "research"]);
+            if (selected !== "command" && selected !== "browser" && selected !== "manual" && selected !== "research") continue;
+            let verification: NonNullable<PlanDraftFields["verification"]>;
+            if (selected === "command") {
+              const command = await ctx.ui.input("Verification command", "Existing runnable command, e.g. npm test");
+              if (command === undefined) continue;
+              const cwd = await ctx.ui.input("Verification cwd", "Project-relative directory, e.g. .");
+              if (cwd === undefined) continue;
+              const provenancePath = await ctx.ui.input("Command provenance (optional when inferable)", "Existing manifest/script, not a future result log");
+              if (provenancePath === undefined) continue;
+              verification = { kind: selected, command, cwd: cwd || ".", ...(provenancePath ? { provenancePath } : {}) };
+            } else {
+              const procedure = await ctx.ui.input(`${selected} verification procedure`, "Concrete actions and observations proving acceptance");
+              if (procedure === undefined) continue;
+              verification = { kind: selected, procedure };
+            }
+            const expected = await ctx.ui.input("Observable expected result", "Expected behavior only; actual result is recorded during execution");
             if (expected === undefined) continue;
-            await updatePlanDraft(root, id, draft.revision, { verification: { command, cwd: cwd || ".", evidencePath, expected } });
+            await updatePlanDraft(root, id, draft.revision, { verification: { ...verification, expected } });
             continue;
           }
           if (field === "visualIntent") {

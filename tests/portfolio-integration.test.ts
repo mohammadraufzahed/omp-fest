@@ -6,6 +6,7 @@ import { claimFestivalOwnership } from "../src/application/festival-ownership.js
 import { readPortfolioState } from "../src/application/portfolio-state.js";
 import { LoopTracker } from "../src/application/loop-tracker.js";
 import { registerCommands } from "../src/adapters/omp/commands.js";
+import { nativeSchedulingResult } from "./native-dependencies-fixture.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -48,7 +49,10 @@ async function harness(sessionId: string, existingRoot?: string) {
   };
   const deps = {
     detect,
-    fest: { next: () => Promise.resolve({ kind: "task", path: task, workingDir: project, doc: "", goals: [] }) },
+    fest: {
+      next: () => Promise.resolve({ kind: "task", path: task, workingDir: project, doc: "", goals: [] }),
+      raw: (dir: string, args: string[]) => Promise.resolve(nativeSchedulingResult(dir, args, [task])),
+    },
     camp: {},
     tracker: new LoopTracker(),
   };

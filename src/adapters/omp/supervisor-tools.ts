@@ -1,5 +1,5 @@
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
-import { readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { Supervisor, SupervisorBlocked, supervisorNextAction, SUPERVISOR_ENTRY, SUPERVISOR_POLICY, type WorkerAssignment } from "../../application/supervisor.js";
 import { dispatchQueue, taskFiles, type DispatchQueue, type DispatchTask, type WriteLockOwner } from "../../application/supervisor-queue.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
@@ -11,6 +11,11 @@ import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import type { PiLike, ToolDeps } from "./tools.js";
 import { checkProjectConflicts, listProjectReservations } from "../../application/project-conflicts.js";
+import { readNativeReadyTasks } from "../../application/native-dependencies.js";
+import { checkNativeChainEligibility } from "../../application/native-chain.js";
+import { createFestivalWorktrees } from "../../application/festival-worktrees.js";
+import { lifecycleStatus } from "../../domain/festival-lifecycle.js";
+import { loadConfig } from "../../domain/config.js";
 
 import { buildPortfolioQueue, type PortfolioFestivalQueue } from "../../application/portfolio-queue.js";
 import { readPortfolioState, reservePortfolioAssignment, updatePortfolioAssignment, releasePortfolioAssignment, recordPortfolioFestivalDispatch, updatePortfolioAssignmentRuntime } from "../../application/portfolio-state.js";
@@ -38,7 +43,7 @@ function teamAssignmentForQueue(assignment: FestivalTeamAssignment, festival: st
     task: assignment.task,
     worker: assignment.label ?? assignment.sessionId,
     files: task?.files ?? [],
-    status: assignment.status === "claimed" ? "running" as const : assignment.status === "submitted" ? "ready_for_review" as const : "accepted" as const,
+    status: assignment.status === "claimed" ? "running" as const : assignment.status === "submitted" ? "ready_for_review" as const : assignment.status === "released" ? "failed" as const : "accepted" as const,
     report: assignment.report ?? "",
     review: assignment.review ?? "",
     ...(assignment.reviewSource ? { reviewSource: assignment.reviewSource } : {}),
@@ -49,8 +54,13 @@ function teamAssignmentForQueue(assignment: FestivalTeamAssignment, festival: st
 /** Shared by tool and command integration; this only reports candidates, never launches. */
 export async function supervisorQueue(deps: ToolDeps, supervisor: Supervisor, sid: string, cwd: string, selector?: string) {
   const { dir, campRoot } = await festivalLocation(deps, sid, cwd, selector);
-  const current = await deps.fest.next(dir);
-  const pending = await deps.detect.pendingTasks(dir);
+  if (deps.exec && lifecycleStatus(dir) === "active" && await lstat(join(dir, "APPROVED_PLAN.json")).catch(() => undefined)) {
+    const config = await loadConfig(campRoot);
+    await createFestivalWorktrees(deps.exec, campRoot, dir, basename(dir), await deps.camp.projects(campRoot), config.conventions);
+  }
+  const [current, pending, nativeReady, chain] = await Promise.all([
+    deps.fest.next(dir), deps.detect.pendingTasks(dir), readNativeReadyTasks(deps.fest, dir), checkNativeChainEligibility(deps.fest, dir),
+  ]);
   const sequenceDirs = new Map<string, string | undefined>();
   for (const sequence of new Set(pending.filter((task) => !task.done).map((task) => task.sequence))) {
     const goal = await readFile(join(dir, sequence, "SEQUENCE_GOAL.md"), "utf8").catch(() => "");
@@ -75,11 +85,15 @@ export async function supervisorQueue(deps: ToolDeps, supervisor: Supervisor, si
   }));
   const state = supervisor.state(sid);
   const [team, portfolio] = await Promise.all([readFestivalTeam(campRoot, dir), readPortfolioState(campRoot)]);
-  const localTasks = new Set(state.workers.filter((worker) => worker.festival === basename(dir)).map((worker) => worker.task));
+  const localAssignments = new Set(state.workers.filter((worker) => worker.festival === basename(dir)).map((worker) => worker.id));
   const teamWorkers = (team?.assignments ?? [])
-    .filter((assignment) => !localTasks.has(assignment.task))
+    .filter((assignment) => !localAssignments.has(assignment.id))
     .map((assignment) => teamAssignmentForQueue(assignment, basename(dir), tasks));
-  const queue = dispatchQueue({ festivalDir: dir, festival: basename(dir), current, tasks, workers: [...state.workers, ...teamWorkers], paused: state.paused || portfolio.paused });
+  const queue = dispatchQueue({
+    festivalDir: dir, festival: basename(dir), current, tasks, nativeReady,
+    workers: [...state.workers, ...teamWorkers], paused: state.paused || portfolio.paused,
+    ...(!chain.allowed ? { chainBlocker: `Native interfestival chain ${chain.kind} (exit ${chain.code}): ${chain.stderr || chain.stdout}` } : {}),
+  });
   const currentTask = current.kind === "task"
     ? (isAbsolute(current.path) ? relative(dir, current.path) : current.path)
     : undefined;
@@ -153,7 +167,7 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
           dependencies: candidate.dependencies, workingDir: candidate.workingDir,
           priority: priorityOf(tasks.find((task) => task.path === candidate.task)?.document ?? ""),
         }] : []),
-        waiting: queue.waiting.map(({ task, reason }) => ({ task, reason })),
+        waiting: [...queue.waiting.map(({ task, reason }) => ({ task, reason })), ...(queue.barrier ? [{ task: "", reason: queue.barrier }] : [])],
       });
       for (const candidate of queue.candidates) if (candidate.workingDir) workingDirs.add(candidate.workingDir);
       for (const task of tasks) if (task.workingDir) workingDirs.add(task.workingDir);
@@ -180,6 +194,7 @@ export async function supervisorPortfolioQueue(deps: ToolDeps, supervisor: Super
     const id = basename(festival.path);
     const team = await readFestivalTeam(location.campRoot, festival.path).catch(() => undefined);
     for (const shared of team?.assignments ?? []) {
+      if (shared.status === "released") continue;
       const ledger = ledgerById.get(shared.id);
       if (!ledger && shared.sessionId !== sid) continue;
       if (ledger && ledger.festival !== id) continue;
@@ -316,9 +331,12 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           const eligible = choices[0];
           const candidate = eligible && portfolio.queue.candidates.find((item) => item.festival === eligible.festival && item.task === eligible.task);
           if (!candidate) throw new Error(portfolio.queue.waiting.find((item) => item.task === params.task)?.reason ?? "Choose an exact eligible portfolio task.");
-          const { tasks } = await supervisorQueue(deps, supervisor, sid, ctx.cwd, candidate.festival);
-          const task = tasks.find((item) => item.path === candidate.task);
+          const refreshed = await supervisorQueue(deps, supervisor, sid, ctx.cwd, candidate.festival);
+          const freshCandidate = refreshed.queue.candidates.find((item) => item.task === candidate.task);
+          if (!freshCandidate) throw new Error(refreshed.queue.waiting.find((item) => item.task === candidate.task)?.reason ?? refreshed.queue.barrier ?? "Task is no longer eligible; refresh the portfolio.");
+          const task = refreshed.tasks.find((item) => item.path === candidate.task);
           if (!task) throw new Error("Eligible task disappeared from the dispatch queue; refresh the portfolio.");
+          if (!freshCandidate.workingDir) throw new Error("Sequence working directory disappeared; refresh the portfolio.");
           const location = await deps.detect.locate(ctx.cwd);
           if (!location.campRoot) throw new Error("Select a festival inside a camp first.");
           const festival = (await deps.detect.listFestivals(location.campRoot)).find((row) => basename(row.path) === candidate.festival);
@@ -334,16 +352,16 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           await joinFestivalTeam(campRoot, dir, sid, sid, params.worker);
           let shared: FestivalTeamAssignment | undefined, ledgerCreated = false;
           try {
-            shared = await claimFestivalTask(campRoot, dir, sid, candidate.task, candidate.workingDir, params.worker);
+            shared = await claimFestivalTask(campRoot, dir, sid, candidate.task, freshCandidate.workingDir, params.worker);
             await reservePortfolioAssignment(campRoot, {
               id: shared.id, festival: candidate.festival, task: candidate.task, sessionId: sid,
-              worker: params.worker, workingDir: candidate.workingDir, files: candidate.files,
+              worker: params.worker, workingDir: freshCandidate.workingDir, files: freshCandidate.files,
             });
             ledgerCreated = true;
             await recordPortfolioFestivalDispatch(campRoot, candidate.festival);
             deps.tracker.taskOpened(sid, candidate.task);
-            const row = supervisor.assign(sid, candidate.festival, candidate.task, params.worker, candidate.files, { id: shared.id });
-            result = { assignment: row, contract: { festivalDir: dir, task: candidate.task, workingDir: candidate.workingDir, document: task.document, ...(visualReferences.length ? { visualReferences } : {}), policy: SUPERVISOR_POLICY, browserVerification: BROWSER_VERIFICATION_POLICY }, nextSteps: "Launch this named worker through the native omp agent tool. The shared festival team board reserves this exact task across omp sessions; file locks remain write-scoped. After host acceptance bind the native job ID. Do not relaunch unfinished work." };
+            const row = supervisor.assign(sid, candidate.festival, candidate.task, params.worker, freshCandidate.files, { id: shared.id });
+            result = { assignment: row, contract: { festivalDir: dir, task: candidate.task, workingDir: freshCandidate.workingDir, document: task.document, ...(visualReferences.length ? { visualReferences } : {}), policy: SUPERVISOR_POLICY, browserVerification: BROWSER_VERIFICATION_POLICY }, nextSteps: "Launch this named worker through the native omp agent tool. The shared festival team board reserves this exact task across omp sessions; file locks remain write-scoped. After host acceptance bind the native job ID. Do not relaunch unfinished work." };
           } catch (error) {
             if (ledgerCreated && shared) await releasePortfolioAssignment(campRoot, shared.id, "Portfolio assignment transaction rolled back.").catch(() => undefined);
             if (shared) await releaseFestivalTask(campRoot, dir, sid, shared.id, "Native supervisor assignment could not be created.").catch(() => undefined);

@@ -194,6 +194,8 @@ export interface OmpFestConfig {
   writeLocks: boolean;
   /** Subagent delegation policy: "never" blocks worker spawns, "always" delegates every unit, "auto" delegates units with disjoint scope. */
   delegateMode: "auto" | "always" | "never";
+  /** Optional authored-task cap per phase; omitted means decompose by cohesion, not a fixed count. */
+  planning?: { maxAuthoredTasksPerPhase?: number };
   /** Machine-checkable naming/commit conventions enforced by the plugin. */
   conventions: Conventions;
   /** Non-fatal config problems found at load time (never persisted). */

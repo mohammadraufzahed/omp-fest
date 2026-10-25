@@ -59,7 +59,7 @@ export function buildPortfolioQueue(input: {
   }
   for (const f of input.festivals) for (const row of f.waiting) result.waiting.push({ festival: f.festival, ...row });
   const activeKeys = new Set(held.map((a) => `${a.festival}\0${a.task}`));
-  const submittedKeys = new Set(input.assignments.filter((a) => a.status === "submitted").map((a) => `${a.festival}\0${a.task}`));
+  const acceptedKeys = new Set(input.assignments.filter((a) => a.status === "accepted").map((a) => `${a.festival}\0${a.task}`));
   const seen = new Set<string>();
   const lists = input.festivals.map((f) => {
     const eligible: PortfolioCandidate[] = [];
@@ -69,7 +69,7 @@ export function buildPortfolioQueue(input: {
       if (seen.has(key)) continue;
       seen.add(key);
       if (activeKeys.has(key)) result.waiting.push({ festival: f.festival, task: c.task, reason: "An active assignment already owns this task; do not relaunch." });
-      else if (submittedKeys.has(key)) result.waiting.push({ festival: f.festival, task: c.task, reason: "A submitted assignment awaits completion; do not repeat implementation." });
+      else if (acceptedKeys.has(key)) result.waiting.push({ festival: f.festival, task: c.task, reason: "Accepted submission awaits festival task completion; do not repeat implementation." });
       else eligible.push(c);
     }
     const rank = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
@@ -83,27 +83,6 @@ export function buildPortfolioQueue(input: {
     if (index >= 0 && festivals.length) start = (index + 1) % festivals.length;
   }
   const order = festivals.map((_, i) => (start + i) % festivals.length);
-  const selectedFiles: PortfolioCandidate[] = [];
-  for (const index of order) {
-    const list = lists[index];
-    if (!list) continue;
-    for (let index = 0; index < list.length; ) {
-      const candidate = list[index];
-      if (!candidate) { index++; continue; }
-      const overlapping = selectedFiles.find((prior) => prior.workingDir === candidate.workingDir &&
-        prior.files.some((left) => candidate.files.some((right) => {
-          const a = left.replaceAll("\\", "/").replace(/\/+$/, "");
-          const b = right.replaceAll("\\", "/").replace(/\/+$/, "");
-          return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-        })));
-      if (!overlapping) { selectedFiles.push(candidate); index++; continue; }
-      result.waiting.push({
-        festival: candidate.festival, task: candidate.task,
-        reason: `Candidate file set overlaps ${overlapping.festival}/${overlapping.task}; dispatch one task, then refresh the portfolio.`,
-      });
-      list.splice(index, 1);
-    }
-  }
   const positions = lists.map(() => 0);
   while (result.candidates.length < availableSlots) {
     let moved = false;
@@ -115,7 +94,18 @@ export function buildPortfolioQueue(input: {
       if (list === undefined) continue;
       const c = list[position];
       if (c === undefined) continue;
+      const overlapping = result.candidates.find((prior) => prior.workingDir === c.workingDir &&
+        (!prior.files.length || !c.files.length || prior.files.some((left) => c.files.some((right) => {
+          const a = left.replaceAll("\\", "/").replace(/\/+$/, "");
+          const b = right.replaceAll("\\", "/").replace(/\/+$/, "");
+          return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+        }))));
       positions[index] = position + 1;
+      if (overlapping) {
+        result.waiting.push({ festival: c.festival, task: c.task, reason: `Candidate file set overlaps ${overlapping.festival}/${overlapping.task}; dispatch one task, then refresh the portfolio.` });
+        moved = true;
+        continue;
+      }
       result.candidates.push(c);
       moved = true;
     }
@@ -125,7 +115,7 @@ export function buildPortfolioQueue(input: {
     const festival = festivals[i];
     const eligible = lists[i];
     if (festival === undefined || eligible === undefined) continue;
-    for (const c of eligible) {
+    for (const c of eligible.slice(positions[i] ?? 0)) {
       if (!result.candidates.includes(c)) result.waiting.push({ festival, task: c.task, reason: "Portfolio worker limit reached." });
     }
   }

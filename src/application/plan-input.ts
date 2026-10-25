@@ -16,12 +16,17 @@ function assertStructuredInput(value: unknown): asserts value is StructuredPlan 
   const object = (item: unknown): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item);
   const array = (item: unknown): item is unknown[] => Array.isArray(item);
   if (!object(value) || typeof value.goal !== "string" || !array(value.scope) || !array(value.exclusions)
-    || !array(value.acceptance) || !array(value.questions) || !array(value.inspection) || !array(value.phases)
-    || !value.phases.every((phase) => object(phase) && array(phase.sequences)
-      && phase.sequences.every((sequence) => object(sequence) && array(sequence.tasks)
-        && sequence.tasks.every((task) => object(task) && array(task.dependsOn) && array(task.implements)
-          && array(task.verifies) && array(task.files) && array(task.verification))))) {
+    || !array(value.acceptance) || !array(value.questions) || !array(value.inspection) || !array(value.phases)) {
     throw new Error("Plan input must be a complete structured plan with valid phase, sequence, and task arrays");
+  }
+  for (const phase of value.phases) {
+    if (!object(phase) || (phase.sequences !== undefined && !array(phase.sequences))) throw new Error("Plan phase sequences must be an array when supplied");
+    for (const sequence of phase.sequences ?? []) {
+      if (!object(sequence) || !array(sequence.tasks)) throw new Error("Plan sequence tasks must be an array");
+      for (const task of sequence.tasks) {
+        if (!object(task) || !array(task.dependsOn) || !array(task.implements) || !array(task.verifies) || !array(task.files) || !array(task.verification)) throw new Error("Plan task dependency, acceptance, files and verification fields must be arrays");
+      }
+    }
   }
 }
 
@@ -38,22 +43,26 @@ function unique(base: string, used: Set<string>): string {
   used.add(id);
   return id;
 }
-/** Infer evidence only from an explicit command target or the package manifest used by a package runner. */
-export function inferVerificationEvidencePath(command: string | undefined, cwd = "."): string | undefined {
+/** Infer command provenance, never runtime completion evidence, from declared command targets. */
+export function inferVerificationProvenancePath(command: string | undefined, cwd = "."): string | undefined {
   if (!command?.trim()) return undefined;
   const words = command.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map((word) => word.replace(/^(["'])(.*)\1$/, "$2")) ?? [];
   const executable = words[0]?.split(/[\\/]/).at(-1);
   if (!executable) return undefined;
   if (["npm", "pnpm", "yarn", "bun"].includes(executable)) return `${cwd === "." ? "" : `${cwd.replace(/\/+$/, "")}/`}package.json`;
+  if (executable === "go") return `${cwd === "." ? "" : `${cwd}/`}go.mod`;
+  if (executable === "cargo") return `${cwd === "." ? "" : `${cwd}/`}Cargo.toml`;
+  if (executable === "make") return `${cwd === "." ? "" : `${cwd}/`}Makefile`;
   const directory = verificationDirectoryArgument(command);
-  if (directory) return directory.replaceAll("\\", "/");
+  if (directory) return `${cwd === "." ? "" : `${cwd}/`}${directory.replaceAll("\\", "/")}`;
   let script: string | undefined;
   if (executable === "php") script = words[1] === "-l" ? words[2] : words[1];
+  else if (executable === "node" && words[1] === "--check") script = words[2];
   else if (["node", "python", "python3", "ruby", "bash", "sh"].includes(executable)) script = words[1];
   else if (executable === "deno") script = words[1] === "run" ? words[2] : words[1];
   else if (words[0]?.includes("/")) script = words[0];
   if (!script || script.startsWith("-") || !/[./\\]/.test(script)) return undefined;
-  return script.replaceAll("\\", "/");
+  return `${cwd === "." ? "" : `${cwd}/`}${script.replaceAll("\\", "/")}`;
 }
 function verificationDirectoryArgument(command: string | undefined): string | undefined {
   if (!command?.trim()) return undefined;
@@ -99,7 +108,7 @@ export function normalizePlanInput(input: StructuredPlan, projectRoot: string): 
   });
   const phases = input.phases.map((phase, phaseIndex) => {
     const phaseId = unique(slug(phase.id || phase.name, `phase-${phaseIndex + 1}`), phaseIds);
-    const sequences = phase.sequences.map((sequence, sequenceIndex) => {
+    const sequences = (Array.isArray(phase.sequences) ? phase.sequences : []).map((sequence, sequenceIndex) => {
       const sequenceId = unique(slug(sequence.id || sequence.name, `sequence-${sequenceIndex + 1}`), sequenceIds);
       const tasks = sequence.tasks.map((task, taskIndex) => {
         const taskId = unique(slug(task.id || task.title, `task-${taskIndex + 1}`), taskIds);
@@ -118,15 +127,15 @@ export function normalizePlanInput(input: StructuredPlan, projectRoot: string): 
         task.verifies = task.verifies.map((id) => acceptanceMap.get(id) ?? id);
         task.files = task.files.map((file) => ({ ...file, path: projectRelative(projectRoot, file.path, warnings, "task file") }));
         task.verification = task.verification.map((check) => {
-          const cwd = check.cwd || ".";
-          const inferred = !check.evidencePath ? inferVerificationEvidencePath(check.command, cwd) : undefined;
-          const evidencePath = check.evidencePath || inferred;
-          if (!evidencePath) throw new Error(`Verification evidencePath is missing and cannot be inferred from command "${check.command}"; provide an existing package manifest, command script, or direct test-runner target.`);
-          if (inferred) warnings.push(`verification evidencePath was inferred from its command: ${inferred}`);
+          if ((check.kind ?? "command") !== "command") return { ...check, ...(check.provenancePath ? { provenancePath: projectRelative(projectRoot, check.provenancePath, warnings, "verification provenancePath") } : {}) };
+          const cwd = projectRelative(projectRoot, check.cwd ?? ".", warnings, "verification cwd");
+          const inferred = !check.provenancePath ? inferVerificationProvenancePath(check.command, cwd) : undefined;
+          const provenancePath = check.provenancePath ?? inferred;
+          if (inferred) warnings.push(`verification provenancePath was inferred from its command: ${inferred}`);
           return {
             ...check,
-            cwd: projectRelative(projectRoot, cwd, warnings, "verification cwd"),
-            evidencePath: projectRelative(projectRoot, evidencePath, warnings, "verification evidencePath"),
+            cwd,
+            ...(provenancePath ? { provenancePath: projectRelative(projectRoot, provenancePath, warnings, "verification provenancePath") } : {}),
           };
         });
       }

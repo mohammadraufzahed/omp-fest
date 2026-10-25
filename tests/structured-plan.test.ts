@@ -12,6 +12,7 @@ import {
 } from "../src/application/structured-plan.js";
 import { finalizeApprovedScaffold } from "../src/application/plan-scaffold.js";
 import type { ZodLike, ZodSchema } from "../src/adapters/omp/zod-types.js";
+import { PlanningValidationError } from "../src/application/planning-errors.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -46,7 +47,7 @@ async function fixture() {
         }, {
           id: "verify", title: "Verify feature", description: "Run the regression checks against the enabled behavior",
           dependsOn: ["implement"], implements: [], verifies: ["AC-01"], files: [],
-          verification: [{ command: "npm run test", cwd: ".", evidencePath: "package.json", expected: "The regression check passes and the full test suite exits zero" }],
+          verification: [{ command: "npm run test", cwd: ".", provenancePath: "package.json", expected: "The regression check passes and the full test suite exits zero" }],
         }],
       }],
     }],
@@ -106,7 +107,7 @@ describe("structured plan preparation", () => {
     expect(first.preview).toContain("Priority: normal");
     expect(first.preview).toContain("src/feature.ts (existing)");
     expect(first.preview).toContain("tests/feature.test.ts (proposed)");
-    expect(first.preview).toContain("npm run test; Cwd: .; Evidence: package.json");
+    expect(first.preview).toContain("npm run test; Cwd: .; Provenance: package.json");
     expect(first.preview).toContain("AC-01: The feature returns the enabled result for a valid request");
     expect(first.preview).not.toContain("## Task Contracts");
     expect(first.preview).not.toContain("Done When:");
@@ -145,7 +146,7 @@ describe("structured plan preparation", () => {
     const { root, workingDir, spec, verify } = await fixture();
     spec.phases[0]!.sequences[0]!.tasks.pop();
     spec.phases.push({
-      id: "phase-checks", name: "Checks", type: "validation",
+      id: "phase-checks", name: "Checks", type: "review",
       objective: "Prove the implemented acceptance behavior",
       deliverables: ["Validation result"],
       completionCriteria: ["The verification command passes"],
@@ -219,7 +220,7 @@ describe("structured plan preparation", () => {
     });
   });
 
-  it("rejects an oversized implementation milestone even when another phase exists", async () => {
+  it("permits cohesive phases without a default cap and honors an explicit camp policy", async () => {
     const { root, workingDir, spec } = await fixture();
     const tasks = spec.phases[0]!.sequences[0]!.tasks;
     const [implement, verify] = tasks;
@@ -241,15 +242,15 @@ describe("structured plan preparation", () => {
     finalCheck.title = "Final regression check";
     finalCheck.dependsOn = ["verify"];
     spec.phases.push({
-      id: "phase-validation", name: "Final validation", type: "validation",
+      id: "phase-review", name: "Final review", type: "review",
       objective: "Prove the delivered behavior remains correct",
       deliverables: ["Regression result for the delivered behavior"],
       completionCriteria: ["The regression command succeeds"],
       sequences: [{ id: "sequence-validation", name: "Final checks", tasks: [finalCheck] }],
     });
-    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow(
-      "more than three tasks",
-    );
+    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).resolves.toMatchObject({ counts: { tasks: 5 } });
+    await writeFile(join(root, ".ompfest.json"), JSON.stringify({ planning: { maxAuthoredTasksPerPhase: 3 } }));
+    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("maxAuthoredTasksPerPhase 3");
   });
 
   it.each([
@@ -267,7 +268,7 @@ describe("structured plan preparation", () => {
     ["empty tasks", (s: StructuredPlan) => { s.phases[0]!.sequences[0]!.tasks = []; }, /nonempty array/],
     ["invalid phase type", (s: StructuredPlan) => { Object.assign(s.phases[0]!, { type: "deployment" }); }, /unsupported/],
     ["phase repeats festival goal", (s: StructuredPlan) => { s.phases[0]!.objective = s.goal; }, /must describe this milestone/],
-    ["phase mislabeled as validation", (s: StructuredPlan) => { s.phases[0]!.type = "validation"; }, /contains implementation tasks/],
+    ["removed validation alias", (s: StructuredPlan) => { s.phases[0]!.type = "validation"; }, /use review/],
     ["blocking question", (s: StructuredPlan) => { s.questions.push({ question: "Which API?", blocking: true }); }, /Unresolved blocking/],
     ["invalid question flag", (s: StructuredPlan) => { s.questions.push({ question: "Which API?", blocking: "false" as unknown as boolean }); }, /boolean/],
     ["missing implementation", (s: StructuredPlan) => { s.phases[0]!.sequences[0]!.tasks[0]!.implements = []; }, /no implementation/],
@@ -306,7 +307,7 @@ describe("structured plan preparation", () => {
     const { root, workingDir, spec, verify } = await fixture();
     spec.phases[0]!.sequences[0]!.tasks.pop();
     spec.phases.push({
-      id: "phase-validation", name: "Validate", type: "validation",
+      id: "phase-review", name: "Review", type: "review",
       objective: "Prove the delivered behavior",
       deliverables: ["Regression validation result"],
       completionCriteria: ["The regression command succeeds"],
@@ -323,7 +324,7 @@ describe("structured plan preparation", () => {
     if (kind === "phase") {
       first.sequences[0]!.tasks.pop();
       spec.phases.push({
-        id: "phase-check", name: "Build-feature", type: "validation",
+        id: "phase-check", name: "Build-feature", type: "review",
         objective: "Prove the delivered behavior",
         deliverables: ["Regression validation result"],
         completionCriteria: ["The regression command succeeds"],
@@ -335,6 +336,66 @@ describe("structured plan preparation", () => {
     } else verify.title = "Enable-feature";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("Normalized name collision");
   });
+
+  it.each(["planning", "research", "ingest", "review", "non_coding_action"])("previews native %s without invented sequences or resolved implementation details", async (type) => {
+    const { root, workingDir, spec } = await fixture();
+    spec.acceptance = [];
+    spec.inspection = [];
+    spec.questions = [{ question: "Which implementation approach fits the findings?", blocking: true }];
+    spec.phases = [{ id: "explore", name: "Explore", type, objective: "Establish evidence and make a reviewed decision", deliverables: ["Findings and decision"], completionCriteria: ["A human has reviewed the findings"], sequences: [] }];
+    const prepared = await prepareStructuredPlan(root, workingDir, "feature", spec);
+    expect(prepared.counts).toEqual({ phases: 1, sequences: 0, tasks: 0 });
+    expect(prepared.preview).toContain("progressive planning");
+    expect(prepared.preview).toContain("Blocking before implementation");
+  });
+
+  it("accepts discovered custom native phase templates but not arbitrary phase names", async () => {
+    const { root, workingDir, spec } = await fixture();
+    await mkdir(join(root, "festivals", ".festival", "templates", "phases", "deployment"), { recursive: true });
+    spec.phases[0]!.type = "deployment";
+    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).resolves.toMatchObject({ counts: { tasks: 2 } });
+  });
+
+  it.each(["browser", "manual", "research"] as const)("accepts %s procedures without manufacturing npm commands or result logs", async (kind) => {
+    const { root, workingDir, spec, verify } = await fixture();
+    verify.verification = [{ kind, procedure: "Inspect the real enabled behavior and record observations", expected: "The acceptance behavior is present" }];
+    const prepared = await prepareStructuredPlan(root, workingDir, "feature", spec);
+    expect(prepared.preview).toContain(`${kind}: Inspect the real enabled behavior`);
+    expect(prepared.preview).toContain("Completion evidence: not yet recorded");
+    expect(prepared.preview).not.toContain("npm run test");
+  });
+
+  it("infers command provenance without confusing it with a future result", async () => {
+    const { root, workingDir, spec, check } = await fixture();
+    delete check.provenancePath;
+    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).resolves.toMatchObject({ counts: { tasks: 2 } });
+  });
+
+  it("renders reviewed hybrid workflows with ordering and human checkpoints in the preview", async () => {
+    const { root, workingDir, spec } = await fixture();
+    spec.phases[0]!.mode = "hybrid";
+    spec.phases[0]!.workflow = { position: "before", steps: [{ id: "decision", title: "Review design", goal: "Approve the design before coding", actions: ["Present repository findings"], output: "Reviewed design", checkpoint: true }] };
+    const prepared = await prepareStructuredPlan(root, workingDir, "feature", spec);
+    expect(prepared.preview).toContain("Workflow position: before sequences");
+    expect(prepared.preview).toContain("Checkpoint: human approval required");
+    const changed = structuredClone(spec);
+    changed.phases[0]!.workflow!.position = "after";
+    expect((await prepareStructuredPlan(root, workingDir, "feature", changed)).digest).not.toBe(prepared.digest);
+  });
+
+  it("aggregates actionable repository errors for each task instead of hiding later failures", async () => {
+    const { root, workingDir, spec, implement, verify } = await fixture();
+    implement.files = [{ path: "missing.ts", status: "existing" }];
+    verify.verification = [{ command: "npm run absent", expected: "The suite passes" }];
+    try {
+      await prepareStructuredPlan(root, workingDir, "feature", spec);
+      throw new Error("Expected aggregate planning validation to fail");
+    } catch (error) {
+      if (!(error instanceof PlanningValidationError)) throw error;
+      expect(error.diagnostics).toContainEqual(expect.objectContaining({ field: "task.implement.files[0]", code: "PATH_NOT_FOUND" }));
+      expect(error.diagnostics).toContainEqual(expect.objectContaining({ field: "task.verify.verification[0]", code: "INVALID_VERIFICATION" }));
+    }
+  });
 });
 
 describe("project and command evidence boundaries", () => {
@@ -342,7 +403,7 @@ describe("project and command evidence boundaries", () => {
     const { root, workingDir, spec, implement, check } = await fixture();
     if (field === "inspection") spec.inspection[0]!.path = "../outside";
     else if (field === "existing") implement.files[0]!.path = "../outside";
-    else if (field === "evidence") check.evidencePath = "../outside";
+    else if (field === "evidence") check.provenancePath = "../outside";
     else if (field === "cwd") check.cwd = "../outside";
     else implement.files[1]!.path = "../outside";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("within project");
@@ -377,7 +438,7 @@ describe("project and command evidence boundaries", () => {
     const { root, workingDir, spec, implement, check } = await fixture();
     if (field === "inspection") spec.inspection[0]!.path = "missing";
     else if (field === "existing") implement.files[0]!.path = "missing";
-    else if (field === "evidence") check.evidencePath = "missing";
+    else if (field === "evidence") check.provenancePath = "missing";
     else check.cwd = "missing";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("does not exist");
   });
@@ -401,7 +462,7 @@ describe("project and command evidence boundaries", () => {
       const verification = clone.phases[0]!.sequences[0]!.tasks[1]!.verification[0]!;
       if (field === "inspection") clone.inspection[0]!.path = "escape/file.ts";
       else if (field === "existing") task.files[0]!.path = "escape/file.ts";
-      else if (field === "evidence") verification.evidencePath = "escape/file.ts";
+      else if (field === "evidence") verification.provenancePath = "escape/file.ts";
       else if (field === "cwd") verification.cwd = "escape";
       else task.files[1]!.path = "escape/new/deep/file.ts";
       await expect(prepareStructuredPlan(root, workingDir, "feature", clone)).rejects.toThrow("outside project");
@@ -439,7 +500,7 @@ describe("project and command evidence boundaries", () => {
     await writeFile(join(project, "nested", "package.json"), JSON.stringify({ scripts: { test: "never-run" } }));
     check.cwd = "nested";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("cwd/package.json");
-    check.evidencePath = "nested/package.json";
+    check.provenancePath = "nested/package.json";
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).counts.tasks).toBe(2);
   });
 
@@ -448,7 +509,7 @@ describe("project and command evidence boundaries", () => {
     check.expected = " ";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("expected must be nonempty");
     check.expected = "Tests exit zero";
-    check.evidencePath = "future-test-results.log";
+    check.provenancePath = "future-test-results.log";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("does not exist");
   });
 
@@ -457,7 +518,7 @@ describe("project and command evidence boundaries", () => {
     await mkdir(join(project, "scripts"));
     await writeFile(join(project, "scripts", "verify.mjs"), "throw new Error('Do not execute during planning');\n");
     check.command = "node scripts/verify.mjs";
-    check.evidencePath = "scripts/verify.mjs";
+    check.provenancePath = "scripts/verify.mjs";
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain("node scripts/verify.mjs");
     check.command = "invented-tool test";
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("not substantiated");
@@ -469,7 +530,7 @@ describe("project and command evidence boundaries", () => {
     await writeFile(join(project, file), "const search = true;\n");
     Object.assign(check, {
       command: `node --check ${file}`,
-      evidencePath: file,
+      provenancePath: file,
     });
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain(`node --check ${file}`);
   });
@@ -479,20 +540,20 @@ describe("project and command evidence boundaries", () => {
     ["cargo test", "Cargo.toml", '[package]\nname = "app"\n'],
     ["make check", "Makefile", "check:\n\tfalse\n"],
     ["pytest tests", "COMMANDS.txt", "pytest tests\n"],
-  ])("substantiates non-package command %s without executing", async (command, evidencePath, content) => {
+  ])("substantiates non-package command %s without executing", async (command, provenancePath, content) => {
     const { root, project, workingDir, spec, check } = await fixture();
-    await writeFile(join(project, evidencePath), content);
-    Object.assign(check, { command, evidencePath });
+    await writeFile(join(project, provenancePath), content);
+    Object.assign(check, { command, provenancePath });
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain(command);
   });
   it("accepts an existing test directory named by a direct test-runner command", async () => {
     const { root, project, workingDir, spec, check } = await fixture();
     await mkdir(join(project, "tests"), { recursive: true });
     await writeFile(join(project, "tests", "test_feature.py"), "def test_feature(): pass\n");
-    Object.assign(check, { command: "pytest tests", evidencePath: "tests" });
+    Object.assign(check, { command: "pytest tests", provenancePath: "tests" });
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain("pytest tests");
     await writeFile(join(project, "tests", "lint.php"), "<?php echo 'not executed';\n");
-    Object.assign(check, { command: "php -l tests/lint.php", evidencePath: "tests" });
+    Object.assign(check, { command: "php -l tests/lint.php", provenancePath: "tests" });
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain("php -l tests/lint.php");
   });
 });
@@ -508,13 +569,13 @@ describe("structuredPlanSchema", () => {
     const schema = structuredPlanSchema(z) as Shape;
     expect(Object.keys(schema.fields!)).toEqual(["goal", "scope", "exclusions", "acceptance", "questions", "inspection", "phases"]);
     const phase = (schema.fields!.phases as Shape).item as Shape;
-    expect((phase.fields!.type as Shape).values).toEqual(["implementation", "planning", "research", "validation"]);
-    expect(Object.keys(phase.fields!)).toEqual(["id", "name", "type", "objective", "deliverables", "completionCriteria", "sequences"]);
+    expect((phase.fields!.type as Shape).kind).toBe("string");
+    expect(Object.keys(phase.fields!)).toEqual(["id", "name", "type", "mode", "workflow", "objective", "deliverables", "completionCriteria", "sequences"]);
     const sequence = (phase.fields!.sequences as Shape).item as Shape;
     const task = (sequence.fields!.tasks as Shape).item as Shape;
     expect(Object.keys(task.fields!)).toEqual(["id", "title", "description", "priority", "dependsOn", "implements", "verifies", "files", "verification"]);
     expect(((task.fields!.priority as Shape).values)).toEqual(["urgent", "high", "normal", "low"]);
     const verification = (task.fields!.verification as Shape).item as Shape;
-    expect(Object.keys(verification.fields!)).toEqual(["command", "cwd", "evidencePath", "expected"]);
+    expect(Object.keys(verification.fields!)).toEqual(["kind", "id", "command", "cwd", "provenancePath", "procedure", "expected"]);
   });
 });

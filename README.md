@@ -20,7 +20,12 @@ omp plugin install github:mohammadraufzahed/omp-fest
 that's it — omp handles the rest. want it only in one project?
 `omp plugin install --scope project github:mohammadraufzahed/omp-fest`
 
-needs the fest toolchain too (`npm i -g @obedience-corp/festival`) 🔥
+Requires `fest >= 0.9.8` and `camp >= 0.16.2`. These are the inspected baselines;
+startup and `/fest doctor` probe the required version/help surfaces. Install or
+upgrade through your existing package manager; npm is one option on Linux/macOS,
+not a reason to create a second installation. See the [official installation guide](https://docs.fest.build/getting-started/installation/).
+Use `festival doctor` / `festival which` for suite installation ownership and PATH
+diagnostics; `/fest doctor` diagnoses this omp integration. Restart omp after an update.
 
 <details>
 <summary>hacking on it? install a local checkout instead</summary>
@@ -250,12 +255,62 @@ changes and stops before commit; a push failure preserves the local commit for
 recovery. Monorepos must use root release scripts, not release from a nested
 package. No unattended release is authorized by a plan.
 
+### Native integration tools
+
+Festival owns task state, dependency eligibility, workflows, gates and lifecycle.
+`fest_next` consumes native machine output (with native text gate/refusal routes
+handled explicitly); CLI failures are never reported as approval or idle success.
+`fest_supervisor` starts with `fest deps --ready --all --json`, checks native chain
+eligibility, then applies phase/gate, ownership, worker-claim, capacity and file-conflict
+filters. The native ready set does not itself evaluate every gate.
+
+| Tool | Native capability and decision boundary |
+| --- | --- |
+| `camp_workitem`, `camp_intent` | Lightweight capture, design/workflow workitems, project links and explicit promotion. Small understood changes need not become festivals. |
+| `camp_quest` | Long-lived initiative context, checklist items and workitem links. Reports context without claiming to change the user's terminal. |
+| `camp_triage` | Start/status/queue/template/evidence/propose/review/approve/apply/verify. Proposals are advisory; approval and apply each require a human confirmation against unchanged native state. |
+| `camp_workflow` | Native workflow collections and settings discovery, separate from `.ompfest.json` plugin configuration. |
+| `fest_workflow_native` | Standalone and festival workflow create/init/start/runs/next/status/show/advance. Standalone directories are contained and cannot bypass festival ownership. |
+| `fest_ritual` | Confirmed conversion of a festival into a reusable ritual and creation of new active runs. New copies remain unclaimed. |
+| `fest_authoring` | Native types/config discovery, template create/apply/list and marker scaffold/validate/discovery/batch fill. Unknown templates/markers remain errors, never invented values. |
+| `fest_chain` | Native inter-festival DAG create/add/check/status/validate/list/complete; changes require owning/main authority and a human decision. |
+| `fest_research`, `fest_feedback` | Native research documents, bidirectional links and summaries; criteria-based nonblocking observations and exports. |
+| `fest_replay` | Inspect real replay artifacts, generate GIF/MP4 or embed native replay. A replay is history visualization, not verification proof. |
+| `fest_judge` | Inspect configured hooks/verdicts; explicitly opted-in, human-confirmed re-run of an existing native judge, or rejection linked to a remediation phase. Never silently enables a judge or impersonates a human. |
+| `fest_handoff` | Immutable portable record of decisions/rejected options, changed files, checks, failures, blockers and next action. Referenced evidence must really exist. |
+| `fest_verification` | Requirements/status and actual command/browser/manual/research results, bound to check definitions and approved-source revisions. |
+
+Raw passthrough classifies complete commands and flags. Read access to a command
+group does not grant mutation access to its subcommands. Planning/approval/indirect
+execution escapes route to typed tools or are blocked; destructive/operator decisions
+require human confirmation. This is a host authority boundary, not an OS sandbox.
+
+Activation creates worktrees only for approved project scope, validates existing
+worktree identities, and binds sequence execution to those worktrees. File-write
+locks remain short-lived for workers sharing a checkout; distinct worktrees do not
+share project-file locks. Task claims prevent duplicate assignment separately.
+Integration checks the recorded base branch, repository identity and clean state;
+failed removals/integration remain pending. Unsafe resets are not used to hide failure.
+Squash branches are retained when Git cannot prove safe deletion.
+
+Terminal festivals follow native `festivals/dungeon/{completed,archived,someday}/`
+date-bucket layout. Reset/block/unblock events replay in order, so an earlier completed
+event cannot keep a reset task done. Completed phases/sequences remain discoverable.
+
+Version 1.5.0 changes planning `evidencePath` to `provenancePath` and phase type
+`validation` to native `review`. Revise old drafts explicitly and obtain a new approval;
+the plugin does not silently rewrite approved contracts. See the official
+[phase model](https://docs.fest.build/methodology/phases/),
+[orchestration guide](https://docs.fest.build/guides/loops-and-orchestration/) and
+[workflow/gate model](https://docs.fest.build/methodology/workflows-and-gates/).
+
 ### Persisted planning
 
 `fest_plan` owns private `.draft.json` artifacts with `draftId` and `revision`.
 Use `action:"create"`, then `read`/`update`/`list` on the same tool; stale
-revisions reject concurrent overwrites. Missing runnable verification is an
-explicit missing field, not invented test proof. `/fest draft` provides native
+revisions reject concurrent overwrites. Create/update/read returns task-specific
+repository `diagnostics` as well as missing decisions; repair these before preview.
+Missing verification remains explicit, never invented test proof. `/fest draft` provides
 field editing and preview. Call `fest_plan` with `action:"preview"`, `draftId`
 and `draftRevision` to consume persisted content without resending a nested spec.
 
@@ -266,7 +321,7 @@ Path preparation is stage-specific:
    are registered. An external checkout is valid only through a `projects/<link>`
    entry. Save the resolved camp-relative path in the draft.
 2. **Preview and approval:** resolve `plan` and `referencesDir` from the camp root.
-   Resolve inspection, task-file, verification `cwd`, and evidence paths from the
+   Resolve inspection, task-file, verification `cwd`, and command provenance paths from the
    selected project. Show the resolved project in the preview; do not approve a
    proposal whose paths were not validated against that project.
 3. **Scaffold:** reuse the approved revision and its canonical paths; do not derive
@@ -275,9 +330,11 @@ Path preparation is stage-specific:
 
 
 Scaffolding renders festival/overview/phase/sequence/task documents from the
-approved contract, retains independent user notes and constraints, and removes
-obsolete template sections instead of substituting fake placeholder values.
-Working directories are canonical camp-relative paths, and hierarchy underscores remain literal.
+approved contract while preserving native template sections, user notes and camp
+constraints. Camp-specific marker hints require reviewed `templateMarkers` entries
+`[{hint,value}]`; unknown hints fail without discarding the template. Native default
+workflow definitions are snapshotted in the approval revision. Working directories
+are canonical camp-relative paths, and hierarchy underscores remain literal.
 Relative plan, `workingDir`, and `referencesDir` inputs resolve from the camp root,
 never the process working directory. Festival creation accepts the approved slug
 or its generated Festival ID (for example `<name>-SC0001`) as a direct child of
@@ -295,16 +352,17 @@ The agent records inspected paths and asks only about material choices that the
 request and repository cannot answer. It does not ask you to restate known facts,
 invent a questionnaire, or require you to design the phase hierarchy.
 
-The plan is milestone-based: every phase has its own objective, deliverables and
-observable completion criteria; a phase objective cannot simply repeat the
-festival goal. Each implementation phase is limited to three tasks. Larger
-development effort must be split into independently reviewable implementation
-milestones, even when validation or other phases are present. Sequences represent
-genuinely distinct work lanes inside one milestone; do not disguise implementation
-work as research or validation. Human review of the persisted preview remains the
-semantic check that milestone boundaries are meaningful.
-Parallel lanes are optional and must be genuinely independent. Screenshots add the
-visual extraction flow below; text-only plans do not need image artifacts.
+The plan is milestone-based: each phase has its own objective, deliverables and
+observable completion criteria. Structure follows the work, not a fixed task count.
+An optional `.ompfest.json` policy `planning.maxAuthoredTasksPerPhase` can impose a
+local authored-task cap; native quality-gate tasks are appended separately.
+Planning, research and ingest can use native workflows; review and non-coding action
+can be freeform; hybrid phases combine workflows and numbered sequences. Custom
+phase types must exist in the native methodology templates. Discovery-only plans
+may retain unresolved questions; implementation plans require settled requirements,
+acceptance coverage and observable verification. Discovery approval does not authorize
+implementation. Small work belongs in intents/workitems, uncertain architecture in a
+design, and repeatable linear procedures in standalone workflows—not an artificial festival.
 
 The `StructuredPlan` contract is:
 
@@ -313,34 +371,34 @@ The `StructuredPlan` contract is:
 | `goal` | The intended outcome. |
 | `scope[]`, `exclusions[]` | Included work and explicit boundaries; preserve the human's constraints. |
 | `acceptance[]` | `{id, description}` with observable behavior/output, not vague quality claims. |
-| `questions[]` | `{question, blocking}`; resolve blocking questions before preview. |
-| `inspection[]` | `{path, reason}` recording existing project-relative paths actually inspected. |
-| `phases[]` | `{id, name, type, objective, deliverables[], completionCriteria[], sequences}` for explicit, reviewable milestones. Implementation phases contain implementation tasks only and at most three tasks; validation phases contain verification work. |
+| `questions[]` | `{question, blocking}`; discovery workflows may retain open questions, implementation must resolve blockers. |
+| `inspection[]` | `{path, reason}` recording existing project-relative paths actually inspected; required for implementation. |
+| `phases[]` | `{id,name,type,mode?,objective,deliverables[],completionCriteria[],sequences?,workflow?}`. Native types: implementation, planning, research, ingest, review, non_coding_action, or discovered custom templates. |
 | `sequences[]` | `{id, name, tasks}` for coherent work lanes within a phase. |
 | `tasks[]` | `{id, title, description, dependsOn, implements, verifies, files, verification, priority?}`. |
 | Task `dependsOn[]` | IDs of earlier tasks in phase/sequence/task order; no missing, forward or cyclic dependencies. |
 | Task `priority?` | `urgent`, `high`, `normal` or `low`; defaults to `normal`. Use only when the request gives priority evidence. It orders eligible work within a festival; dependencies still gate dispatch. |
 | Task `implements[]`, `verifies[]` | Acceptance IDs covered by implementation and verification respectively. |
 | Task `files[]` | `{path, status: "existing" \| "proposed"}`; existing files must be confirmed, proposed files must not already exist. |
-| Task `verification[]` | `{command, cwd, evidencePath?, expected}` specifying a runnable check, existing command evidence and observable expected result. |
+| Task `verification[]` | `{id?,kind?,command?,cwd?,provenancePath?,procedure?,expected}`; kinds are command (default), browser, manual, research. |
+| Phase `workflow` | `{position:"before"\|"after",steps:[{id,title,goal,actions[],output,checkpoint?}]}`; executed by native Festival. |
+| Phase `mode` | `workflow`, `freeform`, or `hybrid`; omitted implementation phases use numbered sequences. |
 
-IDs are unique across acceptance criteria, phases, sequences and tasks. Every
-acceptance criterion needs both implementation and verification coverage; a task
-may provide both. Verification tasks need concrete verification entries. Paths are
-project-relative; verification `cwd` may be `"."`. An omitted `evidencePath` is
-inferred from an npm/pnpm/yarn/bun package manifest or an explicit command target
-such as `php -l path/to/check.php` or `pytest tests`. A supplied evidence path must
-exist and substantiate the command: package scripts require `cwd/package.json`;
-pytest/phpunit may name an existing test directory targeted by the command; direct
-script commands may use the script file or its containing directory. A generic
-directory does not substantiate a package script. Evidence is not a future result
-log or proof that verification passed. Package-script commands must refer to scripts
-declared in the package at that cwd. Actual result evidence is captured during
-execution, not invented during planning. The contract needs nonempty
-scope, inspection, acceptance and executable hierarchy; empty exclusions/questions
-are valid. Phase names are normalized to parser-safe uppercase tokens, and naming
-collisions are rejected. Sequence names must not end in `_planning`, `_research`,
-`_requirements` or `_docs`, which the CLI excludes from quality gates.
+Identifiers are unique across the approved contract. Implementation acceptance needs
+implementation and verification coverage; discovery need not fabricate code tasks.
+Command `provenancePath` replaces the old planning `evidencePath`: it identifies an
+existing manifest/script/target supporting the command, never a future result log.
+Package scripts require a declared script at the stated project-relative `cwd`.
+Browser/manual/research checks use concrete procedures and expected observations,
+not an invented shell command. Phase names are parser-safe; gate-excluded sequence
+suffixes `_planning`, `_research`, `_requirements`, `_docs` remain rejected.
+
+During execution, store full observed output with `fest_evidence`, then record each
+approved task/check with `fest_verification`. Verified commands need the exact
+command/cwd, tool, observed exitCode 0 and existing evidence bundle; browser results
+also need route, viewport and state. Failed/untested/stale results do not satisfy
+completion. Definition and source revisions invalidate old results when relevant
+approved sources change. Planned provenance never counts as a passed check.
 
 Generate the plan through the tool, rather than writing parser-sensitive Markdown:
 
@@ -401,7 +459,7 @@ target project's component and style sources, then extracts the visible layout i
 structured source-pixel coordinates before generating artifacts. It calls the model-callable
 `fest_wireframe_create` tool with that typed extraction; it does not hand-assemble SVG.
 The tool uses SVG.js with svgdom for headless Node generation and writes exactly
-`wireframe.svg` and `PAGE.md` under the requested project-relative output directory.
+`wireframe.svg` and `PAGE.md` under the requested camp-root-relative output directory.
 
 The input contract carries source/display dimensions, direction, every visible node,
 source-pixel geometry, parent hierarchy, open-ended semantic kinds and page-defined

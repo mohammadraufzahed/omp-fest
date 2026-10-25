@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildPortfolioQueue, DEFAULT_PORTFOLIO_WORKERS, PORTFOLIO_MAX_WORKERS, type PortfolioCandidate, type PortfolioFestivalQueue } from "../src/application/portfolio-queue.js";
 
-const candidate = (festival: string, task: string): PortfolioCandidate => ({ festival, task, sequence: "s", files: [], dependencies: [], workingDir: `/work/${festival}` });
+const candidate = (festival: string, task: string): PortfolioCandidate => ({ festival, task, sequence: "s", files: [`src/${task}.ts`], dependencies: [], workingDir: `/work/${festival}` });
 const festival = (id: string, tasks: string[], waiting: PortfolioFestivalQueue["waiting"] = []): PortfolioFestivalQueue => ({ festival: id, candidates: tasks.map((task) => candidate(id, task)), waiting });
 
 describe("portfolio queue", () => {
@@ -32,14 +32,14 @@ describe("portfolio queue", () => {
     for (const workerLimit of [0, -1, 21, 1.5, Number.NaN]) expect(() => buildPortfolioQueue({ festivals: [], assignments: [], paused: false, workerLimit })).toThrow(RangeError);
   });
   it("counts every nonterminal assignment as active and treats failed or accepted as inactive", () => {
-    const result = buildPortfolioQueue({ festivals: [festival("a", ["active", "submitted", "free"])], assignments: [
+    const result = buildPortfolioQueue({ festivals: [festival("a", ["active", "submitted", "accepted", "free"])], assignments: [
       { festival: "a", task: "active", status: "running" }, { festival: "a", task: "submitted", status: "submitted" },
       { festival: "a", task: "accepted", status: "accepted" }, { festival: "a", task: "failed", status: "failed" },
     ], paused: false, workerLimit: 5 });
     expect(result.activeWorkers).toBe(2);
     expect(result.availableSlots).toBe(3);
     expect(result.candidates.map((c) => c.task)).toEqual(["free"]);
-    expect(result.waiting.map((w) => w.task)).toEqual(["active", "submitted"]);
+    expect(result.waiting.map((w) => w.task)).toEqual(["active", "submitted", "accepted"]);
   });
   it("pauses dispatch while preserving active counts and replacing waiting reasons", () => {
     const result = buildPortfolioQueue({ festivals: [festival("a", ["next"], [{ task: "old", reason: "old reason" }])], assignments: [{ festival: "b", task: "running", status: "blocked" }], paused: true });
@@ -87,5 +87,16 @@ describe("portfolio queue", () => {
     });
     expect(rotated.candidates.map((row) => `${row.festival}:${row.task}`)).toEqual(["b:second"]);
     expect(rotated.waiting[0]?.reason).toContain("overlaps b/second");
+    a.files = [];
+    expect(buildPortfolioQueue({ festivals: [{ festival: "a", candidates: [a], waiting: [] }, { festival: "b", candidates: [b], waiting: [] }], assignments: [], paused: false }).candidates).toEqual([a]);
+  });
+  it("does not let a capacity-excluded candidate suppress another festival's usable slot", () => {
+    const a = festival("a", ["first", "later"]), b = festival("b", ["ready"]);
+    a.candidates[1]!.workingDir = b.candidates[0]!.workingDir = "/shared";
+    a.candidates[1]!.files = ["src/shared.ts"];
+    b.candidates[0]!.files = ["src/shared.ts"];
+    const result = buildPortfolioQueue({ festivals: [a, b], assignments: [], paused: false, workerLimit: 2 });
+    expect(result.candidates.map((row) => `${row.festival}:${row.task}`)).toEqual(["a:first", "b:ready"]);
+    expect(result.waiting).toContainEqual({ festival: "a", task: "later", reason: "Portfolio worker limit reached." });
   });
 });

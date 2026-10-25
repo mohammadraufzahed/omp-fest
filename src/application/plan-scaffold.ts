@@ -1,5 +1,8 @@
-import { lstat, readFile, readdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readFile, readdir, writeFile, mkdir } from "node:fs/promises";
+import { join, relative } from "node:path";
+import { homedir } from "node:os";
+import type { FestCli } from "../ports.js";
+import { applyNativeDependencies } from "./native-dependencies.js";
 import type { PlanArtifact } from "./plan-artifacts.js";
 import { campRelativeWorkingDir } from "./sequence-goals.js";
 import { renderTaskContract, structuredHierarchyName, structuredPhaseName, type StructuredPlan } from "./structured-plan.js";
@@ -7,6 +10,20 @@ import { renderTaskContract, structuredHierarchyName, structuredPhaseName, type 
 const START = "<!-- omp-fest:approved-contract:start -->";
 const END = "<!-- omp-fest:approved-contract:end -->";
 const MARKER = /\[(?:FILL|REPLACE):/;
+const NATIVE_CONTRACT_HINTS = [
+  "obsolete template instructions", "describe the objective", "What this implementation phase must deliver", "How this phase builds on planning and enables later phases",
+  "Specific deliverable with acceptance criteria", "Quality standard that applies to all sequences", "Brief goal", "Main output", "Technical constraints, assumptions, or integration notes",
+  "One clear sentence stating what this sequence must accomplish", "How achieving this sequence goal directly supports the phase goal", "after creating tasks",
+  "What we need from it", "What this sequence produces", "One sentence describing what this task accomplishes", "Requirement 1", "Requirement 2",
+  "How to implement - steps, code locations, patterns to follow, actual code for each location, assume this document will be followed like a tutorial", "Specific verification criterion",
+  "One sentence describing what this festival accomplishes", "2-3 sentences describing the desired end state", "Specific functional outcome", "Quality standard with metric", "Brief description", "Additional completion criterion",
+  "What exists today and what problems it creates", "What we want to achieve", "Impact of solving this problem", "What's included in this festival", "What's explicitly NOT included", "Brief description of what this phase accomplishes", "Any additional context, assumptions, or open questions",
+  "What this review phase validates or approves", "What was built and why this review is critical", "Deliverable or feature being reviewed", "Specific criterion that must be satisfied", "Gate description and pass criteria", "Review scope limitations, exceptions, or follow-up items",
+  "What this planning phase needs to figure out or decide", "Why this planning is needed before implementation can begin", "Topic or area to investigate", "Critical question that needs resolution", "Key planning outcome achieved", "Any assumptions, constraints, or open items",
+  "What question or problem this research aims to answer", "Why this research is needed and how findings will be used", "Specific question to investigate", "Source type and how to access it", "Type of finding or analysis expected", "Research outcome achieved", "Methodology notes, constraints, or related research",
+  "What this ingest phase will transform and why", "Where the input came from and how the structured output will be used", "Input source 1 - e.g., user requirements document", "Input source 2 - e.g., reference materials", "Additional sources as needed",
+  "What non-coding outcome this phase must achieve", "Why this action phase is needed and what it enables", "Action item to complete", "Prerequisite condition", "Verification step for action item", "Key outcome achieved", "Any dependencies, constraints, or special instructions",
+];
 const block = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
 
 function display(text: string): string {
@@ -30,20 +47,29 @@ async function existing(path: string): Promise<string | undefined> {
   return readFile(path, "utf8");
 }
 
-function retainedBody(body: string): string {
+function retainedBody(body: string, approved: string, name: string, markers: Record<string, string>): string {
   const start = body.indexOf(START);
   if (start !== -1) {
     const end = body.indexOf(END, start);
     if (end === -1) throw new Error("Incomplete generated approved-contract block");
-    return (body.slice(0, start) + body.slice(end + END.length)).trim();
+    body = body.slice(0, start) + body.slice(end + END.length);
   }
-  if (!MARKER.test(body)) return body.trim();
-  // Discard obsolete template sections as units. Never replace placeholders with guessed prose.
-  // Marker-free sections are user-owned and survive the scaffold cutover.
-  return body.split(/\n(?=#{1,6} )/).filter((section) => !MARKER.test(section)).join("\n").trim();
+  // Fill known native template roles from reviewed data; preserve every surrounding section.
+  // Camp-specific hints are never guessed or discarded: they require an approved explicit mapping.
+  return body.replace(/\[(?:FILL|REPLACE):\s*([^\]]+)\]/g, (_match, hint: string) => {
+    const explicit = markers[hint];
+    if (Object.hasOwn(markers, hint) && explicit !== undefined) return explicit;
+    if (hint === "...") return "template marker syntax";
+    if (hint === "high|medium|low") return "medium";
+    if (/^(?:Planning\/Active\/(?:Review\/)?Complete|Not Started\/In Progress\/Completed\/Blocked)$/i.test(hint)) return "Pending";
+    if (/^(?:PHASE_ID|FESTIVAL_ID|SEQUENCE_ID|TASK_ID|N|Phase ID|Phase Name|Phase name|Festival Name|Sequence Name|Task Name|Name|First phase name|First sequence name|01_sequence_name|NN_sequence_name|NNN_PHASE_NAME|Sequence [XZ]|Phase name like \d+_[A-Z]+)$/i.test(hint)) return name;
+    if (/^(?:Role)$/i.test(hint)) return "Human reviewer";
+    if (NATIVE_CONTRACT_HINTS.includes(hint) || /^(?:Deliverable [123] (?:name|description)|Quality (?:standard|target) [12])$/.test(hint) || hint === "Document name and purpose") return approved;
+    throw new Error(`Unfilled template marker [REPLACE: ${hint}] in ${name}; provide templateMarkers[${JSON.stringify(hint)}] in the reviewed plan. The camp template is preserved.`);
+  }).trim();
 }
 
-function document(content: string | undefined, type: string, name: string, body: string, workingDir?: string): string {
+function document(content: string | undefined, type: string, name: string, body: string, workingDir?: string, markers: Record<string, string> = {}): string {
   const match = content ? block.exec(content) : undefined;
   if (content !== undefined && !match && type !== "festival") throw new Error(`Scaffold ${name} is missing required frontmatter`);
   let frontmatter = match?.[1] ?? `fest_type: ${type}\nfest_id: ${JSON.stringify(name)}\nfest_name: ${JSON.stringify(name)}\nfest_status: pending`;
@@ -53,7 +79,8 @@ function document(content: string | undefined, type: string, name: string, body:
       ? frontmatter.replace(/^fest_working_dir:.*$/m, line)
       : `${frontmatter}\n${line}`;
   }
-  const retained = retainedBody(content?.slice(match?.[0].length ?? 0) ?? "");
+  const approved = body.split("\n").filter((line) => line.trim() && !line.startsWith("#") && !/^(?:Task ID|Priority|Dependencies):/.test(line)).join("; ");
+  const retained = retainedBody(content?.slice(match?.[0].length ?? 0) ?? "", approved, name, { ...markers, ...(workingDir ? { "relative/path/to/project": workingDir } : {}) });
   const result = `---\n${frontmatter}\n---\n\n${START}\n${body.trim()}\n${END}\n${retained ? `\n${retained}\n` : ""}`;
   if (MARKER.test(result)) throw new Error(`Scaffold ${name} contains unresolved markers outside the replaceable template body`);
   return result;
@@ -75,7 +102,7 @@ function contractOverview(artifact: PlanArtifact): string {
     `# Festival Goal: ${display(artifact.name)}`, "", "## Objective", display(spec.goal),
     "", "## Scope", ...bullets(spec.scope), "", "## Exclusions", ...bullets(spec.exclusions),
     "", "## Success Criteria", ...acceptance(spec), "", "## Constraints & Rules", artifact.rules.trim() || "No additional constraints were supplied in the approved plan.",
-    "", "## Open Questions", ...bullets(spec.questions.map((item) => `Nonblocking: ${item.question}`)),
+    "", "## Open Questions", ...bullets(spec.questions.map((item) => `${item.blocking ? "Blocking before implementation" : "Nonblocking"}: ${item.question}`)),
   ].join("\n");
 }
 
@@ -91,10 +118,12 @@ export async function finalizeApprovedScaffold(root: string, festival: string, a
   const phases = await numbered(festival, "directory");
   if (phases.length !== artifact.spec.phases.length) throw new Error("Scaffold phase tree differs from approved plan");
   const writes: { path: string; content: string }[] = [];
+  const taskPaths = new Map<string, string>();
+  const dependencyWrites: { path: string; taskId: string; dependencies: string[] }[] = [];
   const queue = async (path: string, type: string, name: string, body: string, expected?: string, cwd?: string) => {
     const current = await existing(path);
     if (expected !== undefined && (!current || nameOf(current) !== expected)) throw new Error(`Scaffold name differs from approved plan: ${path}`);
-    writes.push({ path, content: document(current, type, name, body, cwd) });
+    writes.push({ path, content: document(current, type, name, body, cwd, artifact.templateMarkers) });
   };
   await queue(join(festival, "FESTIVAL_GOAL.md"), "festival", artifact.name, contractOverview(artifact));
   await queue(join(festival, "FESTIVAL_OVERVIEW.md"), "festival", artifact.name, [
@@ -131,7 +160,7 @@ export async function finalizeApprovedScaffold(root: string, festival: string, a
         "", `Approved sequence: ${display(sequence.id)}.`, "", "## Scope",
         ...sequence.tasks.map((task) => `- ${display(task.id)}: ${display(task.description)}`),
         "", "## Success Criteria", ...acceptance(artifact.spec, new Set(sequence.tasks.flatMap((task) => [...task.implements, ...task.verifies]))),
-        "", "## Tasks", ...sequence.tasks.map((task) => `- ${display(task.id)}: ${display(task.title)}; dependencies: ${task.dependsOn.map(display).join(", ") || "none"}`),
+        "", "## Tasks", ...sequence.tasks.map((task) => `- ${display(task.id)}: ${display(task.title)}; prerequisites: ${task.dependsOn.map(display).join(", ") || "none"}`),
       ].join("\n"), structuredHierarchyName(sequence.name), workingDir);
       const tasks = await numbered(sequenceDir, "file");
       if (tasks.length !== sequence.tasks.length) throw new Error(`Scaffold tasks differ for ${sequence.id}`);
@@ -143,12 +172,69 @@ export async function finalizeApprovedScaffold(root: string, festival: string, a
           `# Task: ${display(task.title)}`, "", ...pages.map((page) => `Visual reference: references/pages/${page}/PAGE.md`),
           "", "## Approved Plan Contract", renderTaskContract(artifact.spec, task).trim(),
         ].join("\n"), structuredHierarchyName(task.title));
+        const taskPath = join(sequenceDir, entry.name);
+        taskPaths.set(task.id, relative(festival, taskPath));
+        dependencyWrites.push({ path: taskPath, taskId: task.id, dependencies: task.dependsOn });
       }
     }
+  }
+  for (const item of dependencyWrites) {
+    const queued = writes.find((write) => write.path === item.path);
+    if (!queued) throw new Error(`Missing queued task ${item.taskId}`);
+    const taskPath = taskPaths.get(item.taskId);
+    if (!taskPath) throw new Error(`Missing native task path for ${item.taskId}`);
+    queued.content = applyNativeDependencies(queued.content, taskPath, item.dependencies, taskPaths);
   }
   const approvedPath = join(festival, "APPROVED_PLAN.json");
   await existing(approvedPath);
   writes.push({ path: approvedPath, content: JSON.stringify({ ...artifact, workingDir }, null, 2) + "\n" });
   for (const item of writes) await writeFile(item.path, item.content);
   return { files: writes.map((item) => item.path), workingDir };
+}
+
+/** Add real native workflow files after from-plan (which only renders goal/task hierarchy). */
+export async function materializePlanWorkflows(_root: string, festival: string, artifact: PlanArtifact, fest: Pick<FestCli, "raw">): Promise<string[]> {
+  const phases = await numbered(festival, "directory");
+  const created: string[] = [];
+  for (const [index, phase] of artifact.spec.phases.entries()) {
+    const entry = phases[index];
+    if (!entry) throw new Error(`Missing scaffold phase ${phase.id}`);
+    const phaseDir = join(festival, entry.name);
+    if (phase.workflow) {
+      const definition = { title: phase.name, description: phase.objective, steps: phase.workflow.steps.map((step) => ({ name: step.title, goal: step.goal, actions: step.actions, output: step.output, checkpoint: step.checkpoint ? "approval_required" : "none" })) };
+      const result = await fest.raw(phaseDir, ["workflow", "create", structuredPhaseName(phase.name), "--position", phase.workflow.position, "--steps", JSON.stringify(definition), "--agent"]);
+      if (result.code !== 0) throw new Error(`Native workflow creation failed for ${phase.id}: ${result.stderr || result.stdout}`);
+      const payload: unknown = JSON.parse(result.stdout);
+      if (!payload || typeof payload !== "object" || !("ok" in payload) || payload.ok !== true) throw new Error(`Native workflow creation rejected ${phase.id}: ${result.stdout}`);
+      created.push(join(phaseDir, "WORKFLOW.md"));
+    } else if (phase.mode !== "freeform" && ["planning", "research", "ingest"].includes(phase.type)) {
+      const content = artifact.nativeWorkflowTemplates?.[phase.id];
+      if (!content) throw new Error(`Approved native workflow snapshot missing for ${phase.id}; preview again before scaffolding`);
+      const path = join(phaseDir, "WORKFLOW.md");
+      const current = await existing(path);
+      if (current && current !== content) throw new Error(`Refusing to overwrite existing native workflow: ${path}`);
+      await writeFile(path, content);
+      created.push(path);
+      for (const directory of phase.type === "planning" ? ["inputs", "decisions", "plan"] : phase.type === "research" ? ["sources", "findings"] : ["input_specs", "output_specs"]) await mkdir(join(phaseDir, directory), { recursive: true });
+    }
+  }
+  return created;
+}
+
+/** Freeze native defaults during preview so a later template edit cannot change approved execution. */
+export async function captureNativeWorkflowTemplates(root: string, spec: StructuredPlan): Promise<Record<string, string>> {
+  const snapshots: Record<string, string> = {};
+  for (const phase of spec.phases) {
+    if (phase.workflow || phase.mode === "freeform" || !["planning", "research", "ingest"].includes(phase.type)) continue;
+    let template: string | undefined;
+    for (const base of [join(root, "festivals", ".festival", "templates", "phases"), join(root, ".festival", "templates", "phases"), join(homedir(), ".obey", "fest", "festivals", ".festival", "templates", "phases")]) {
+      template = await existing(join(base, phase.type, "WORKFLOW.md"));
+      if (template) break;
+    }
+    if (!template) throw new Error(`Native ${phase.type} WORKFLOW.md template is unavailable; define phase.workflow explicitly`);
+    const content = template.replace(/\[(?:FILL|REPLACE):\s*PHASE_ID\]/g, phase.id);
+    if (MARKER.test(content)) throw new Error(`Native workflow for ${phase.id} has camp-specific markers; supply an explicit workflow definition`);
+    snapshots[phase.id] = content;
+  }
+  return snapshots;
 }

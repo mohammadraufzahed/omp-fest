@@ -44,6 +44,7 @@ import { NativeWriteLockInvocations, packageInstallCheckout, projectRootForFile,
 import { readPortfolioState, updatePortfolioAssignment, updatePortfolioAssignmentRuntime } from "./src/application/portfolio-state.js";
 import { releaseFestivalTask } from "./src/application/festival-team.js";
 import type { WorkerAssignment } from "./src/application/supervisor.js";
+import { detectCliCapabilities } from "./src/application/cli-capabilities.js";
 
 interface ExtensionContextLike {
   cwd: string;
@@ -293,8 +294,9 @@ export default function ompFest(pi: ExtensionApiLike): void {
     const config = await configFor();
     const notifier = new OmpNotifier(ctx.ui);
     const claimedDir = await restoreClaim(ctx);
-    if (!(await fest.available())) {
-      notifier.warn("fest CLI not found — npm i -g @obedience-corp/festival");
+    const capabilities = await detectCliCapabilities(exec, { cwd: ctx.cwd });
+    if (!capabilities.ready) {
+      notifier.warn(`Native Festival/Camp compatibility check failed: ${Object.entries(capabilities.binaries).flatMap(([binary, result]) => result.diagnostics.map((message) => `${binary}: ${message}`)).join("; ")}. Use /fest doctor; preserve your package manager installation ownership.`);
       return;
     }
     const orientation = await orientSession(ctx.cwd, detect, claimedDir);
@@ -305,7 +307,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       try {
         const events = await detect.readProgress(briefingDir);
         const recent = events.slice(-5).map((event) => `${event.ts} ${event.event}${event.task ? ` ${event.task}` : ""}`).join("; ");
-        const progress = summarizeProgress(events);
+        const progress = summarizeProgress(events, await detect.pendingTasks(briefingDir));
         const worktrees = await readFestivalWorktrees(briefingDir).catch(() => []);
         const rulesCount = campRulesCount(await campRules(orientation.location.campRoot ?? briefingDir).catch(() => undefined));
         const notes = [
@@ -335,7 +337,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
       detect.watch(watchedDir, () => {
         void (async () => {
           const events = await detect.readProgress(watchedDir);
-          const progress = summarizeProgress(events);
+          const progress = summarizeProgress(events, await detect.pendingTasks(watchedDir));
           ctx.ui.setStatus(
             "omp-fest",
             statusLineText({

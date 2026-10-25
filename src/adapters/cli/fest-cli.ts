@@ -5,13 +5,23 @@
 import { cp, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { classifyNextOutput } from "../../domain/next-unit.js";
-import type { FestivalSummary, NextUnit } from "../../domain/types.js";
+import type { FestivalSummary, NextUnit, ValidationIssue } from "../../domain/types.js";
 import type { ExecRunner, FestCli } from "../../ports.js";
 
 const CONFIRMING_TASK_ACTIONS = new Set(["completed", "blocked", "defer", "reset"]);
 
 function str(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function jsonObject(output: string): Record<string, unknown> | undefined {
+  try {
+    const value: unknown = JSON.parse(output);
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export class FestCliAdapter implements FestCli {
@@ -28,14 +38,15 @@ export class FestCliAdapter implements FestCli {
   }
 
   async next(festivalDir: string): Promise<NextUnit> {
-    const result = await this.exec.run("fest", ["next"], festivalDir);
-    return classifyNextOutput(result.stdout + result.stderr, result.code);
+    const result = await this.exec.run("fest", ["next", "--json"], festivalDir);
+    return classifyNextOutput(result.stdout.trim() || result.stderr, result.code);
   }
 
   async taskComplete(festivalDir: string, task: string): Promise<{ ok: boolean; output: string }> {
     const args = task ? ["task", "completed", task, "--yes", "--json"] : ["task", "completed", "--yes", "--json"];
     const result = await this.exec.run("fest", args, festivalDir);
-    return { ok: result.code === 0, output: result.stdout + result.stderr };
+    const data = jsonObject(result.stdout);
+    return { ok: result.code === 0 && data?.ok !== false && data?.success !== false, output: result.stdout + result.stderr };
   }
 
   async taskMutate(
@@ -77,35 +88,56 @@ export class FestCliAdapter implements FestCli {
     return /Hash\s+(\w+)/.exec(result.stdout)?.[1] ?? result.stdout.trim();
   }
 
-  async validate(festivalDir: string, fix = false): Promise<{ score: number; output: string }> {
-    const args = fix ? ["validate", "--fix"] : ["validate"];
+  async validate(festivalDir: string, fix = false): Promise<{
+    score: number; output: string; valid?: boolean; markersPending?: boolean; errors?: ValidationIssue[];
+  }> {
+    const args = fix ? ["validate", "--fix", "--json"] : ["validate", "--json"];
     const result = await this.exec.run("fest", args, festivalDir, 300_000);
     const output = result.stdout + result.stderr;
-    const score = Number(/Score\s+(\d+)\/100/.exec(output)?.[1] ?? "0");
-    return { score, output };
+    const data = jsonObject(result.stdout);
+    if (data && typeof data.valid === "boolean") {
+      const errors: ValidationIssue[] = [];
+      if (Array.isArray(data.issues)) {
+        for (const value of data.issues) {
+          if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+          const issue = value as Record<string, unknown>;
+          if (issue.level !== "error") continue;
+          errors.push({ file: str(issue.path), markers: [], error: str(issue.message) });
+        }
+      }
+      if (data.ok === false || result.code !== 0 && data.valid) {
+        throw new Error(output.trim() || "fest validate failed");
+      }
+      const score = typeof data.score === "number" && Number.isFinite(data.score)
+        ? data.score : data.valid ? 100 : 0;
+      return { score, output, valid: data.valid, markersPending: data.markers_pending === true, errors };
+    }
+    const scoreMatch = /Score\s+(\d+)\/100/i.exec(output);
+    if (scoreMatch) return { score: Number(scoreMatch[1]), output, valid: result.code === 0 };
+    throw new Error(output.trim() || `fest validate failed (exit ${result.code}): no validation result`);
   }
 
   async workflowAdvance(festivalDir: string): Promise<string> {
-    const result = await this.exec.run("fest", ["workflow", "advance"], festivalDir);
+    const result = await this.checked(this.exec.run("fest", ["workflow", "advance"], festivalDir));
     return result.stdout;
   }
 
   async workflowStatus(festivalDir: string): Promise<string> {
-    const result = await this.exec.run("fest", ["workflow", "status"], festivalDir);
+    const result = await this.checked(this.exec.run("fest", ["workflow", "status"], festivalDir));
     return result.stdout;
   }
 
   async workflowApprove(festivalDir: string): Promise<string> {
-    const result = await this.exec.run("fest", ["workflow", "approve"], festivalDir);
+    const result = await this.checked(this.exec.run("fest", ["workflow", "approve"], festivalDir));
     return result.stdout;
   }
 
   async workflowReject(festivalDir: string, reason: string): Promise<string> {
-    const result = await this.exec.run(
+    const result = await this.checked(this.exec.run(
       "fest",
       ["workflow", "reject", "--reason", reason],
       festivalDir,
-    );
+    ));
     return result.stdout;
   }
 
@@ -171,7 +203,8 @@ export class FestCliAdapter implements FestCli {
 
   async gatesApply(campRoot: string, festivalDir: string): Promise<{ created: number; output: string }> {
     const gatesDir = join(festivalDir, "gates");
-    const seeded = await readdir(gatesDir).then(() => false, async () => {
+    const seeded = await readdir(gatesDir).then(() => false, async (error: unknown) => {
+      if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
       const source = join(
         campRoot,
         "festivals",
@@ -186,10 +219,17 @@ export class FestCliAdapter implements FestCli {
       await cp(source, target, { recursive: true });
       return true;
     });
-    const result = await this.exec.run("fest", ["gates", "apply", "--approve"], festivalDir);
-    const created = /(\d+)(?: files)? created/.exec(result.stdout)?.[1] ?? "0";
+    const result = await this.checked(this.exec.run("fest", ["gates", "apply", "--approve", "--json"], festivalDir));
+    const data = jsonObject(result.stdout);
+    if (!data) throw new Error("fest gates apply returned invalid JSON");
+    const summary = typeof data.summary === "object" && data.summary !== null && !Array.isArray(data.summary)
+      ? data.summary as Record<string, unknown> : undefined;
+    const created = summary?.files_created;
+    if (typeof created !== "number" || !Number.isInteger(created) || created < 0) {
+      throw new Error("fest gates apply returned no valid files_created count");
+    }
     return {
-      created: Number(created),
+      created,
       output: `${seeded ? "Seeded missing gates/ templates from camp .festival templates.\n" : ""}${result.stdout}${result.stderr}`,
     };
   }
@@ -236,7 +276,8 @@ export class FestCliAdapter implements FestCli {
 
   private async checked(promise: Promise<{ stdout: string; stderr: string; code: number }>) {
     const result = await promise;
-    if (result.code !== 0) {
+    const data = jsonObject(result.stdout);
+    if (result.code !== 0 || data?.ok === false || data?.success === false) {
       throw new Error(result.stderr.trim() || result.stdout.trim() || "fest command failed");
     }
     return result;

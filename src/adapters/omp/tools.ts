@@ -28,7 +28,7 @@ import { createWireframe, WireframeInputError, type WireframeSpec } from "../../
 import { structuredPlanSchema, type StructuredPlan } from "../../application/structured-plan.js";
 import { normalizePlanInput } from "../../application/plan-input.js";
 import { abandonPlanPreview, approvedPlan, listPlanPreviews, markPlanApproved, markPlanScaffolded, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
-import { finalizeApprovedScaffold } from "../../application/plan-scaffold.js";
+import { finalizeApprovedScaffold, materializePlanWorkflows } from "../../application/plan-scaffold.js";
 import { createPlanDraft, deletePlanDraft, deletePlanDraftsForPlan, readPlanDraft, updatePlanDraft, listPlanDrafts, type PlanDraftFields } from "../../application/plan-drafts.js";
 import { findPlanningConflicts } from "../../application/planning-conflicts.js";
 import { classifyAttachment, type AttachmentRole } from "../../domain/reference-classification.js";
@@ -43,10 +43,16 @@ import { registerFestivalTeamTools } from "./team-tools.js";
 import { beginFestivalCreation, classifyCreationOrphan, clearCreationJournal, completeFestivalCreation, creationJournalMayBeLive, festivalCreationIsScaffolded, festivalTargetMatchesName, listFestivalCreationOrphans, listQuarantinedFestivals, recordFestivalCreation, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { readFestivalTeam, joinFestivalTeam } from "../../application/festival-team.js";
 import { INTEGRATION_GUIDE, integrationReviewStatus } from "../../application/integration-review.js";
-import { planningDiagnostic } from "../../application/planning-errors.js";
+import { planningDiagnostic, PlanningValidationError } from "../../application/planning-errors.js";
 import { registerFlowTools, type FlowHost } from "./flow-tools.js";
 import { registerSupervisorTools } from "./supervisor-tools.js";
 import { registerQualityTools } from "./quality-tools.js";
+import { registerVerificationTools } from "./verification-tools.js";
+import { registerCampNativeTools } from "./camp-native-tools.js";
+import { registerFestNativeTools } from "./fest-native-tools.js";
+import { verificationResultStatus } from "../../application/verification-results.js";
+import { classifyNativeCommand } from "../../application/native-command-policy.js";
+import { isCompletedFestivalPath, lifecycleStatus, festivalCampRoot } from "../../domain/festival-lifecycle.js";
 
 export interface ToolDeps {
   fest: FestCli;
@@ -115,7 +121,6 @@ function supervisorOnly(ctx: ToolContextLike, operation: string): ToolResult | u
     : undefined;
 }
 
-const READONLY_RAW_COMMANDS: Record<string, true> = { list: true, show: true, status: true, rules: true, context: true, markers: true, version: true, types: true, chain: true, feedback: true, links: true, watch: true, deps: true, parse: true, tokens: true, "--help": true };
 function compactBlockedUnit(unit: Extract<NextUnit, { kind: "blocked" }>): ToolResult {
   const issues = unit.errors.slice(0, 12).map((issue) => ({
     file: issue.file,
@@ -139,7 +144,7 @@ function planFailure(error: unknown, extra: Record<string, unknown> = {}): ToolR
     ...(diagnostic.expected ? { expected: diagnostic.expected } : {}),
     received: diagnostic.received ?? diagnostic.message,
     error: diagnostic.message,
-    diagnostics: [diagnostic],
+    diagnostics: error instanceof PlanningValidationError ? error.diagnostics : [diagnostic],
     nextAction: diagnostic.nextAction,
     ...extra,
   });
@@ -307,13 +312,10 @@ async function coordinatorRequired(dir: string, sessionId: string): Promise<Tool
 }
 
 
-/**
- * Worktree-per-festival: when a festival lands in festivals/active, create one
- * git worktree per camp project under projects/worktrees/<project>/<festival>.
- * Non-git camps and missing exec silently skip — worktrees are additive.
- */
+/** Approved active festivals execute only in their declared, validated project worktrees. */
 async function maybeCreateFestivalWorktrees(deps: ToolDeps, campRoot: string, festivalDir: string, festivalName: string) {
-  if (!deps.exec || !festivalDir.includes(`${sep}festivals${sep}active${sep}`)) return [];
+  if (!deps.exec || lifecycleStatus(festivalDir) !== "active") return [];
+  if (!(await lstat(join(festivalDir, "APPROVED_PLAN.json")).catch(() => undefined))) return [];
   try {
     const conventions = (await loadConfig(campRoot)).conventions;
     return await createFestivalWorktrees(deps.exec, campRoot, festivalDir, festivalName, await deps.camp.projects(campRoot), conventions);
@@ -398,6 +400,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       if (!r.coordinator) return textResult({ kind: "team_assignment_required", festival: basename(r.dir), nextAction: "Use fest_team action queue, then claim one exact eligible task. Do not start an unclaimed task from fest_next." });
       const dir = r.dir;
+      const campRoot = festivalCampRoot(dir);
+      if (campRoot) {
+        const binding = await maybeCreateFestivalWorktrees(deps, campRoot, dir, basename(dir));
+        if (!Array.isArray(binding)) return textResult({ kind: "execution_blocked", code: "WORKTREE_BINDING_FAILED", error: binding.error, hint: "Repair project/worktree identity and retry; execution must not fall back to the original checkout." });
+      }
       const unit: NextUnit = await deps.fest.next(dir);
       if (unit.kind === "task") {
         const visual = await validateVisualReferences(dir, deps.detect);
@@ -407,6 +414,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         const visualReferences = await referencesForTask(dir, unit.doc);
         const checks = taskChecks(unit.doc);
         const completionRequirements = {
+          plannedChecks: await verificationResultStatus(dir, /^Task ID:[ \t]*(.+)$/m.exec(unit.doc)?.[1]?.trim()),
           visualChecks: checks.map(({ page, id }) => ({
             page, check: id, description: visualReferences.find((reference) => reference.page === page)?.checks.find((check) => check.id === id)?.description,
             requiredFields: ["status", "proof"], verifiedFields: ["route", "viewport", "state"],
@@ -507,6 +515,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           nextAction: { tool: "fest_next", instruction: "Use a valid task path returned for this festival so its visual checks can be inspected." },
           hint: "Use a valid task path returned by fest_next so its visual checks can be verified." });
       }
+      const logicalTask = taskDoc ? /^Task ID:[ \t]*(.+)$/m.exec(taskDoc)?.[1]?.trim() : undefined;
       if (taskDoc && completionPath) {
         const checks = taskChecks(taskDoc);
         if (checks.length > 0) {
@@ -535,6 +544,11 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             }
           }
         }
+      }
+      if (logicalTask) {
+        const verification = await verificationResultStatus(dir, logicalTask);
+        if (!verification.valid) return textResult({ kind: "completion_blocked", reasonCode: "verification_results_required", missingRequirements: verification.missingRequirements,
+          nextAction: { tool: "fest_verification", action: "requirements", task: logicalTask, instruction: "Exercise declared checks, store actual output with fest_evidence, then record observed results. Planned provenance is not completion evidence." } });
       }
       const assignments = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) =>
         worker.festival === basename(dir) && worker.task === (task?.path ?? taskPath));
@@ -677,7 +691,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const visual = await validateVisualReferences(r.dir, deps.detect);
       const verification = visual.issues.length ? undefined : await visualEvidenceStatus(r.dir, deps.detect);
       return textResult({ ...structure, visualReferences: visual, ...(verification ? { visualVerification: verification } : {}),
-        ...(visual.issues.length > 0 || (verification?.issues.length ?? 0) > 0 ? { kind: "validation_failed" } : {}) });
+        ...(structure.valid === false || visual.issues.length > 0 || (verification?.issues.length ?? 0) > 0 ? { kind: "validation_failed" } : {}) });
     },
   });
 
@@ -840,14 +854,15 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_plan",
     label: "Fest Plan (Scaffold From Plan)",
     description:
-      "Single stateful planning API. Path contract for every stage: relative plan/referencesDir paths and workingDir are camp-root-relative; workingDir must identify an existing project directory inside the camp or an external checkout reachable through projects/<link>. Inspection, task files, verification cwd and evidencePath are relative to the selected project. Stage 1 create/update: inspect the target project, ask which project when ambiguous, save the resolved workingDir, and provide the complete StructuredPlan hierarchy; scalar-only drafts cannot be previewed because they synthesize one phase. Give every milestone its own objective, deliverables and completionCriteria; keep implementation phases to at most three tasks. Stage 2 preview: use that project root, validate paths there, show the resolved target and all milestone boundaries, then wait for human approval. Read back the persisted draft and ensure phase/sequence/task counts match the supplied spec before preview. Stage 3 scaffold: use only the approved revision; omit spec and referencesDir because the persisted artifact retains the canonical project and reference paths. Never reconstruct paths from process cwd. Final output reports absolute festivalDir and camp-relative workingDir. Do not label implementation tasks as research, planning or validation. Split work by independently reviewable outcomes, not arbitrary task counts. Use action create/update/read/list for persisted drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
+      "Stateful native planning with revision-bound human approval. Choose proportionate work: small work belongs in camp_workitem, repeated steps in fest_workflow_native, uncertain work in planning/research workflows, and requirements-ready implementation in structured task phases. Create/update persists a complete spec with native phase types, optional workflow/freeform/hybrid structure, cohesive sequences, task dependencies and verification kinds command/browser/manual/research. Command provenancePath substantiates a proposed command; actual output is recorded separately with fest_evidence and fest_verification. Draft diagnostics identify exact invalid fields before preview. Relative workingDir/plan/referencesDir resolve from camp root; task file/provenance/cwd paths resolve from workingDir. Template marker values are supplied explicitly. Preview then obtain human approval; scaffold consumes only that persisted revision and canonical paths. Native Festival owns hierarchy, state, dependencies and quality gates; do not hand-edit generated STRUCTURE.md or invent verification results.",
     parameters: z.object({
       action: z.enum(["create", "read", "update", "delete", "list", "preview", "scaffold", "cancel"]).optional(),
       name: z.string().optional(), plan: z.string().optional(), draftId: z.string().optional(), draftRevision: z.string().optional(),
       goal: z.string().optional(), scope: z.array(z.string()).optional(), exclusions: z.array(z.string()).optional(),
       acceptance: z.array(z.string()).optional(), inspection: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
       workingDir: z.string().optional(), files: z.array(z.string()).optional(), rules: z.string().optional(),
-      verification: z.object({ command: z.string().optional(), cwd: z.string().optional(), evidencePath: z.string().optional(), expected: z.string().optional() }).optional(),
+      templateMarkers: z.array(z.object({ hint: z.string(), value: z.string() })).optional(),
+      verification: z.object({ id: z.string().optional(), kind: z.enum(["command", "browser", "manual", "research"]).optional(), command: z.string().optional(), cwd: z.string().optional(), provenancePath: z.string().optional(), procedure: z.string().optional(), expected: z.string().optional() }).optional(),
       attachments: z.array(z.object({ name: z.string(), description: z.string(), role: z.enum(["ui_design", "error_screenshot", "document_pdf", "context", "unknown"]).optional() })).optional(),
       spec: structuredPlanSchema(z).optional(), approvedRevision: z.string().optional(), referencesDir: z.string().optional(),
       visualIntent: z.enum(["ui_visual", "document_or_pdf", "backend_or_api", "bug_diagnostic", "mixed", "unknown"]).optional(),
@@ -855,7 +870,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       baseRevision: z.string().optional(), proposalRevision: z.string().optional(),
       conflictChoice: z.enum(["sequence", "narrow", "worktree"]).optional().describe("Human-selected resolution after returning planning_conflict options and asking conversationally; never open a blocking selection modal"),
     }),
-    async execute(_id: string, params: { action?: "create" | "read" | "update" | "delete" | "list" | "preview" | "scaffold" | "cancel"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { action?: "create" | "read" | "update" | "delete" | "list" | "preview" | "scaffold" | "cancel"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; templateMarkers?: { hint: string; value: string }[]; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -893,6 +908,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             ...(params.verification ? { verification: params.verification } : {}), ...(params.rules !== undefined ? { rules: params.rules } : {}),
             ...(params.referencesDir ? { referencesDir: params.referencesDir } : {}), ...(params.visualIntent ? { visualIntent: params.visualIntent } : {}),
             ...(params.spec ? { spec: params.spec } : {}),
+            ...(params.templateMarkers ? { templateMarkers: Object.fromEntries(params.templateMarkers.map(({ hint, value }) => [hint, value])) } : {}),
             ...(attachments ? { attachments } : {}),
           } satisfies Partial<PlanDraftFields>;
           const project = patch.workingDir || draftAction === "create" ? await resolveWorkingDir(root, deps.camp, patch.workingDir) : undefined;
@@ -900,7 +916,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           const draft = draftAction === "create"
             ? await createPlanDraft(root, { ...patch, name: params.name ?? "" })
             : await updatePlanDraft(root, params.draftId ?? "", params.draftRevision ?? "", patch);
-          return textResult({ kind: draft.missing.length ? "plan_draft_incomplete" : "plan_draft", draftId: draft.draftId, revision: draft.revision, name: draft.fields.name, goal: draft.spec.goal, missing: draft.missing, attachments: draft.fields.attachments, pathPolicy: "workingDir is camp-root-relative (for example projects/web); inspection, task files, verification cwd, and evidencePath are project-relative.", nextAction: draft.missing.length ? "Ask only for listed missing decisions. If workingDir is missing or ambiguous, ask which existing project in this camp to target; use the exact camp-relative project path, then update with this revision." : `Call fest_plan {action:"preview",draftId:"${draft.draftId}",draftRevision:"${draft.revision}"}.` });
+          return textResult({ kind: draft.missing.length || draft.diagnostics.length ? "plan_draft_incomplete" : "plan_draft", draftId: draft.draftId, revision: draft.revision, name: draft.fields.name, goal: draft.spec.goal, missing: draft.missing, diagnostics: draft.diagnostics, attachments: draft.fields.attachments,
+            pathPolicy: "workingDir is camp-root-relative; inspection, task files, verification cwd and provenancePath are project-relative. Actual execution evidence is recorded separately.",
+            nextAction: draft.missing.length || draft.diagnostics.length ? "Repair only the named fields or resolve listed material decisions; preserve all other draft content. Do not rerun preview unchanged." : `Call fest_plan {action:"preview",draftId:"${draft.draftId}",draftRevision:"${draft.revision}"}.` });
         } catch (error) { return planFailure(error); }
       }
       if (params.draftId) {
@@ -909,7 +927,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           const draft = await readPlanDraft(root, params.draftId);
           if (draft.revision !== params.draftRevision) throw new Error("Draft changed; read current draft and approve the new revision");
           if (draft.missing.length) throw new Error(`Draft is incomplete: ${draft.missing.join(", ")}`);
-          params = { ...params, name: draft.fields.name, plan: draft.plan, spec: draft.spec, workingDir: draft.fields.workingDir, rules: draft.fields.rules, referencesDir: draft.fields.referencesDir ? resolve(root, draft.fields.referencesDir) : undefined, visualIntent: draft.fields.visualIntent, attachments: draft.fields.attachments?.map((item) => ({ name: item.name, description: item.reason, role: item.role })) };
+          if (draft.diagnostics.length) throw new PlanningValidationError(draft.diagnostics);
+          params = { ...params, name: draft.fields.name, plan: draft.plan, spec: draft.spec, workingDir: draft.fields.workingDir, rules: draft.fields.rules, templateMarkers: draft.fields.templateMarkers ? Object.entries(draft.fields.templateMarkers).map(([hint, value]) => ({ hint, value })) : undefined, referencesDir: draft.fields.referencesDir ? resolve(root, draft.fields.referencesDir) : undefined, visualIntent: draft.fields.visualIntent, attachments: draft.fields.attachments?.map((item) => ({ name: item.name, description: item.reason, role: item.role })) };
         } catch (error) { return planFailure(error); }
       }
       if (!params.name || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(params.name)) return planFailure("name must be a lowercase festival slug", { field: "name" });
@@ -964,6 +983,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           const rules = conflicts.length ? [params.rules?.trim(), `Planning conflict decision: sequence overlapping files ${conflicts.map((conflict) => `${conflict.name} (${conflict.files.join(", ")})`).join("; ")} one at a time. Keep all plans; never cancel another plan.`].filter(Boolean).join("\n") : params.rules ?? "";
           const prepared = await previewPlan(root, planPath, {
             name: params.name, workingDir: project.dir, rules,
+            ...(params.templateMarkers ? { templateMarkers: Object.fromEntries(params.templateMarkers.map(({ hint, value }) => [hint, value])) } : {}),
             ...(params.referencesDir ? { referencesDir: params.referencesDir } : {}), spec: normalized.spec,
           }, bundle?.files);
           const visual = bundle ? await renderPlanPreview(prepared.plan, bundle) : undefined;
@@ -971,7 +991,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           return await interactivePlanReview(ctx, {
             kind: "plan_preview", plan: prepared.plan, preview: prepared.preview, previewFile: prepared.previewFile,
             counts: prepared.counts, planRevision: prepared.planRevision, reuseCandidates,
-            pathPolicy: { campRoot: root, workingDir: project.dir, projectPaths: "inspection, task files, verification cwd, and evidencePath are relative to workingDir" },
+            pathPolicy: { campRoot: root, workingDir: project.dir, projectPaths: "inspection, task files, verification cwd, and provenancePath are relative to workingDir; command provenance is not actual evidence" },
             ...(planWarnings.length || normalized.warnings.length ? { warnings: [...planWarnings, ...normalized.warnings] } : {}),
             ...(visual ? { visualPreview: visual } : {}),
           }, { root, plan: planPath, name: params.name, references: bundle?.files ?? [] });
@@ -1120,13 +1140,14 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         const festId = basename(festivalDir);
         const { dir: workingDir, candidates: projectCandidates } = await resolveWorkingDir(root, deps.camp, targetWorkingDir);
         await finalizeApprovedScaffold(root, festivalDir, approved.artifact);
+        await materializePlanWorkflows(root, festivalDir, approved.artifact, deps.fest);
         if (bundle) await installVisualReferences(festivalDir, bundle);
         const stamped = workingDir ? await stampWorkingDir(festivalDir, workingDir) : 0;
         const rulesSeed = await seedFestivalRules(root, festivalDir, agreedRules);
-        const gates = await deps.fest.gatesApply(root, festivalDir).catch((err: unknown) => ({ created: 0, output: `gates apply failed: ${String(err)}` }));
+        const gates = await deps.fest.gatesApply(root, festivalDir);
         const gateRules = rulesSeed.constraints ? await stampGateRules(festivalDir) : 0;
         const scaffoldValidation = await deps.fest.validate(festivalDir);
-        if (scaffoldValidation.score !== 100) {
+        if (scaffoldValidation.valid === false || scaffoldValidation.markersPending || (scaffoldValidation.valid === undefined && scaffoldValidation.score !== 100)) {
           throw new Error(`Generated scaffold did not pass validation (${scaffoldValidation.score}/100): ${scaffoldValidation.output.slice(0, 2000)}`);
         }
         await markPlanScaffolded(root, planPath, params.name, approved.planRevision, festivalDir, bundle?.files);
@@ -1332,6 +1353,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           persistClaim(pi, match.festival.path, location.campRoot);
         }
         const worktrees = match.kind === "match" ? await maybeCreateFestivalWorktrees(deps, location.campRoot, match.festival.path, match.festival.id) : undefined;
+        if (worktrees && !Array.isArray(worktrees)) return textResult({ kind: "promotion_incomplete", code: "WORKTREE_BINDING_FAILED", output, error: worktrees.error, hint: "Native promotion succeeded but execution setup failed. Repair the binding and retry fest_next; do not promote again or execute in the original checkout." });
         return textResult({ kind: "promoted", output, ...(Array.isArray(worktrees) && worktrees.length ? { worktrees: worktrees.map((row) => row.worktreePath) } : {}), nextSteps: SUPERVISOR_POLICY });
       }
       const dir = location.festivalDir ??
@@ -1357,6 +1379,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         }
         worktreeNote = moved ? await maybeCreateFestivalWorktrees(deps, location.campRoot, moved.path, moved.id) : undefined;
       }
+      if (worktreeNote && !Array.isArray(worktreeNote)) return textResult({ kind: "promotion_incomplete", code: "WORKTREE_BINDING_FAILED", output, error: worktreeNote.error, hint: "Native promotion succeeded but execution setup failed. Repair the binding and retry fest_next; do not promote again or execute in the original checkout." });
       return textResult({ kind: "promoted", output, ...(Array.isArray(worktreeNote) && worktreeNote.length ? { worktrees: worktreeNote.map((row) => row.worktreePath) } : {}), nextSteps: SUPERVISOR_POLICY });
     },
   });
@@ -1424,8 +1447,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const rows = await Promise.all(festivals.map(async (festival) => {
         const owner = await festivalOwner(festival.path).catch(() => undefined);
         const worktrees = await readFestivalWorktrees(festival.path).catch(() => []);
-        const progress = summarizeProgress(await deps.detect.readProgress(festival.path).catch(() => []));
-        const openTasks = (await deps.detect.pendingTasks(festival.path).catch(() => [])).filter((task) => !task.done).length;
+        const tasks = await deps.detect.pendingTasks(festival.path).catch(() => []);
+        const progress = summarizeProgress(await deps.detect.readProgress(festival.path).catch(() => []), tasks);
+        const openTasks = tasks.filter((task) => !task.done).length;
         return {
           id: festival.id,
           status: festival.status,
@@ -1688,10 +1712,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (owner && owner.sessionId !== sid && !festivalOwnerIsDead(owner)) {
         return textResult({ kind: "festival_owned", code: "FESTIVAL_OWNED", retryable: false, festival: basename(dir), owner: owner.sessionId, hint: "Completion is coordinator-only; use /fest select to take ownership first." });
       }
-      if (!dir.includes(`${sep}festivals${sep}active${sep}`) && !dir.includes(`${sep}festivals${sep}completed${sep}`)) {
+      if (lifecycleStatus(dir) !== "active" && !isCompletedFestivalPath(dir)) {
         return textResult({ kind: "complete_blocked", code: "NOT_ACTIVE", retryable: false, festival: basename(dir), hint: "Only an active festival can be completed — promote it first." });
       }
-      if (dir.includes(`${sep}festivals${sep}completed${sep}`)) {
+      if (isCompletedFestivalPath(dir)) {
         return textResult({ kind: "festival_completed", festival: basename(dir), already: true });
       }
       const unit = await deps.fest.next(dir);
@@ -1701,11 +1725,15 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (unit.kind !== "complete") {
         return textResult({ kind: "complete_blocked", code: "TASKS_OPEN", retryable: false, unit, hint: "All tasks must be completed before finish — continue fest_next until it returns complete." });
       }
+      const finalVerification = await verificationResultStatus(dir);
+      if (!finalVerification.valid) return textResult({ kind: "complete_blocked", code: "VERIFICATION_RESULTS_REQUIRED", missingRequirements: finalVerification.missingRequirements, hint: "Record actual current results for every approved check; a native completed task is not evidence that the check passed." });
       const review = await integrationReviewStatus(dir, deps.detect);
       if (!params.force && review.status !== "verified") {
         return textResult({ kind: "complete_blocked", code: "REVIEW_NOT_VERIFIED", retryable: true, review, hint: "Run the final integration pass (/fest finish) and record results with fest_integration — or pass force to skip." });
       }
+      if (params.force && !await ctx.ui?.confirm?.("Override final integration review?", "This bypasses only the omp final integration review, not native gates, task verification, ownership, or Git safety checks. Confirm this explicit operator override.")) return textResult({ kind: "awaiting_human", nextAction: "Explicit human confirmation is required for the integration-review override." });
       let mergedWorktrees: string[] = [];
+      let retainedBranches: string[] = [];
       const finishConfig = await loadConfig(root);
       if (deps.exec) {
         const merge = await mergeFestivalWorktrees(deps.exec, dir, finishConfig.conventions.finishMerge);
@@ -1715,11 +1743,16 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         if (merge.conflicts.length) {
           return textResult({ kind: "complete_blocked", code: "MERGE_CONFLICT", retryable: true, conflicts: merge.conflicts, hint: "Merge conflicts in the project repo — merge the base branch into the worktree branch, resolve, rerun fest_complete." });
         }
+        if (merge.blocked.length || merge.pending) return textResult({ kind: "complete_blocked", code: "WORKTREE_INTEGRATION_PENDING", blocked: merge.blocked, pending: merge.pending,
+          hint: "Resolve recorded repository/branch identity or cleanup issues before completion; no unsafe branch switch or reset is performed." });
         mergedWorktrees = merge.removed;
+        retainedBranches = merge.retainedBranches;
       }
       const output = await deps.fest.promote(root, basename(dir));
       deps.detect.bustCache?.();
-      await releaseFestivalOwnership(dir, sid);
+      const completed = (await deps.detect.listFestivals(root)).find((festival) => festival.id === basename(dir) && isCompletedFestivalPath(festival.path));
+      if (!completed) return textResult({ kind: "complete_blocked", code: "COMPLETION_PATH_UNRESOLVED", output, hint: "Native promotion returned but its completed target was not discovered. Inspect native status before retrying; do not recreate the festival." });
+      await releaseFestivalOwnership(completed.path, sid);
       deps.tracker.clearFestival(sid);
       // Finish notification: camp notify channel + optional configured webhook.
       const summary = `festival ${basename(dir)} completed${mergedWorktrees.length ? ` — merged worktrees: ${mergedWorktrees.join(", ")}` : ""}`;
@@ -1738,6 +1771,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         festival: basename(dir),
         output,
         ...(mergedWorktrees.length ? { mergedWorktrees } : {}),
+        ...(retainedBranches.length ? { retainedBranches, branchCleanup: "Squash-integrated branches are retained when Git cannot prove safe deletion." } : {}),
         nextSteps: "Festival completed and worktrees merged — the project base branch has the work.",
       });
     },
@@ -1804,13 +1838,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       festival: z.string().optional().describe("Festival dir/name override when at camp root"),
     }),
     async execute(_id: string, params: { args: string[]; festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
-      if (params.args[0] === "scaffold") {
-        return textResult({ kind: "typed_tool_required", code: "PLAN_SCAFFOLD_REQUIRES_APPROVED_PLAN", nextAction: "Use fest_plan {action:'scaffold'} with the approved planRevision; raw scaffold is blocked so phase validation and approval cannot be bypassed." });
+      const policy = classifyNativeCommand("fest", params.args);
+      if (policy.blocked) return textResult({ kind: "typed_tool_required", code: "NATIVE_OPERATION_REQUIRES_TYPED_TOOL", nextAction: policy.blocked });
+      if (policy.access !== "read") {
+        const blocked = supervisorOnly(ctx, `raw fest ${params.args.join(" ")}`);
+        if (blocked) return blocked;
       }
-      const blocked = params.args[0] && !READONLY_RAW_COMMANDS[params.args[0]]
-        ? supervisorOnly(ctx, `raw fest ${params.args[0]}`)
-        : undefined;
-      if (blocked) return blocked;
+      if (policy.access === "human" && !await ctx.ui?.confirm?.("Native Festival operation", `${policy.reason}\n\nfest ${params.args.join(" ")}`)) return textResult({ kind: "awaiting_human", nextAction: "Confirm this exact native operation before mutation." });
       const location = await deps.detect.locate(ctx.cwd);
       let cwd = location.festivalDir;
       if (!cwd && params.festival && location.campRoot) {
@@ -1835,10 +1869,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!cwd) {
         return await idleResult(deps, ctx);
       }
-      if (location.campRoot && resolve(cwd) !== resolve(location.campRoot)) {
+      if (policy.access !== "read" && location.campRoot && resolve(cwd) !== resolve(location.campRoot)) {
         const blocked = await coordinatorRequired(cwd, sessionIdOf(ctx));
         if (blocked) return blocked;
-      } else if (!READONLY_RAW_COMMANDS[params.args[0] ?? ""]) {
+      } else if (policy.access !== "read") {
         return textResult({ kind: "coordinator_required", hint: "Mutating raw fest commands require an explicitly selected festival. Use /fest select <festival> first." });
       }
       const result = await deps.fest.raw(cwd, params.args);
@@ -1918,6 +1952,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       args: z.array(z.string()).describe("camp args, e.g. ['idea','list','--json']"),
     }),
     async execute(_id: string, params: { args: string[] }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const policy = classifyNativeCommand("camp", params.args);
+      if (policy.blocked) return textResult({ kind: "typed_tool_required", code: "NATIVE_OPERATION_REQUIRES_TYPED_TOOL", nextAction: policy.blocked });
+      if (policy.access !== "read") {
+        const blocked = supervisorOnly(ctx, `raw camp ${params.args.join(" ")}`);
+        if (blocked) return blocked;
+      }
+      if (policy.access === "human" && !await ctx.ui?.confirm?.("Native Camp operation", `${policy.reason}\n\ncamp ${params.args.join(" ")}`)) return textResult({ kind: "awaiting_human", nextAction: "Confirm this exact native operation before mutation." });
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -1940,5 +1981,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       return textResult(await deps.camp.ideaAdd(root, params.text));
     },
   });
-  registerFlowTools(pi, { detect: deps.detect, host: deps.host });
+  registerFlowTools(pi, { detect: deps.detect, exec: deps.exec, host: deps.host });
+  registerVerificationTools(pi, deps);
+  registerCampNativeTools(pi, deps);
+  registerFestNativeTools(pi, deps);
 }

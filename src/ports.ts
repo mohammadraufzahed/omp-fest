@@ -12,6 +12,7 @@ import type {
   NextUnit,
   PendingTask,
   ProgressEvent,
+  ValidationIssue,
 } from "./domain/types.js";
 
 export interface ExecResult {
@@ -45,7 +46,7 @@ export interface FestCli {
     opts: { task?: string; reason?: string; percent?: string },
   ): Promise<void>;
   commit(festivalDir: string, message: string): Promise<string>;
-  validate(festivalDir: string, fix?: boolean): Promise<{ score: number; output: string }>;
+  validate(festivalDir: string, fix?: boolean): Promise<{ score: number; output: string; valid?: boolean; markersPending?: boolean; errors?: ValidationIssue[] }>;
   workflowAdvance(festivalDir: string): Promise<string>;
   workflowStatus(festivalDir: string): Promise<string>;
   workflowApprove(festivalDir: string): Promise<string>;

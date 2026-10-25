@@ -4,7 +4,7 @@ import { canonicalProjectDirectory } from "./project-conflicts.js";
 import type { StructuredPlan } from "./structured-plan.js";
 export interface PlannedConflict { name: string; workingDir: string; files: string[] }
 function files(spec: StructuredPlan): string[] {
-  return [...new Set(spec.phases.flatMap((phase) => phase.sequences.flatMap((sequence) => sequence.tasks.flatMap((task) => task.files.map((file) => file.path)))))].sort();
+  return [...new Set(spec.phases.flatMap((phase) => (Array.isArray(phase.sequences) ? phase.sequences : []).flatMap((sequence) => sequence.tasks.flatMap((task) => task.files.map((file) => file.path)))))].sort();
 }
 function overlaps(left: string, right: string): boolean { return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`); }
 export async function findPlanningConflicts(root: string, name: string, workingDir: string, spec: StructuredPlan): Promise<PlannedConflict[]> {
@@ -27,7 +27,7 @@ export async function findPlanningConflicts(root: string, name: string, workingD
         } catch { /* Corrupt status artifacts do not suppress an overlap. */ }
       }
     }
-    if (statusState === "rejected" || statusState === "cancelled" || statusState === "scaffolded") continue;
+    if (statusState === "rejected" || statusState === "cancelled" || statusState === "scaffolded" || statusState === "expired") continue;
     const artifactValue: unknown = JSON.parse(await readFile(join(plans, entry), "utf8"));
     if (!artifactValue || typeof artifactValue !== "object" || Array.isArray(artifactValue) || !("name" in artifactValue) || typeof artifactValue.name !== "string" || !("workingDir" in artifactValue) || typeof artifactValue.workingDir !== "string" || !("spec" in artifactValue)) {
       throw new Error(`Planning artifact is invalid or corrupted: ${entry}`);

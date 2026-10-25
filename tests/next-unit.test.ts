@@ -109,7 +109,7 @@ describe("classifyNextOutput", () => {
     expect(unit.kind).toBe("gate_step");
     if (unit.kind === "gate_step") {
       expect(unit.phase).toBe("INGEST");
-      expect(unit.question).toContain("PHASE GOAL");
+      expect(unit.question).toContain("capture the user's intent");
     }
   });
 
@@ -136,8 +136,8 @@ describe("classifyNextOutput", () => {
     expect(unit.kind).toBe("complete");
   });
 
-  it("maps 'not inside a festival' to idle", () => {
-    expect(classifyNextOutput("Error: not inside a festival").kind).toBe("idle");
+  it("does not disguise missing festival context as idle", () => {
+    expect(classifyNextOutput("Error: not inside a festival", 1).kind).toBe("blocked");
   });
 
   it("classifies JSON task payloads", () => {
@@ -145,5 +145,51 @@ describe("classifyNextOutput", () => {
       JSON.stringify({ task: "a/b.md", phase: "003_IMPLEMENT", working_dir: "projects/app" }),
     );
     expect(unit.kind).toBe("task");
+  });
+
+  it("preserves v0.9.8 nested task context", () => {
+    expect(classifyNextOutput(JSON.stringify({
+      task: { path: "/fest/003_IMPLEMENT/01_core/01_design.md", phase_name: "003_IMPLEMENT",
+        sequence_name: "01_core", autonomy_level: "medium" },
+      festival_complete: false, location: { festival_path: "/fest" },
+      task_content: "# Design\nActual instructions", working_dir: "projects/app",
+      layered_goals: { festival_goal: "Ship", phase_goal: "Build", sequence_goal: "Design" },
+    }))).toEqual({ kind: "task", path: "003_IMPLEMENT/01_core/01_design.md", phase: "003_IMPLEMENT",
+      sequence: "01_core", autonomy: "medium", workingDir: "projects/app", doc: "# Design\nActual instructions",
+      goals: ["Ship", "Build", "Design"] });
+  });
+
+  it("recognizes native festival completion without a task", () => {
+    expect(classifyNextOutput('{"festival_complete":true,"reason":"All work settled","location":{}}'))
+      .toEqual({ kind: "complete", reason: "All work settled" });
+  });
+
+  it("parses tracked standalone workflow JSON", () => {
+    const unit = classifyNextOutput(JSON.stringify({ mode: "standalone-tracked", workflow_doc: "/work/WORKFLOW.md",
+      current_step: 2, total_steps: 3, step_name: "REVIEW", step_goal: "Inspect evidence",
+      step_actions: ["Read results"], step_checkpoint: "verification", render_mode: "next_up" }));
+    expect(unit).toMatchObject({ kind: "wf_step", phase: "/work/WORKFLOW.md", step: 2, totalSteps: 3,
+      title: "REVIEW", goal: "Inspect evidence", actions: ["Read results"], checkpoint: false });
+  });
+
+  it("recognizes completed standalone runs", () => {
+    expect(classifyNextOutput('{"mode":"standalone-tracked","render_mode":"complete"}').kind).toBe("complete");
+  });
+
+  it("retains native open blockers even on exit zero", () => {
+    const unit = classifyNextOutput(JSON.stringify({ festival_complete: false, reason: "No ready tasks",
+      blocked_tasks: [{ task: "001_IMPLEMENT/01_core/01_design.md", blocker_message: "Need credentials" }] }));
+    expect(unit).toMatchObject({ kind: "blocked", errors: [{ file: "001_IMPLEMENT/01_core/01_design.md",
+      error: "Need credentials" }] });
+  });
+
+  it.each([
+    ["STOP: FESTIVAL NOT YET ACTIVE\nFestival is in planning status.", 1],
+    ["", 1], ["network failure", 1], ['{"festival_complete":true}', 1],
+    ['{"ok":false,"error":"state load failed"}', 0], ['{"task":', 0],
+    ['{"festival_complete":false,"reason":"No ready tasks"}', 0],
+    ["New unknown native output", 0],
+  ])("keeps refusals and unknown results blocked (%s)", (output, code) => {
+    expect(classifyNextOutput(output, code).kind).toBe("blocked");
   });
 });

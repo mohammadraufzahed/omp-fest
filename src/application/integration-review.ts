@@ -6,6 +6,8 @@ import { festivalOwner } from "./festival-ownership.js";
 import type { CampDetect } from "../ports.js";
 import { evidenceDirectory, storeEvidenceBundle } from "./evidence-bundles.js";
 import { validateVisualReferences } from "./visual-references.js";
+import { approvedWorktreeSourceDirectory } from "./festival-worktrees.js";
+import { festivalCampRoot } from "../domain/festival-lifecycle.js";
 
 interface IntegrationLockOwner { host: string; pid: number; token: string }
 const integrationLockOwnerPath = (lock: string) => join(lock, "owner.json");
@@ -82,7 +84,10 @@ export async function approvedSourceRevision(festivalDir: string): Promise<strin
   const artifact: unknown = JSON.parse(content);
   if (!artifact || typeof artifact !== "object" || !("workingDir" in artifact) || typeof artifact.workingDir !== "string" || !artifact.workingDir.trim() ||
       !("spec" in artifact) || !artifact.spec || typeof artifact.spec !== "object" || !("phases" in artifact.spec) || !Array.isArray(artifact.spec.phases)) return undefined;
-  const project = isAbsolute(artifact.workingDir) ? artifact.workingDir : resolve(festivalDir, "../../..", artifact.workingDir);
+  const camp = festivalCampRoot(festivalDir);
+  if (!camp && !isAbsolute(artifact.workingDir)) throw new Error("Cannot resolve the approved project's camp root");
+  const logicalProject = isAbsolute(artifact.workingDir) ? artifact.workingDir : resolve(camp ?? "", artifact.workingDir);
+  const project = await approvedWorktreeSourceDirectory(festivalDir, artifact.workingDir) ?? logicalProject;
   const sourcePaths = new Set<string>();
   for (const phase of artifact.spec.phases as unknown[]) {
     if (!phase || typeof phase !== "object" || !("sequences" in phase) || !Array.isArray(phase.sequences)) continue;
@@ -95,7 +100,7 @@ export async function approvedSourceRevision(festivalDir: string): Promise<strin
     }
   }
   if (!sourcePaths.size) return undefined;
-  const hash = createHash("sha256").update(content).update("\0").update(project);
+  const hash = createHash("sha256").update(content).update("\0").update(logicalProject);
   for (const path of [...sourcePaths].sort()) {
     const target = resolve(project, path);
     const rel = relative(project, target);

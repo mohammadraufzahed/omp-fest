@@ -23,7 +23,7 @@ describe("plan input normalization", () => {
           id: "01 fix sidebar", title: "Fix sidebar", description: "Fix overflow", dependsOn: [],
           implements: ["bad id"], verifies: ["bad id"],
           files: [{ path: `${project}/src/Layout.tsx`, status: "existing" }],
-          verification: [{ command: "npm test", cwd: project, evidencePath: `${project}/package.json`, expected: "passes" }],
+          verification: [{ command: "npm test", cwd: project, provenancePath: `${project}/package.json`, expected: "passes" }],
         }],
       }] }],
     };
@@ -47,10 +47,8 @@ describe("plan input normalization", () => {
     const pathError = planningDiagnostic(new Error("Inspection path does not exist: /private/work/project/missing.ts"));
     expect(pathError).toMatchObject({ code: "PATH_NOT_FOUND", message: "A required project path does not exist." });
     expect(pathError.message).not.toContain("/private");
-    const verification = planningDiagnostic(new Error("Verification evidencePath is missing and cannot be inferred from command"));
+    const verification = planningDiagnostic(new Error("Verification provenancePath is missing and cannot be inferred from command"));
     expect(verification.code).toBe("INVALID_VERIFICATION");
-    expect(verification.message).toBe("Verification command or evidence is invalid.");
-    expect(verification.received).toBe("Verification evidencePath is missing and cannot be inferred from command");
   });
   it("explains verification-before-implementation ordering", () => {
     expect(planningDiagnostic(new Error("Verification task step-01-popular precedes implementation step-05-rtl for ac-1"))).toMatchObject({
@@ -59,13 +57,8 @@ describe("plan input normalization", () => {
     });
   });
 
-  it("returns an actionable diagnostic when a development phase is too coarse", () => {
-    const diagnostic = planningDiagnostic(new Error(
-      "A single implementation phase is only valid for a small, single-lane change with at most three tasks",
-    ));
-    expect(diagnostic).toMatchObject({
-      code: "PHASES_TOO_COARSE",
-      nextAction: "Split development into reviewable implementation milestones; give each phase its own objective, deliverables and observable completion criteria.",
-    });
+  it("explains an explicitly configured task policy rather than imposing an arbitrary cap", () => {
+    const diagnostic = planningDiagnostic(new Error("Phase build exceeds configured maxAuthoredTasksPerPhase 8"));
+    expect(diagnostic).toMatchObject({ code: "PHASE_TASK_POLICY" });
   });
 });

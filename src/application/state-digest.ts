@@ -56,12 +56,12 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
     deps.detect.readProgress(festivalDir),
     festivalOwner(festivalDir),
   ]);
-  const progress = summarizeProgress(events);
+  const progress = summarizeProgress(events, pending);
   const unit = deps.tracker.openTaskPathFor(sessionId) ?? "none";
   const festivalId = location.festivalId ?? basename(festivalDir);
   const coordinator = owner?.sessionId === sessionId;
   const lines = [
-    `fest: camp=${location.campName ?? "?"} festival=${festivalId} unit=${unit} pending=${pending.length} progress=${progress.completed}/${progress.total}`,
+    `fest: camp=${location.campName ?? "?"} festival=${festivalId} unit=${unit} pending=${pending.filter((task) => !task.done).length} progress=${progress.completed}/${progress.total}`,
   ];
   if (rulesLine) lines.push(rulesLine);
   if (conventionsLine) lines.push(conventionsLine);

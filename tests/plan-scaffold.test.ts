@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { finalizeApprovedScaffold } from "../src/application/plan-scaffold.js";
+import { finalizeApprovedScaffold, materializePlanWorkflows } from "../src/application/plan-scaffold.js";
 import type { PlanArtifact } from "../src/application/plan-artifacts.js";
 import { structuredHierarchyName } from "../src/application/structured-plan.js";
 
@@ -31,7 +31,7 @@ async function fixture() {
         sequences: [{ id: "core", name: "core_feature", tasks: [{
         id: "implement", title: "Implement_feature", description: "Enable the result without changing the API", dependsOn: [],
         implements: ["AC-01"], verifies: ["AC-01"], files: [{ path: "feature.ts", status: "existing" }],
-        verification: [{ command: "npm run test", cwd: ".", evidencePath: "package.json", expected: "Regression test exits zero" }],
+        verification: [{ command: "npm run test", cwd: ".", provenancePath: "package.json", expected: "Regression test exits zero" }],
       }] }] }],
     },
   };
@@ -102,5 +102,38 @@ describe("approved scaffold finalization", () => {
     expect(structuredHierarchyName("core_feature")).toBe("core_feature");
     expect(structuredHierarchyName("Implement_feature (server)")).toBe("Implement_feature server");
     expect(structuredHierarchyName("core_feature")).not.toContain("\\");
+  });
+
+  it("preserves a camp-specific contract and requires reviewed values for its custom markers", async () => {
+    const { root, festival, sequence, artifact } = await fixture();
+    const task = join(sequence, "01_implement_feature.md");
+    const original = await readFile(task, "utf8") + "\n## Compliance Contract\nKeep the mandated audit: [REPLACE: Security escalation owner]\n";
+    await writeFile(task, original);
+    await expect(finalizeApprovedScaffold(root, festival, artifact)).rejects.toThrow("Security escalation owner");
+    expect(await readFile(task, "utf8")).toBe(original);
+    artifact.templateMarkers = { "Security escalation owner": "Human security lead" };
+    await finalizeApprovedScaffold(root, festival, artifact);
+    expect(await readFile(task, "utf8")).toContain("Keep the mandated audit: Human security lead");
+  });
+
+  it("renders native dependency metadata from approved IDs rather than body prose", async () => {
+    const { root, festival, sequence, artifact } = await fixture();
+    const tasks = artifact.spec.phases[0]!.sequences[0]!.tasks;
+    tasks.push({ ...structuredClone(tasks[0]!), id: "verify", title: "Verify feature", dependsOn: ["implement"] });
+    await writeFile(join(sequence, "02_verify_feature.md"), "---\nfest_type: task\nfest_name: Verify feature\n---\n");
+    await finalizeApprovedScaffold(root, festival, artifact);
+    expect(await readFile(join(sequence, "02_verify_feature.md"), "utf8")).toContain("fest_dependencies:\n  - 01_implement_feature.md");
+  });
+
+  it.each(["before", "after"] as const)("materializes native %s workflow steps with real human checkpoints", async (position) => {
+    const { root, festival, artifact } = await fixture();
+    artifact.spec.phases[0]!.workflow = { position, steps: [{ id: "review-design", title: "Review design", goal: "Confirm the design", actions: ["Present findings"], output: "A reviewed design", checkpoint: true }] };
+    const calls: string[][] = [];
+    const files = await materializePlanWorkflows(root, festival, artifact, { raw: (_cwd, args) => { calls.push(args); return Promise.resolve({ code: 0, stdout: '{"ok":true}', stderr: "" }); } });
+    expect(files).toEqual([join(festival, "001_BUILD", "WORKFLOW.md")]);
+    expect(calls[0]).toEqual(expect.arrayContaining(["workflow", "create", "--position", position, "--agent"]));
+    const definition: unknown = JSON.parse(calls[0]![calls[0]!.indexOf("--steps") + 1]!);
+    expect(definition).toMatchObject({ steps: [{ name: "Review design", checkpoint: "approval_required" }] });
+    await expect(materializePlanWorkflows(root, festival, artifact, { raw: () => Promise.resolve({ code: 0, stdout: '{"ok":false,"errors":["rejected"]}', stderr: "" }) })).rejects.toThrow("rejected");
   });
 });

@@ -1,16 +1,17 @@
 import { createBrowserFlow, deleteBrowserFlow, listBrowserFlows, readBrowserFlow, runBrowserFlow, updateBrowserFlow, type BrowserFlowInput, type BrowserFlowField } from "../../application/browser-flows.js";
 import { deleteCredential, readCredential, secureCredentialStoreAvailable, storeCredential } from "../../application/secret-store.js";
 import { openIsolatedBrowser, playwrightAvailable } from "./playwright-browser.js";
-import type { CampDetect } from "../../ports.js";
+import type { CampDetect, ExecRunner } from "../../ports.js";
 import { clearFlowCheckpoint, flowSubmissionCheckpoint, markFlowSubmitted } from "../../application/browser-flow-state.js";
 import type { ZodLike } from "./zod-types.js";
 import { discoverHostCapabilities, inspectFlowUi, type FlowUi, type HostToolMetadata } from "../../application/host-capabilities.js";
 import { loadConfig } from "../../domain/config.js";
 import { conventionsEcho } from "../../application/conventions.js";
 import { DEFAULT_CONVENTIONS } from "../../domain/types.js";
+import { detectCliCapabilities } from "../../application/cli-capabilities.js";
 interface FlowContext { cwd: string; ui?: FlowUi; sessionManager?: { getSessionId?(): string }; agent?: { kind?: string }; getAsyncJobSnapshot?(): { running?: { id: string; type: string; status: string; label: string; agentId?: string }[]; recent?: { id: string; type: string; status: string; label: string; agentId?: string }[] } | null }
 export interface FlowHost { zod: ZodLike; registerTool(tool: Record<string, unknown>): void; getAllTools?(): HostToolMetadata[]; getActiveTools?(): string[] }
-interface FlowDeps { detect: CampDetect; host?: Pick<FlowHost, "getAllTools" | "getActiveTools"> }
+interface FlowDeps { detect: CampDetect; exec?: ExecRunner; host?: Pick<FlowHost, "getAllTools" | "getActiveTools"> }
 function out(value: unknown) { return { content: [{ type: "text", text: JSON.stringify(value) }] }; }
 function hasControl(value: string): boolean {
   for (let index = 0; index < value.length; index++) if (value.charCodeAt(index) < 32 || value.charCodeAt(index) === 127) return true;
@@ -50,23 +51,25 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
         ? conventionsEcho((await loadConfig(located.campRoot)).conventions)
         : conventionsEcho(DEFAULT_CONVENTIONS);
       return out({ kind: "agent_contract", contract: [
-        "LIFECYCLE: idea -> plan (fest_plan draft/preview/approve) -> scaffold -> ready -> active -> completed.",
+        "WORK SELECTION: small work -> camp_workitem/camp_intent; uncertain approach -> design; repeatable steps -> fest_workflow_native; multi-step execution -> fest_plan. Native state/readiness is authoritative.",
         "You are SUPERVISOR. Workers implement units you assign; they never drive the protocol.",
         "SUPERVISOR-ONLY tools (workers get blocked): fest_next, fest_commit, fest_gate_submit, fest_plan, fest_promote, fest_complete, fest_orphans, fest_advance.",
         "FLOW: camp_status (see all) -> fest_advance (one next action) -> do it -> repeat. Festivals end with fest_complete which merges worktrees and promotes to completed.",
         "GATES: never self-approve. fest_gate_submit opens a human decision dialog; headless returns status:awaiting_human — STOP and wait for /fest approve|reject.",
-        "PLANNING: fest_plan(draft) -> preview -> human approves -> scaffold. Rejects produce a fresh revision; scaffold auto-resolves the latest approved preview.",
-        "WORKTREES: promote->active creates projects/worktrees/<project>/<festival> (branch fest/<name>); fest_complete merges+removes them. Dirty/conflicting merges fail with code=WORKTREE_DIRTY/MERGE_CONFLICT.",
+        "PLANNING: fest_plan draft/diagnostics -> preview -> human approves exact revision -> scaffold. Discovery approval never authorizes implementation; use native workflow/research phases until requirements are ready.",
+        "WORKTREES: activation creates worktrees only for approved projects and binds sequence execution to them. Integration checks repository/branch/clean state, merges, restores bindings and removes worktrees; failures remain pending.",
         "ERRORS: every failure is {kind, code, retryable, nextAction}. Read nextAction before retrying; retryable=true is safe to retry. Orphans are self-healing on retry.",
         "RECOVERY: crashed mid-scaffold? Retry — dead journals auto-clear. Stuck? camp_status -> fest_advance. Orphans? fest_orphans.",
         "CAMP RULES: <camp>/RULES.md applies to every festival (camp_rules tool to read/add/remove) — a violation fails gates. Festival files embed it in a marked block; edits sync on reconcile.",
         `CONVENTIONS: ${conventions} (camp_conventions tool / /fest conventions to change; commits are validated against commitStyle before fest_commit).`,
         "WRITES: inside camp/festival dirs use native path-bearing tools; shell file mutation is blocked unless writeLocks=false.",
+        "VERIFICATION: planned provenancePath substantiates a command, not a result. Store actual output/observations with fest_evidence, then fest_verification. Browser/manual/research procedures are first-class checks. Failed, stale and untested checks do not become passed.",
+        "NATIVE FEATURES: fest_authoring templates/types/markers/config; fest_workflow_native standalone runs; fest_chain dependencies; camp_quest/workitem/triage; fest_research/feedback/replay/handoff. Judge re-runs require explicit operator opt-in; existing configured native hooks remain operator policy.",
       ].join("\n") });
     }
     const hostCapabilities = discoverHostCapabilities(deps.host), ui = inspectFlowUi(ctx.ui);
     const jobs = ctx.getAsyncJobSnapshot?.();
-    return out({ kind: "host_capabilities", metadataAvailable: hostCapabilities.metadataAvailable, uiInput: ui.input, uiConfirm: ui.confirm, maskedInput: ui.maskedInput, agentRole: ctx.agent?.kind ?? "unknown", browserMcp: hostCapabilities.browserTools.map(({ name, active }) => ({ name, active })), nativeAgentJobs: jobs ? [...(jobs.running ?? []), ...(jobs.recent ?? [])].map(({ id, type, status, label, agentId }) => ({ id, type, status, label, agentId })) : null, localPlaywright: await playwrightAvailable(), secureCredentialStore: await secureCredentialStoreAvailable(), secretInjection: "host-local Playwright only; no MCP secret injection claimed", limitations: ["Secret/OTP values are captured by a native masked terminal handler and never returned in tool results.", "Persistent browser cookies/session state are not stored.", "Keyring save requires secret-tool; without it credentials are run-only."] });
+    return out({ kind: "host_capabilities", nativeCli: deps.exec ? await detectCliCapabilities(deps.exec, { cwd: ctx.cwd }) : null, metadataAvailable: hostCapabilities.metadataAvailable, uiInput: ui.input, uiConfirm: ui.confirm, maskedInput: ui.maskedInput, agentRole: ctx.agent?.kind ?? "unknown", browserMcp: hostCapabilities.browserTools.map(({ name, active }) => ({ name, active })), nativeAgentJobs: jobs ? [...(jobs.running ?? []), ...(jobs.recent ?? [])].map(({ id, type, status, label, agentId }) => ({ id, type, status, label, agentId })) : null, localPlaywright: await playwrightAvailable(), secureCredentialStore: await secureCredentialStoreAvailable(), secretInjection: "host-local Playwright only; no MCP secret injection claimed", limitations: ["Secret/OTP values are captured by a native masked terminal handler and never returned in tool results.", "Persistent browser cookies/session state are not stored.", "Keyring save requires secret-tool; without it credentials are run-only."] });
   } });
   pi.registerTool({ name: "fest_flow", label: "Reusable Secure Browser Flow", description: "Persist HTTPS-origin-bound browser procedures, manage revisions and credential references, run with native UI prompts for credentials/OTP, or resume after explicit verification. Secrets never belong in tool arguments or results. Uses isolated Playwright browser, never reuses cookies. No CAPTCHA/security challenge bypass.", parameters: schema(z), async execute(_id: string, raw: unknown, _signal: unknown, _update: unknown, ctx: FlowContext) {
     const params = raw as { action: string; id?: string; revision?: string; name?: string; origin?: string; path?: string; fields?: BrowserFlowField[]; selectors?: BrowserFlowInput["selectors"]; credentialRef?: string };
