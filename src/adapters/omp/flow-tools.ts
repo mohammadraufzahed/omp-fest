@@ -52,6 +52,7 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
         "WORKTREES: promote->active creates projects/worktrees/<project>/<festival> (branch fest/<name>); fest_complete merges+removes them. Dirty/conflicting merges fail with code=WORKTREE_DIRTY/MERGE_CONFLICT.",
         "ERRORS: every failure is {kind, code, retryable, nextAction}. Read nextAction before retrying; retryable=true is safe to retry. Orphans are self-healing on retry.",
         "RECOVERY: crashed mid-scaffold? Retry — dead journals auto-clear. Stuck? camp_status -> fest_advance. Orphans? fest_orphans.",
+        "CAMP RULES: <camp>/RULES.md applies to every festival (camp_rules tool to read/add/remove) — a violation fails gates. Festival files embed it in a marked block; edits sync on reconcile.",
         "WRITES: inside camp/festival dirs use native path-bearing tools; shell file mutation is blocked unless writeLocks=false.",
       ].join("\n") });
     }

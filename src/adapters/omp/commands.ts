@@ -15,6 +15,8 @@ import type { LoopTracker } from "../../application/loop-tracker.js";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { integrationReviewStatus } from "../../application/integration-review.js";
+import { CAMP_RULES_FILE, CAMP_RULES_SKELETON, syncCampRules } from "../../application/festival-rules.js";
+import { writeAtomically } from "../../application/fs-atomic.js";
 import { recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
 import { referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
@@ -916,6 +918,80 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         send(pi, "fest-status", lines.join("\n"));
       },
     },
+    rules: {
+      desc: "camp RULES.md applied to every festival: /fest rules [show|add <rule>|remove <n|text>|sync]",
+      run: async (args, ctx) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        const root = location.campRoot;
+        if (!root) {
+          send(pi, "fest-status", "No camp found — /fest rules needs a camp (camp_init).");
+          return;
+        }
+        const rulesPath = join(root, CAMP_RULES_FILE);
+        const read = async () => (await readFile(rulesPath, "utf8").catch(() => "")).trimEnd();
+        const [action = "show", ...rest] = args;
+        if (action === "show" || action === "list") {
+          const text = await read();
+          if (!text) {
+            send(pi, "fest-status", `No ${CAMP_RULES_FILE} yet — /fest rules add <rule> creates it.`);
+            return;
+          }
+          if (action === "show") {
+            await showCard(ctx.ui, { title: "Camp rules", lines: text.split("\n"), footer: `${rulesPath} — applies to every festival` });
+            return;
+          }
+          const items = text.split("\n").map((line) => line.trim()).filter((line) => /^[-*]\s+\S/.test(line));
+          send(pi, "fest-status", `Camp rules (${rulesPath}):\n${items.map((line, i) => `  ${i + 1}. ${line.replace(/^[-*]\s+/, "")}`).join("\n") || "  (no bullet rules — edit the file directly)"}`);
+          return;
+        }
+        if (action === "add") {
+          const rule = rest.join(" ").trim();
+          if (!rule) {
+            send(pi, "fest-status", "Usage: /fest rules add <rule text>");
+            return;
+          }
+          const text = await read();
+          const bullet = `- ${rule.replace(/^[-*]\s+/, "")}`;
+          await writeAtomically(rulesPath, text ? `${text}\n${bullet}\n` : `${CAMP_RULES_SKELETON.trimEnd()}\n\n${bullet}\n`);
+          const synced = await syncCampRules(root);
+          send(pi, "fest-status", `Added camp rule: ${bullet}${synced ? ` — synced into ${synced} festival(s)` : ""}`);
+          return;
+        }
+        if (action === "remove") {
+          const selector = rest.join(" ").trim();
+          if (!selector) {
+            send(pi, "fest-status", "Usage: /fest rules remove <number|rule text>");
+            return;
+          }
+          const text = await read();
+          if (!text) {
+            send(pi, "fest-status", "No rules file.");
+            return;
+          }
+          const lines = text.split("\n");
+          const bullets = lines.map((line, i) => ({ line, i })).filter((row) => /^\s*[-*]\s+\S/.test(row.line));
+          const index = /^\d+$/.test(selector) ? Number.parseInt(selector, 10) : undefined;
+          const target = index !== undefined
+            ? bullets[index - 1]
+            : bullets.find((row) => row.line.replace(/^\s*[-*]\s+/, "") === selector || row.line.includes(selector));
+          if (!target) {
+            send(pi, "fest-status", `No matching rule — /fest rules to see the numbered list.`);
+            return;
+          }
+          lines.splice(target.i, 1);
+          await writeAtomically(rulesPath, `${lines.join("\n").trimEnd()}\n`);
+          const synced = await syncCampRules(root);
+          send(pi, "fest-status", `Removed camp rule: ${target.line.trim()}${synced ? ` — synced into ${synced} festival(s)` : ""}`);
+          return;
+        }
+        if (action === "sync") {
+          const synced = await syncCampRules(root);
+          send(pi, "fest-status", synced ? `Camp rules synced into ${synced} festival(s).` : "All festivals already match the camp rules.");
+          return;
+        }
+        send(pi, "fest-status", `Unknown /fest rules action "${action}" — show|list|add|remove|sync.`);
+      },
+    },
     settings: {
       desc: "view or toggle plugin settings (.ompfest.json): /fest settings [key] [value]",
       run: async (args, ctx) => {
@@ -974,7 +1050,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|portfolio|dispatch|pause|review|next|status|show|select|join|team|orphans|task|plan|promote|validate|markers|workflow|approve|reject|parallel|settings|doctor|cmd|camp|idea|help]",
+    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|portfolio|dispatch|pause|review|next|status|show|select|join|team|orphans|task|plan|promote|validate|markers|workflow|approve|reject|parallel|rules|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")

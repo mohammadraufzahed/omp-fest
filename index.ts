@@ -36,6 +36,7 @@ import { registerTools, type PiLike } from "./src/adapters/omp/tools.js";
 import { loadConfig } from "./src/domain/config.js";
 import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 import { readFestivalWorktrees } from "./src/application/festival-worktrees.js";
+import { campRules, campRulesCount, syncCampRules } from "./src/application/festival-rules.js";
 import { planInterviewKickoff } from "./src/domain/orientation.js";
 import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
 import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
@@ -306,8 +307,10 @@ export default function ompFest(pi: ExtensionApiLike): void {
         const recent = events.slice(-5).map((event) => `${event.ts} ${event.event}${event.task ? ` ${event.task}` : ""}`).join("; ");
         const progress = summarizeProgress(events);
         const worktrees = await readFestivalWorktrees(briefingDir).catch(() => []);
+        const rulesCount = campRulesCount(await campRules(orientation.location.campRoot ?? briefingDir).catch(() => undefined));
         const notes = [
           `omp-fest briefing: festival ${orientation.location.festivalId ?? basename(briefingDir)} ${progress.completed}/${progress.total} done${progress.currentLabel ? `, at ${progress.currentLabel}` : ""}.`,
+          rulesCount ? `camp rules: ${rulesCount} (RULES.md applies to every festival).` : "",
           recent ? `Recent: ${recent}` : "",
           progress.gatePending ? "A gate is PENDING human decision — do not approve it yourself; surface it and wait." : "",
           worktrees.length ? `Festival worktrees: ${worktrees.map((row) => row.worktreePath).join(", ")}` : "",
@@ -320,6 +323,9 @@ export default function ompFest(pi: ExtensionApiLike): void {
       void reconcileCamp(campRoot, async (root) => (await camp.projects(root)).map((project) => project.path)).then((summary) => {
         if (summary.total) silentContext(`omp-fest startup reconcile: ${summary.describe()}.`);
       }).catch((error: unknown) => pi.logger?.warn(`omp-fest startup reconcile failed: ${String(error)}`));
+      void syncCampRules(campRoot).then((synced) => {
+        if (synced) silentContext(`omp-fest: camp RULES.md synced into ${synced} festival(s).`);
+      }).catch((error: unknown) => pi.logger?.warn(`omp-fest camp rules sync failed: ${String(error)}`));
     }
     if (orientation.statusLine && config.statusLine) {
       ctx.ui.setStatus("omp-fest", orientation.statusLine);
