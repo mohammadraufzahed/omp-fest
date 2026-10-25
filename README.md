@@ -279,9 +279,13 @@ approved contract, retains independent user notes and constraints, and removes
 obsolete template sections instead of substituting fake placeholder values.
 Working directories are canonical camp-relative paths, and hierarchy underscores remain literal.
 Relative plan, `workingDir`, and `referencesDir` inputs resolve from the camp root,
-never the process working directory. Festival creation accepts only the exact
-`festivals/planning/<name>` target reported for the approved slug. The scaffold must
-validate before activation; real validation failures remain failures and are not bypassed.
+never the process working directory. Festival creation accepts the approved slug
+or its generated Festival ID (for example `<name>-SC0001`) as a direct child of
+`festivals/planning`. Existing copies block another scaffold; they are never overwritten.
+Transactions record and validate the actual generated path, and failed owned scaffolds
+are quarantined reversibly. Select the returned Festival ID with `/fest select <id>`
+before subsequent tool-based validation or promotion. The scaffold must validate before
+activation; real validation failures remain failures and are not bypassed.
 
 ### Plan from an inspected repository
 

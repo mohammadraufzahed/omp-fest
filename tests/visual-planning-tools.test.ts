@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -9,7 +9,7 @@ import { LoopTracker } from "../src/application/loop-tracker.js";
 import type { CampCli, FestCli } from "../src/ports.js";
 import { PAGE, SVG, TASK } from "./visual-fixture.js";
 import type { StructuredPlan } from "../src/application/structured-plan.js";
-import { listFestivalCreationOrphans } from "../src/application/festival-creation.js";
+import { listFestivalCreationOrphans, listQuarantinedFestivals } from "../src/application/festival-creation.js";
 import { festivalOwner } from "../src/application/festival-ownership.js";
 
 import { recordVisualEvidence } from "../src/application/visual-evidence.js";
@@ -305,6 +305,45 @@ describe("visual planning tool handoff", () => {
     const result = await scaffold({ name: "feature", plan });
     expect(result.kind).toBe("plan_failed");
     await expect(lstat(festival)).rejects.toThrow();
+    expect(await listFestivalCreationOrphans(root)).toEqual([]);
+  });
+  it.each([100, 80])("handles a generated Festival ID when validation scores %s", async (score) => {
+    const { root, plan, festival, fest, scaffoldFromPlan, scaffold } = await setup();
+    const generated = `${festival}-SS0002`;
+    const original = scaffoldFromPlan.getMockImplementation()!;
+    scaffoldFromPlan.mockImplementation(async (campRoot, options) => {
+      const output = jsonObject(await original(campRoot, options));
+      if (!options.dryRun) await rename(festival, generated);
+      return JSON.stringify({ ...output, festival_dir: generated });
+    });
+    vi.spyOn(fest, "validate").mockResolvedValue({ score, output: score === 100 ? "ok" : "unfilled markers" });
+    const result = await scaffold({ name: "feature", plan });
+    expect(await listFestivalCreationOrphans(root)).toEqual([]);
+    if (score === 100) {
+      expect(result).toMatchObject({ kind: "plan_scaffolded", festivalDir: generated });
+      expect(JSON.parse(await readFile(`${plan}.status.json`, "utf8"))).toMatchObject({ state: "scaffolded", festivalDir: generated });
+      expect(await readFile(join(generated, "APPROVED_PLAN.json"), "utf8")).toContain('"name": "feature"');
+      await expect(lstat(join(generated, ".omp-fest-creation.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    } else {
+      expect(result.kind).toBe("plan_failed");
+      await expect(lstat(generated)).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await listQuarantinedFestivals(root)).map((entry) => entry.name)).toEqual(["feature-SS0002"]);
+    }
+  });
+  it("preserves both existing generated IDs and refuses a third scaffold", async () => {
+    const { root, plan, festival, scaffoldFromPlan, scaffold } = await setup();
+    for (const suffix of ["SC0001", "SC0002"]) {
+      const existing = `${festival}-${suffix}`;
+      await mkdir(existing);
+      await writeFile(join(existing, "fest.yaml"), `id: feature-${suffix}\n`);
+      await writeFile(join(existing, "FESTIVAL_GOAL.md"), `Preserve ${suffix}`);
+    }
+    const result = await scaffold({ name: "feature", plan });
+    expect(result).toMatchObject({ kind: "plan_failed", code: "FESTIVAL_ALREADY_EXISTS" });
+    expect(scaffoldFromPlan.mock.calls.every(([, options]) => options.dryRun)).toBe(true);
+    for (const suffix of ["SC0001", "SC0002"]) {
+      expect(await readFile(join(`${festival}-${suffix}`, "FESTIVAL_GOAL.md"), "utf8")).toBe(`Preserve ${suffix}`);
+    }
     expect(await listFestivalCreationOrphans(root)).toEqual([]);
   });
 

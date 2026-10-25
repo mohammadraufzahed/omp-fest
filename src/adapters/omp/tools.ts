@@ -40,7 +40,7 @@ import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import type { ZodLike } from "./zod-types.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { registerFestivalTeamTools } from "./team-tools.js";
-import { beginFestivalCreation, classifyCreationOrphan, clearCreationJournal, completeFestivalCreation, creationJournalMayBeLive, festivalCreationIsScaffolded, listFestivalCreationOrphans, listQuarantinedFestivals, recordFestivalCreation, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
+import { beginFestivalCreation, classifyCreationOrphan, clearCreationJournal, completeFestivalCreation, creationJournalMayBeLive, festivalCreationIsScaffolded, festivalTargetMatchesName, listFestivalCreationOrphans, listQuarantinedFestivals, recordFestivalCreation, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { readFestivalTeam, joinFestivalTeam } from "../../application/festival-team.js";
 import { INTEGRATION_GUIDE, integrationReviewStatus } from "../../application/integration-review.js";
 import { planningDiagnostic } from "../../application/planning-errors.js";
@@ -1064,8 +1064,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return textResult({ kind: "plan_failed", error: "Parser output differs from the approved plan; no festival was created.", expected: approved.counts, actual: { phases: previewResult.phases_created, sequences: previewResult.sequences_created, tasks: previewResult.tasks_created }, output: previewOutput });
       }
       const beforeFestivals = await deps.detect.listFestivals(root);
-      if (beforeFestivals.some((festival) => festival.id === params.name || basename(festival.path) === params.name)) {
-        return textResult({ kind: "plan_failed", code: "FESTIVAL_ALREADY_EXISTS", error: `Festival ${params.name} already exists. Choose a new plan name; existing festivals are never overwritten.` });
+      const approvedName = approved.artifact.name;
+      if (beforeFestivals.some((festival) => festivalTargetMatchesName(approvedName, festival.id) || festivalTargetMatchesName(approvedName, basename(festival.path)))) {
+        return textResult({ kind: "plan_failed", code: "FESTIVAL_ALREADY_EXISTS", error: `Festival ${params.name} or its generated Festival ID already exists. Choose a new plan name; existing festivals are never overwritten.` });
       }
       // Resume or clear a leftover creation journal instead of dead-stopping the retry.
       const pending = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.name === params.name);
@@ -1155,6 +1156,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             hint: "Multiple projects in this camp — no workingDir given, so sequences have NO fest_working_dir and fest_next will fail validation. Ask the human which project this festival targets, then set fest_working_dir before activation.",
           } : {}),
           nextSteps: [
+            `Select the created festival explicitly with /fest select ${festId} before tool-based validation or promotion; scaffolding does not transfer session ownership.`,
             ...(bundle ? ["Link each relevant task doc with 'Visual reference: references/pages/<page>/PAGE.md' and component-level Done-When checks; fest_validate will reject unlinked pages."] : []),
             `Run fest_validate {festival:"${festId}"} — generated contract documents must contain zero template markers and valid camp-relative working directories`,
             "Generated documents have already been validated. If scope or acceptance changes, obtain new approval before promotion.",

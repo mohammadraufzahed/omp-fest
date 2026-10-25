@@ -29,6 +29,24 @@ describe("festival creation lifecycle", () => {
     expect(await readdir(festival)).toEqual([]);
     expect(await listFestivalCreationOrphans(camp)).toEqual([]);
   });
+  it("records and safely cleans a Festival-generated ID suffix", async () => {
+    const { camp, planning } = await fixture();
+    const receipt = await creation(camp, "feature");
+    const festival = join(planning, "feature-SS0002");
+    await mkdir(festival);
+    await recordFestivalCreation(receipt, festival);
+    expect(await listFestivalCreationOrphans(camp)).toEqual([{ receipt, festivalDir: festival }]);
+
+    expect(await rollbackFestivalCreation(receipt, festival)).toBeUndefined();
+    expect(await listFestivalCreationOrphans(camp)).toEqual([]);
+    expect((await listQuarantinedFestivals(camp)).map((entry) => entry.name)).toEqual(["feature-SS0002"]);
+  });
+
+  it("blocks another scaffold when the Festival-generated ID already exists", async () => {
+    const { camp, planning } = await fixture();
+    await mkdir(join(planning, "feature-SS0002"));
+    await expect(creation(camp, "feature")).rejects.toThrow("already exists in planning as feature-SS0002");
+  });
 
   it("refuses to finalize a scaffold when its transaction marker no longer matches", async () => {
     const { camp, planning } = await fixture(), receipt = await creation(camp), festival = join(planning, receipt.name);
@@ -111,7 +129,7 @@ describe("festival creation lifecycle", () => {
     await expect(recordFestivalCreation(receipt, nested)).rejects.toThrow("direct child");
     const mismatched = join(planning, "other-name");
     await mkdir(mismatched);
-    await expect(recordFestivalCreation(receipt, mismatched)).rejects.toThrow(`exactly festivals/planning/${receipt.name}`);
+    await expect(recordFestivalCreation(receipt, mismatched)).rejects.toThrow(`Festival target must be ${receipt.name} or the Festival-generated ID`);
     await expect(readFile(join(nested, ".omp-fest-creation.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(join(mismatched, ".omp-fest-creation.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });

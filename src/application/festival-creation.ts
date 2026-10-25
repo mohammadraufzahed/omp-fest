@@ -13,6 +13,12 @@ type Journal = CreationReceipt & { version: number; state: "scaffolding"; preexi
 export interface CreationReceipt { id: string; name: string; planPath: string; sessionId: string; startedAt: string; journalPath: string; pid?: number; host?: string }
 export interface FestivalCreationOrphan { receipt: CreationReceipt; festivalDir?: string }
 
+export function festivalTargetMatchesName(name: string, targetName: string): boolean {
+  if (targetName === name) return true;
+  const prefix = `${name}-`;
+  return targetName.startsWith(prefix) && /^[A-Z]{2}\d{4}$/.test(targetName.slice(prefix.length));
+}
+
 function inside(root: string, path: string): boolean {
   const rel = relative(root, path);
   return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
@@ -170,8 +176,8 @@ export async function beginFestivalCreation(campRoot: string, name: string, plan
     for (const orphan of collisions) {
       await rm(orphan.receipt.journalPath, { force: true });
     }
-    const existing = await lstat(join(planning, name)).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
-    if (existing) throw new Error(`Festival ${name} already exists in planning; existing data is never overwritten.`);
+    const existing = (await readdir(planning)).find((entry) => festivalTargetMatchesName(name, entry));
+    if (existing) throw new Error(`Festival ${name} already exists in planning as ${existing}; existing data is never overwritten.`);
     const id = randomUUID(), journalPath = join(dir, `${id}.json`);
     const record: Journal = { version: JOURNAL_VERSION, id, name, planPath, sessionId, startedAt: new Date().toISOString(), journalPath, state: "scaffolding", preexisting: await readdir(planning), pid: process.pid, host: hostname() };
     const temporary = `${journalPath}.${randomUUID()}.tmp`;
@@ -192,7 +198,9 @@ export async function recordFestivalCreation(receipt: CreationReceipt, festivalD
     throw new Error("Festival creation receipt does not match journal.");
   }
   const { target } = await safeFestivalPath(camp, festivalDir);
-  if (basename(target) !== receipt.name) throw new Error(`Festival target must be exactly festivals/planning/${receipt.name}.`);
+  if (!festivalTargetMatchesName(receipt.name, basename(target))) {
+    throw new Error(`Festival target must be ${receipt.name} or the Festival-generated ID for that approved name.`);
+  }
   if (journal.preexisting.includes(basename(target))) throw new Error("Cannot mark a pre-existing festival as newly created.");
   const markerPath = join(target, MARKER);
   const current = await lstat(markerPath).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
@@ -230,7 +238,7 @@ export async function rollbackFestivalCreation(receipt: CreationReceipt, created
   let target: string;
   try {
     ({ target } = await safeFestivalPath(camp, candidate));
-    if (journal.preexisting.includes(basename(target)) || basename(target) !== journal.name || !await markerFor(target, receipt.id)) return { receipt, festivalDir: target };
+    if (journal.preexisting.includes(basename(target)) || !festivalTargetMatchesName(journal.name, basename(target)) || !await markerFor(target, receipt.id)) return { receipt, festivalDir: target };
     await quarantineOwnedFestival(camp, target);
   } catch { return { receipt, festivalDir: candidate }; }
   await removeJournal(journal.journalPath, camp, receipt.id);
