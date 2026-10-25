@@ -176,6 +176,15 @@ describe("structured plan preparation", () => {
     expect(result.markdown).toContain("### implement — Enable \\`feature\\` (server)");
   });
 
+  it("strips path separators from hierarchy names so upstream cannot create nested paths", async () => {
+    const { root, workingDir, spec, implement } = await fixture();
+    implement.title = "Enable api/worker endpoints";
+    expect(structuredHierarchyName(implement.title)).toBe("Enable api worker endpoints");
+    expect(structuredHierarchyName("Enable api\\worker")).toBe("Enable api worker");
+    const result = await prepareStructuredPlan(root, workingDir, "feature", spec);
+    expect(result.markdown).toContain("Enable api worker endpoints");
+  });
+
   it("allows nonblocking questions and exposes them for approval", async () => {
     const { root, workingDir, spec } = await fixture();
     spec.questions.push({ question: "Should a later release add analytics?", blocking: false });

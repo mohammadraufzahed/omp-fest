@@ -3,7 +3,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { LockBusyError, processIsAlive, withStaleAwareLock } from "../src/application/fs-lock.js";
-import { beginFestivalCreation, classifyCreationOrphan, listFestivalCreationOrphans } from "../src/application/festival-creation.js";
+import { beginFestivalCreation, classifyCreationOrphan, clearCreationJournal, creationJournalMayBeLive, listFestivalCreationOrphans } from "../src/application/festival-creation.js";
 import { claimFestivalOwnership, festivalOwner, touchFestivalOwnership } from "../src/application/festival-ownership.js";
 import { createPlanDraft, deletePlanDraft, deletePlanDraftsForPlan, listPlanDrafts, sweepPlanDraftDebris } from "../src/application/plan-drafts.js";
 import { expireStalePlanPreviews, listPlanPreviews } from "../src/application/plan-artifacts.js";
@@ -99,6 +99,57 @@ describe("creation journal recovery", () => {
     const retried = await beginFestivalCreation(root, "retry-festival", plan, "session-2");
     expect(retried.id).not.toBe(first.id);
     expect((await listFestivalCreationOrphans(root)).filter((orphan) => orphan.receipt.name === "retry-festival")).toHaveLength(1);
+  });
+
+  it("treats a journal whose recorded pid is dead as stale and lets retry through", async () => {
+    const root = await camp();
+    const plan = join(root, "plan.md");
+    await writeFile(plan, "# plan\n");
+    const first = await beginFestivalCreation(root, "dead-pid-festival", plan, "session-1");
+    // Simulate a killed scaffold: fresh journal, but the owner pid no longer exists.
+    const journal = JSON.parse(await readFile(first.journalPath, "utf8")) as Record<string, unknown>;
+    journal.pid = deadPid();
+    journal.host = hostname();
+    await writeFile(first.journalPath, JSON.stringify(journal));
+    const orphan = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.name === "dead-pid-festival");
+    expect(orphan).toBeDefined();
+    expect(classifyCreationOrphan(orphan!)).toBe("stale");
+    expect(creationJournalMayBeLive(orphan!, "session-2")).toBe(false);
+    const retried = await beginFestivalCreation(root, "dead-pid-festival", plan, "session-2");
+    expect(retried.id).not.toBe(first.id);
+  });
+
+  it("never lets a journal from the same session block its own retry", async () => {
+    const root = await camp();
+    const plan = join(root, "plan.md");
+    await writeFile(plan, "# plan\n");
+    const first = await beginFestivalCreation(root, "own-retry", plan, "session-1");
+    const orphan = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.name === "own-retry");
+    expect(creationJournalMayBeLive(orphan!, "session-1")).toBe(false);
+    const retried = await beginFestivalCreation(root, "own-retry", plan, "session-1");
+    expect(retried.id).not.toBe(first.id);
+  });
+
+  it("still flags a fresh journal from a live foreign process as possibly live", async () => {
+    const root = await camp();
+    const plan = join(root, "plan.md");
+    await writeFile(plan, "# plan\n");
+    await beginFestivalCreation(root, "live-peer", plan, "session-1");
+    const orphan = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.name === "live-peer");
+    // The journal records this process's pid — alive — so another session must not clear it.
+    expect(creationJournalMayBeLive(orphan!, "session-2")).toBe(true);
+    await expect(beginFestivalCreation(root, "live-peer", plan, "session-2")).rejects.toThrow("incomplete creation transaction");
+  });
+
+  it("clearCreationJournal removes the journal so retry proceeds", async () => {
+    const root = await camp();
+    const plan = join(root, "plan.md");
+    await writeFile(plan, "# plan\n");
+    await beginFestivalCreation(root, "clearable", plan, "session-1");
+    const orphan = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.name === "clearable");
+    await clearCreationJournal(root, orphan!);
+    expect((await listFestivalCreationOrphans(root)).filter((item) => item.receipt.name === "clearable")).toHaveLength(0);
+    await expect(beginFestivalCreation(root, "clearable", plan, "session-2")).resolves.toBeDefined();
   });
 });
 

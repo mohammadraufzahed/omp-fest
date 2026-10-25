@@ -362,7 +362,9 @@ function markdownText(value: string): string {
 
 /** Exact label supplied to upstream hierarchy parsing, before its filename normalization. */
 export function structuredHierarchyName(value: string): string {
-  const label = text(value, "Hierarchy name").replace(/[`()]/g, "").replace(/[\\*{}<>#|[\]]/g, " ").replace(/\s+/g, " ").trim();
+  // Path separators must go: upstream derives task filenames from these labels,
+  // and "/" produces a nested path that fails mid-scaffold with ENOENT.
+  const label = text(value, "Hierarchy name").replace(/[`()]/g, "").replace(/[/\\*{}<>#|[\]]/g, " ").replace(/\s+/g, " ").trim();
   if (!label) throw new Error("Hierarchy name must contain parser-safe text");
   return label;
 }

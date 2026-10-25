@@ -4,7 +4,7 @@
  * (verified against upstream types), so API drift is caught here.
  */
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import ompFest from "../index.js";
@@ -16,6 +16,7 @@ import { integrationReviewStatus } from "../src/application/integration-review.j
 import { readPortfolioState, reservePortfolioAssignment, updatePortfolioAssignment } from "../src/application/portfolio-state.js";
 import { SUPERVISOR_ENTRY } from "../src/application/supervisor.js";
 import { beginFestivalCreation, listQuarantinedFestivals, recordFestivalCreation, rollbackFestivalCreation } from "../src/application/festival-creation.js";
+import { processIsAlive } from "../src/application/fs-lock.js";
 
 interface AutocompleteItem {
   value: string;
@@ -658,6 +659,49 @@ it("tool_call hook lets all writes and installs through when writeLocks is false
   expect(await hook({ toolName: "bash", input: { command: "cat > src/file.ts" } }, ctx)).toBeUndefined();
   expect(await hook({ toolName: "bash", input: { command: "rm -rf src/legacy" } }, ctx)).toBeUndefined();
   expect(await hook({ toolName: "write", input: { path: join(root, "src/new.ts") } }, ctx)).toBeUndefined();
+});
+
+it("ignores scheme-like pseudo paths in write targets", async () => {
+  const root = await makeCamp();
+  const project = join(root, "projects", "mod");
+  const target = join(project, "src", "real.ts");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await mkdir(join(project, "src"), { recursive: true });
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const hook = handlers.get("tool_call") as (event: unknown, ctx: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>;
+
+  const event = { toolName: "write", toolCallId: "scheme-write", input: { paths: ["xd:/fest_raw", target] } };
+  expect(await hook(event, ctx)).toBeUndefined();
+  const reservations = await listProjectReservations(project);
+  expect(reservations).toHaveLength(1);
+  expect(reservations[0]!.files).toEqual(["src/real.ts"]);
+});
+
+it("fest_orphans lists a dead journal and rolls it back end to end", async () => {
+  const root = await makeCamp();
+  await mkdir(join(root, "festivals", "planning"), { recursive: true });
+  const plan = join(root, "plan.md");
+  await writeFile(plan, "# plan\n");
+  const receipt = await beginFestivalCreation(root, "tool-orphan", plan, "session-1");
+  // Simulate the scaffold process dying: same host, dead pid.
+  const journal = JSON.parse(await readFile(receipt.journalPath, "utf8")) as Record<string, unknown>;
+  let pid = 4_000_000;
+  while (processIsAlive(pid)) pid -= 1_000_000;
+  journal.pid = pid;
+  journal.host = hostname();
+  await writeFile(receipt.journalPath, JSON.stringify(journal));
+  const { pi, toolExecutors, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const orphans = toolExecutors.get("fest_orphans")!;
+
+  const listed = JSON.parse((await orphans("id", { action: "list" }, undefined, undefined, ctx)).content[0]!.text) as { journals: { transaction: string; state: string; live: boolean }[] };
+  expect(listed.journals).toMatchObject([{ transaction: receipt.id, state: "stale", live: false }]);
+
+  const rolled = JSON.parse((await orphans("id", { action: "rollback", transaction: receipt.id }, undefined, undefined, ctx)).content[0]!.text) as { kind: string };
+  expect(rolled.kind).toBe("orphan_cleared");
+  const relisted = JSON.parse((await orphans("id", { action: "list" }, undefined, undefined, ctx)).content[0]!.text) as { journals: unknown[] };
+  expect(relisted.journals).toHaveLength(0);
 });
 
 it("tool_call hook stays silent outside a camp", async () => {
