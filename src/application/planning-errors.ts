@@ -1,5 +1,6 @@
 export interface PlanningDiagnostic { code: string; field?: string; expected?: string; received?: string; message: string; nextAction: string }
 const rules: [RegExp, string, string, string, string][] = [
+  [/single implementation phase is only valid/i, "PHASES_TOO_COARSE", "multiple milestone phases for substantive development", "The development plan collapses substantial work into one phase.", "Split the work into multiple meaningful implementation milestones; keep each phase focused and reviewable."],
   [/stable identifier|duplicate id/i, "INVALID_IDENTIFIER", "a stable lowercase ID", "The plan contains an invalid or duplicate identifier.", "Fix the named ID; retain existing IDs for already accepted plan elements."],
   [/inspection path does not exist|existing file does not exist|verification .* does not exist|workingDir does not exist|does not exist:/i, "PATH_NOT_FOUND", "an existing project-relative path", "A required project path does not exist.", "Inspect the project and replace this path with a real file or directory."],
   [/must be project-relative|must stay within project/i, "PROJECT_RELATIVE_PATH_REQUIRED", "a path relative to the selected project", "A project path must stay inside the selected project.", "Remove the absolute prefix and retry with a project-relative path."],

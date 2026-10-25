@@ -291,9 +291,12 @@ The agent records inspected paths and asks only about material choices that the
 request and repository cannot answer. It does not ask you to restate known facts,
 invent a questionnaire, or require you to design the phase hierarchy.
 
-The plan is proportional: one phase, one sequence and an executable task are enough
-for a simple change. Larger work uses real milestones and dependency-ordered tasks;
-parallel lanes are optional and must be genuinely independent. Screenshots add the
+The plan is proportional: a single implementation phase is only for a small,
+single-lane change with at most three tasks. Substantive development must use
+multiple meaningful implementation phases, each representing an independently
+reviewable milestone; do not put several lanes or milestones into one catch-all
+phase. Extra phases must reflect real milestones, not arbitrary task splits.
+Parallel lanes are optional and must be genuinely independent. Screenshots add the
 visual extraction flow below; text-only plans do not need image artifacts.
 
 The `StructuredPlan` contract is:

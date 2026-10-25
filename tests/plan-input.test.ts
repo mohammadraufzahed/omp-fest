@@ -45,4 +45,14 @@ describe("plan input normalization", () => {
     expect(verification.code).toBe("INVALID_VERIFICATION");
     expect(verification.message).toBe("Verification command or evidence is invalid.");
   });
+
+  it("returns an actionable diagnostic when a development phase is too coarse", () => {
+    const diagnostic = planningDiagnostic(new Error(
+      "A single implementation phase is only valid for a small, single-lane change with at most three tasks",
+    ));
+    expect(diagnostic).toMatchObject({
+      code: "PHASES_TOO_COARSE",
+      nextAction: "Split the work into multiple meaningful implementation milestones; keep each phase focused and reviewable.",
+    });
+  });
 });

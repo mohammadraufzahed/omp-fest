@@ -473,6 +473,13 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
   for (const task of tasks) {
     if (!necessary.has(task.id)) throw new Error(`Unnecessary task ${task.id}: link acceptance coverage or make it a prerequisite of covered work`);
   }
+  if (plan.phases.length === 1 && plan.phases[0]?.type === "implementation") {
+    const phase = plan.phases[0];
+    const taskCount = phase.sequences.reduce((total, sequence) => total + sequence.tasks.length, 0);
+    if (phase.sequences.length > 1 || taskCount > 3) {
+      throw new Error("A single implementation phase is only valid for a small, single-lane change with at most three tasks; split substantive development into distinct milestone phases.");
+    }
+  }
   const counts = { phases: plan.phases.length, sequences: plan.phases.reduce((total, phase) => total + phase.sequences.length, 0), tasks: tasks.length };
   const overview = [
     "## Festival Goal", markdownText(plan.goal), "", "## Scope", ...plan.scope.map((item) => `- ${markdownText(item)}`),

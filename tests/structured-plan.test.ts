@@ -140,7 +140,7 @@ describe("structured plan preparation", () => {
   it("requires explicit transitive dependencies for cross-sequence acceptance verification", async () => {
     const { root, workingDir, spec, verify } = await fixture();
     spec.phases[0]!.sequences[0]!.tasks.pop();
-    spec.phases[0]!.sequences.push({ id: "sequence-checks", name: "Checks", tasks: [verify] });
+    spec.phases.push({ id: "phase-checks", name: "Checks", type: "validation", sequences: [{ id: "sequence-checks", name: "Checks", tasks: [verify] }] });
     verify.dependsOn = [];
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("Cross-sequence verification");
     verify.dependsOn = ["implement"];
@@ -189,6 +189,56 @@ describe("structured plan preparation", () => {
     const { root, workingDir, spec } = await fixture();
     spec.questions.push({ question: "Should a later release add analytics?", blocking: false });
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain("Nonblocking: Should a later release add analytics?");
+  });
+
+  it("requires substantive development to use distinct milestone phases", async () => {
+    const { root, workingDir, spec } = await fixture();
+    const first = spec.phases[0]!;
+    const sequence = first.sequences[0]!;
+    const verify = sequence.tasks.pop()!;
+    verify.dependsOn = ["implement"];
+    first.sequences.push({ id: "sequence-checks", name: "Regression checks", tasks: [verify] });
+    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow(
+      "A single implementation phase is only valid for a small, single-lane change",
+    );
+  });
+
+  it("allows a compact single-lane implementation phase at the three-task boundary", async () => {
+    const { root, workingDir, spec } = await fixture();
+    const tasks = spec.phases[0]!.sequences[0]!.tasks;
+    const verify = tasks[1]!;
+    const prerequisite = structuredClone(tasks[0]!);
+    prerequisite.id = "prepare";
+    prerequisite.title = "Prepare behavior";
+    prerequisite.implements = [];
+    prerequisite.verifies = [];
+    prerequisite.dependsOn = [];
+    verify.dependsOn = ["prepare"];
+    tasks.splice(1, 0, prerequisite);
+    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).resolves.toMatchObject({
+      counts: { phases: 1, sequences: 1, tasks: 3 },
+    });
+  });
+
+  it("rejects a four-task single-phase development plan", async () => {
+    const { root, workingDir, spec } = await fixture();
+    const tasks = spec.phases[0]!.sequences[0]!.tasks;
+    const [implement, verify] = tasks;
+    const first = structuredClone(implement!);
+    first.id = "extra-first";
+    first.title = "Prepare shared behavior";
+    first.implements = [];
+    first.verifies = [];
+    first.verification = [];
+    const second = structuredClone(first);
+    second.id = "extra-second";
+    second.title = "Connect supporting behavior";
+    second.dependsOn = ["extra-first"];
+    verify!.dependsOn = ["extra-second"];
+    tasks.splice(1, 0, first, second);
+    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow(
+      "at most three tasks",
+    );
   });
 
   it.each([
