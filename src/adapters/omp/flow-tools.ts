@@ -5,6 +5,9 @@ import type { CampDetect } from "../../ports.js";
 import { clearFlowCheckpoint, flowSubmissionCheckpoint, markFlowSubmitted } from "../../application/browser-flow-state.js";
 import type { ZodLike } from "./zod-types.js";
 import { discoverHostCapabilities, inspectFlowUi, type FlowUi, type HostToolMetadata } from "../../application/host-capabilities.js";
+import { loadConfig } from "../../domain/config.js";
+import { conventionsEcho } from "../../application/conventions.js";
+import { DEFAULT_CONVENTIONS } from "../../domain/types.js";
 interface FlowContext { cwd: string; ui?: FlowUi; sessionManager?: { getSessionId?(): string }; agent?: { kind?: string }; getAsyncJobSnapshot?(): { running?: { id: string; type: string; status: string; label: string; agentId?: string }[]; recent?: { id: string; type: string; status: string; label: string; agentId?: string }[] } | null }
 export interface FlowHost { zod: ZodLike; registerTool(tool: Record<string, unknown>): void; getAllTools?(): HostToolMetadata[]; getActiveTools?(): string[] }
 interface FlowDeps { detect: CampDetect; host?: Pick<FlowHost, "getAllTools" | "getActiveTools"> }
@@ -42,6 +45,10 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
   const z = pi.zod;
   pi.registerTool({ name: "fest_capabilities", label: "Discover Fest Capabilities", description: "Report actual omp host UI, active browser MCP, current agent role/lifecycle and secure credential-store capabilities. Agent role is not a worker-launch capability check. Does not claim unsupported tool execution or secret injection. contract:true returns the ~800-token omp-fest agent contract (lifecycle, supervisor-only tools, error codes).", parameters: z.object({ contract: z.boolean().optional().describe("Return the agent contract instead of host capabilities") }), async execute(_id: string, params: { contract?: boolean }, _signal: unknown, _update: unknown, ctx: FlowContext) {
     if (params.contract) {
+      const located = await deps.detect.locate(ctx.cwd);
+      const conventions = located.campRoot
+        ? conventionsEcho((await loadConfig(located.campRoot)).conventions)
+        : conventionsEcho(DEFAULT_CONVENTIONS);
       return out({ kind: "agent_contract", contract: [
         "LIFECYCLE: idea -> plan (fest_plan draft/preview/approve) -> scaffold -> ready -> active -> completed.",
         "You are SUPERVISOR. Workers implement units you assign; they never drive the protocol.",
@@ -53,6 +60,7 @@ export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
         "ERRORS: every failure is {kind, code, retryable, nextAction}. Read nextAction before retrying; retryable=true is safe to retry. Orphans are self-healing on retry.",
         "RECOVERY: crashed mid-scaffold? Retry — dead journals auto-clear. Stuck? camp_status -> fest_advance. Orphans? fest_orphans.",
         "CAMP RULES: <camp>/RULES.md applies to every festival (camp_rules tool to read/add/remove) — a violation fails gates. Festival files embed it in a marked block; edits sync on reconcile.",
+        `CONVENTIONS: ${conventions} (camp_conventions tool / /fest conventions to change; commits are validated against commitStyle before fest_commit).`,
         "WRITES: inside camp/festival dirs use native path-bearing tools; shell file mutation is blocked unless writeLocks=false.",
       ].join("\n") });
     }

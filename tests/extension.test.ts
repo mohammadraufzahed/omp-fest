@@ -896,3 +896,59 @@ it("camp_rules manages the camp RULES.md and propagates to festivals", async () 
   const worker = JSON.parse((await rules("t", { action: "add", rule: "x" }, undefined, undefined, { cwd: root, agent: { kind: "sub" } })).content[0]!.text) as { kind: string };
   expect(worker.kind).toBe("supervisor_authority_required");
 });
+
+it("camp_conventions shows, sets, prompts and resets conventions", async () => {
+  const root = await makeCamp();
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const conv = toolExecutors.get("camp_conventions"), status = toolExecutors.get("camp_status");
+  if (!conv || !status) throw new Error("Missing conventions tools");
+  const ctx = { cwd: root, sessionManager: { getSessionId: () => "main" } };
+  const shown = JSON.parse((await conv("t", { action: "show" }, undefined, undefined, ctx)).content[0]!.text) as { kind: string; conventions: { commitStyle: string } };
+  expect(shown.kind).toBe("conventions");
+  expect(shown.conventions.commitStyle).toBe("free");
+  const set = JSON.parse((await conv("t", { action: "set", key: "commitStyle", value: "conventional" }, undefined, undefined, ctx)).content[0]!.text) as { conventions: { commitStyle: string; branch: string } };
+  expect(set.conventions).toMatchObject({ commitStyle: "conventional", branch: "fest/{festival}" });
+  const view = JSON.parse((await status("t", {}, undefined, undefined, ctx)).content[0]!.text) as { conventions?: string };
+  expect(view.conventions).toContain("commit=conventional");
+  const prompted = JSON.parse((await conv("t", { action: "prompt", words: "feature branches, squash merges" }, undefined, undefined, ctx)).content[0]!.text) as { applied: Record<string, string>; conventions: { branch: string; finishMerge: string } };
+  expect(prompted.applied).toMatchObject({ branch: "feature/{festival}", finishMerge: "squash" });
+  expect(prompted.conventions).toMatchObject({ branch: "feature/{festival}", finishMerge: "squash" });
+  const reset = JSON.parse((await conv("t", { action: "reset" }, undefined, undefined, ctx)).content[0]!.text) as { conventions: { commitStyle: string; branch: string } };
+  expect(reset.conventions).toMatchObject({ commitStyle: "free", branch: "fest/{festival}" });
+  const worker = JSON.parse((await conv("t", { action: "set", key: "commitStyle", value: "conventional" }, undefined, undefined, { cwd: root, agent: { kind: "sub" } })).content[0]!.text) as { kind: string };
+  expect(worker.kind).toBe("supervisor_authority_required");
+  const bad = JSON.parse((await conv("t", { action: "set", key: "commitStyle", value: "bogus" }, undefined, undefined, ctx)).content[0]!.text) as { kind: string; code: string };
+  expect(bad).toMatchObject({ kind: "conventions_failed", code: "BAD_VALUE" });
+});
+
+it("fest_commit rejects non-conventional messages when commitStyle=conventional", async () => {
+  const root = await makeCamp();
+  const { saveConfig } = await import("../src/domain/config.js");
+  await saveConfig(root, { conventions: { commitStyle: "conventional" } as never });
+  const festival = join(root, "festivals", "active", "conv-commit");
+  await mkdir(festival, { recursive: true });
+  await writeFile(join(festival, "fest.yaml"), "id: conv-commit\n");
+  const owner = await claimFestivalOwnership(festival, "conv-coord");
+  if (owner.kind !== "claimed") throw new Error("claim failed");
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const commit = toolExecutors.get("fest_commit");
+  if (!commit) throw new Error("Missing fest_commit tool");
+  const ctx = { cwd: root, sessionManager: { getSessionId: () => "conv-coord" }, agent: { kind: "main" } };
+  const rejected = JSON.parse((await commit("t", { message: "did stuff", festival: "conv-commit" }, undefined, undefined, ctx)).content[0]!.text) as { kind?: string; code?: string };
+  expect(rejected).toMatchObject({ kind: "commit_blocked", code: "COMMIT_STYLE" });
+});
+
+it("fest_capabilities contract includes the camp conventions line", async () => {
+  const root = await makeCamp();
+  const { saveConfig } = await import("../src/domain/config.js");
+  await saveConfig(root, { conventions: { commitStyle: "conventional" } as never });
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const capabilities = toolExecutors.get("fest_capabilities");
+  if (!capabilities) throw new Error("Missing fest_capabilities tool");
+  const contract = JSON.parse((await capabilities("t", { contract: true }, undefined, undefined, { cwd: root })).content[0]!.text) as { contract: string };
+  expect(contract.contract).toContain("CONVENTIONS:");
+  expect(contract.contract).toContain("commit=conventional");
+});

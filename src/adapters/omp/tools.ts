@@ -32,7 +32,9 @@ import { finalizeApprovedScaffold } from "../../application/plan-scaffold.js";
 import { createPlanDraft, deletePlanDraft, deletePlanDraftsForPlan, readPlanDraft, updatePlanDraft, listPlanDrafts, type PlanDraftFields } from "../../application/plan-drafts.js";
 import { findPlanningConflicts } from "../../application/planning-conflicts.js";
 import { classifyAttachment, type AttachmentRole } from "../../domain/reference-classification.js";
-import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
+import { DEFAULT_CONFIG, type Conventions, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
+import { loadConfig, saveConfig } from "../../domain/config.js";
+import { checkCommitMessage, COMMIT_STYLE_DESC, conventionsEcho, festivalNameOk, parseConventionWords } from "../../application/conventions.js";
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import type { ZodLike } from "./zod-types.js";
@@ -313,7 +315,8 @@ async function coordinatorRequired(dir: string, sessionId: string): Promise<Tool
 async function maybeCreateFestivalWorktrees(deps: ToolDeps, campRoot: string, festivalDir: string, festivalName: string) {
   if (!deps.exec || !festivalDir.includes(`${sep}festivals${sep}active${sep}`)) return [];
   try {
-    return await createFestivalWorktrees(deps.exec, campRoot, festivalDir, festivalName, await deps.camp.projects(campRoot));
+    const conventions = (await loadConfig(campRoot)).conventions;
+    return await createFestivalWorktrees(deps.exec, campRoot, festivalDir, festivalName, await deps.camp.projects(campRoot), conventions);
   } catch (error) {
     return { error: String(error) };
   }
@@ -638,7 +641,15 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (supervisor.state(sessionIdOf(ctx)).workers.some((worker) => worker.status !== "accepted" && worker.status !== "failed")) {
         return textResult({ kind: "commit_blocked", hint: "Outstanding workers may have unfinished shared-checkout changes. Review and settle all assignments before committing." });
       }
-      const hash = await deps.fest.commit(r.dir, params.message);
+      const conventions = campRoot ? (await loadConfig(campRoot)).conventions : DEFAULT_CONFIG.conventions;
+      const checked = checkCommitMessage(conventions, params.message, {
+        camp: campRoot ? basename(campRoot) : "camp",
+        festival: basename(r.dir),
+      });
+      if (!checked.ok) {
+        return textResult({ kind: "commit_blocked", code: "COMMIT_STYLE", retryable: true, error: checked.error, hint: `Camp convention: ${COMMIT_STYLE_DESC} — set via /fest conventions or .ompfest.json conventions.commitStyle.` });
+      }
+      const hash = await deps.fest.commit(r.dir, checked.message);
       deps.tracker.committed(sessionIdOf(ctx));
       return textResult({ status: "committed", hash });
     },
@@ -966,6 +977,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       if (params.action === "scaffold") {
         try {
+          const nameCheck = params.name ? festivalNameOk((await loadConfig(root)).conventions, params.name) : { ok: true };
+          if (!nameCheck.ok) throw new Error(`Festival name "${params.name}" violates conventions.festivalName: /${nameCheck.pattern}/`);
           const revision = params.approvedRevision ?? (await listPlanPreviews(root))
             .filter((preview) => preview.name === params.name && preview.state === "approved" && preview.planRevision)
             .map((preview) => preview.planRevision ?? "")
@@ -1385,6 +1398,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const reservations = (await Promise.all(projects.map((project) =>
         listProjectReservations(isAbsolute(project.path) ? project.path : resolve(root, project.path)).catch(() => []),
       ))).flat();
+      const campConfig = await loadConfig(root);
       const rows = await Promise.all(festivals.map(async (festival) => {
         const owner = await festivalOwner(festival.path).catch(() => undefined);
         const worktrees = await readFestivalWorktrees(festival.path).catch(() => []);
@@ -1409,6 +1423,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         festivals: rows,
         orphans: orphans.map((orphan) => ({ transaction: orphan.receipt.id, name: orphan.receipt.name, state: classifyCreationOrphan(orphan) })),
         reservations: reservations.map((row) => ({ worker: row.worker ?? row.sessionId, files: row.files, project: basename(row.projectDir) })),
+        conventions: conventionsEcho(campConfig.conventions),
+        ...(campConfig.configWarnings?.length ? { configWarnings: campConfig.configWarnings } : {}),
       });
     },
   });
@@ -1471,6 +1487,71 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return textResult({ kind: "camp_rules_updated", removed: target.line.trim(), file: rulesPath, synced });
       }
       return textResult({ kind: "camp_rules_failed", code: "UNKNOWN_ACTION", retryable: false });
+    },
+  });
+
+  pi.registerTool({
+    name: "camp_conventions",
+    label: "Camp Conventions",
+    description:
+      "Machine-checked camp conventions from .ompfest.json (branch/worktreeDir templates, commitStyle, " +
+      "festivalName regex, finishMerge). show lists the effective conventions; set changes one key " +
+      "(supervisor-only); prompt parses plain words like 'conventional commits, feature branches, squash' " +
+      "and applies what it understands; reset restores defaults.",
+    parameters: z.object({
+      action: z.enum(["show", "set", "reset", "prompt"]).optional(),
+      key: z.string().optional().describe("conventions key: festivalName | branch | worktreeDir | commitStyle | commitPrefix | finishMerge"),
+      value: z.string().optional().describe("new value for set (commitStyle: free|conventional|prefix; finishMerge: merge|squash)"),
+      words: z.string().optional().describe("plain-language conventions request for action prompt"),
+    }),
+    async execute(_id: string, params: { action?: "show" | "set" | "reset" | "prompt"; key?: string; value?: string; words?: string }, _s: unknown, _u: unknown, ctx: ToolContextLike) {
+      const location = await deps.detect.locate(ctx.cwd);
+      const root = location.campRoot;
+      if (!root) return textResult({ kind: "conventions_failed", code: "NO_CAMP", retryable: false, error: "Not inside a camp." });
+      const action = params.action ?? "show";
+      if (action === "show") {
+        const config = await loadConfig(root);
+        return textResult({ kind: "conventions", file: join(root, ".ompfest.json"), conventions: config.conventions, echo: conventionsEcho(config.conventions), warnings: config.configWarnings ?? [] });
+      }
+      const blocked = supervisorOnly(ctx, "conventions mutation");
+      if (blocked) return blocked;
+      if (action === "reset") {
+        const config = await saveConfig(root, { conventions: DEFAULT_CONFIG.conventions });
+        return textResult({ kind: "conventions", reset: true, conventions: config.conventions, echo: conventionsEcho(config.conventions) });
+      }
+      if (action === "set") {
+        const key = params.key as keyof Conventions | undefined;
+        const allowed: (keyof Conventions)[] = ["festivalName", "branch", "worktreeDir", "commitStyle", "commitPrefix", "finishMerge"];
+        if (!key || !allowed.includes(key) || params.value === undefined) {
+          return textResult({ kind: "conventions_failed", code: "BAD_INPUT", retryable: true, error: `set requires key (${allowed.join(" | ")}) and value.` });
+        }
+        if (key === "commitStyle" && !["free", "conventional", "prefix"].includes(params.value)) {
+          return textResult({ kind: "conventions_failed", code: "BAD_VALUE", retryable: true, error: "commitStyle must be free | conventional | prefix." });
+        }
+        if (key === "finishMerge" && !["merge", "squash"].includes(params.value)) {
+          return textResult({ kind: "conventions_failed", code: "BAD_VALUE", retryable: true, error: "finishMerge must be merge | squash." });
+        }
+        if (key === "festivalName" && params.value) {
+          try { new RegExp(params.value); } catch {
+            return textResult({ kind: "conventions_failed", code: "BAD_VALUE", retryable: true, error: `festivalName must be a valid regex — got ${JSON.stringify(params.value)}` });
+          }
+        }
+        const config = await saveConfig(root, { conventions: { [key]: params.value } as Partial<Conventions> as Conventions });
+        return textResult({ kind: "conventions", set: { [key]: params.value }, conventions: config.conventions, echo: conventionsEcho(config.conventions), warnings: config.configWarnings ?? [] });
+      }
+      // action === "prompt" (the only remaining enum value)
+      {
+        if (!params.words?.trim()) {
+          return textResult({ kind: "conventions_failed", code: "BAD_INPUT", retryable: true, error: "prompt requires words — e.g. 'conventional commits, feature branches, squash merges'." });
+        }
+        const { patch, unparsed } = parseConventionWords(params.words);
+        if (!Object.keys(patch).length) {
+          return textResult({ kind: "conventions_failed", code: "NOT_UNDERSTOOD", retryable: true, unparsed, error: "Could not map any of that to a convention key. Set keys directly, or phrase it like 'conventional commits, feature/* branches, worktrees in .wt/{festival}'." });
+        }
+        const config = await saveConfig(root, { conventions: patch as Conventions });
+        return textResult({ kind: "conventions", applied: patch, ...(unparsed.length ? { unparsed, hint: "Unparsed clauses — apply them yourself via camp_conventions set." } : {}), conventions: config.conventions, echo: conventionsEcho(config.conventions), warnings: config.configWarnings ?? [] });
+      }
+      return textResult({ kind: "conventions_failed", code: "UNKNOWN_ACTION", retryable: true, error: `Unknown action ${params.action}.` });
     },
   });
 
@@ -1603,8 +1684,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return textResult({ kind: "complete_blocked", code: "REVIEW_NOT_VERIFIED", retryable: true, review, hint: "Run the final integration pass (/fest finish) and record results with fest_integration — or pass force to skip." });
       }
       let mergedWorktrees: string[] = [];
+      const finishConfig = await loadConfig(root);
       if (deps.exec) {
-        const merge = await mergeFestivalWorktrees(deps.exec, dir);
+        const merge = await mergeFestivalWorktrees(deps.exec, dir, finishConfig.conventions.finishMerge);
         if (merge.dirty.length) {
           return textResult({ kind: "complete_blocked", code: "WORKTREE_DIRTY", retryable: true, dirty: merge.dirty, hint: "Uncommitted changes in the worktree — commit them (fest_commit) or discard before finishing." });
         }
@@ -1621,8 +1703,9 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const summary = `festival ${basename(dir)} completed${mergedWorktrees.length ? ` — merged worktrees: ${mergedWorktrees.join(", ")}` : ""}`;
       await deps.camp.notify(root, summary).catch(() => undefined);
       const config = deps.config ? await deps.config() : DEFAULT_CONFIG;
-      if (config.webhookUrl) {
-        await fetch(config.webhookUrl, {
+      const webhookUrl = finishConfig.webhookUrl ?? config.webhookUrl;
+      if (webhookUrl) {
+        await fetch(webhookUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ event: "festival_completed", festival: basename(dir), mergedWorktrees, camp: location.campName }),

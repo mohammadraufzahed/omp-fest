@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { createFestivalWorktrees, mergeFestivalWorktrees, readFestivalWorktrees, WORKTREES_FILE } from "../src/application/festival-worktrees.js";
 import { claimFestivalOwnership, festivalOwner, releaseFestivalOwnership } from "../src/application/festival-ownership.js";
 import { loadConfig } from "../src/domain/config.js";
+import { DEFAULT_CONVENTIONS } from "../src/domain/types.js";
 import type { ExecRunner } from "../src/ports.js";
 
 interface GitCall { args: string[] }
@@ -80,6 +81,30 @@ describe("festival worktrees", () => {
     expect(merge.calls.some((call) => call.args.join(" ").includes("branch -d fest/demo"))).toBe(true);
     expect(await readFestivalWorktrees(festivalDir)).toHaveLength(0);
     expect(existsSync(join(festivalDir, WORKTREES_FILE))).toBe(false);
+  });
+
+  it("honors convention templates for branch and worktree dir", async () => {
+    const { root, project, festivalDir } = await makeCampWithProject();
+    const create = fakeExec();
+    const conventions = { ...DEFAULT_CONVENTIONS, branch: "feature/{festival}", worktreeDir: ".wt/{project}/{festival}" };
+    const rows = await createFestivalWorktrees(create.exec, root, festivalDir, "demo", [{ name: "app", path: project }], conventions);
+    expect(rows[0]!.branch).toBe("feature/demo");
+    expect(rows[0]!.worktreePath).toBe(join(root, ".wt", "app", "demo"));
+    const add = create.calls.find((call) => call.args.join(" ").includes("worktree add"));
+    expect(add?.args.join(" ")).toContain("-b feature/demo");
+  });
+
+  it("squash-merges worktrees when finishMerge=squash", async () => {
+    const { root, project, festivalDir } = await makeCampWithProject();
+    const create = fakeExec();
+    const rows = await createFestivalWorktrees(create.exec, root, festivalDir, "demo", [{ name: "app", path: project }]);
+    await mkdir(rows[0]!.worktreePath, { recursive: true });
+    const merge = fakeExec();
+    const result = await mergeFestivalWorktrees(merge.exec, festivalDir, "squash");
+    expect(result.merged).toHaveLength(1);
+    expect(merge.calls.some((call) => call.args.join(" ").includes("merge --squash fest/demo"))).toBe(true);
+    expect(merge.calls.some((call) => call.args.join(" ").includes("commit --no-edit"))).toBe(true);
+    expect(result.removed).toEqual([rows[0]!.worktreePath]);
   });
 
   it("reports a dirty worktree and keeps the row for a resumable retry", async () => {

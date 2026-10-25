@@ -22,7 +22,8 @@ import { referencesForTask, taskChecks, validateVisualReferences } from "../../a
 import { showCard, type OverlayUiLike } from "./overlay.js";
 import { loadConfig, saveConfig } from "../../domain/config.js";
 import { statusLineText, summarizeProgress } from "../../domain/progress.js";
-import { DEFAULT_CONFIG, type OmpFestConfig } from "../../domain/types.js";
+import { DEFAULT_CONFIG, DEFAULT_CONVENTIONS, type Conventions, type OmpFestConfig } from "../../domain/types.js";
+import { conventionsEcho, conventionWarnings, parseConventionWords } from "../../application/conventions.js";
 import { BROWSER_VERIFICATION_POLICY, IDEA_INTERVIEW, PLAN_GUIDE, markerInterviewKickoff, planInterviewKickoff } from "../../domain/orientation.js";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
@@ -992,6 +993,155 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         send(pi, "fest-status", `Unknown /fest rules action "${action}" — show|list|add|remove|sync.`);
       },
     },
+    conventions: {
+      desc: "camp conventions editor (.ompfest.json): /fest conventions [show|set <key> <value>|reset|prompt <words>]",
+      run: async (args, ctx) => {
+        const location = await deps.detect.locate(ctx.cwd);
+        const root = location.campRoot;
+        if (!root) {
+          send(pi, "fest-status", "No camp found — /fest conventions needs a camp (camp_init).");
+          return;
+        }
+        const [action, ...rest] = args;
+        const config = await loadConfig(root);
+        const conventionLines = (conventions: Conventions) => [
+          `  festivalName  ${conventions.festivalName ? `/${conventions.festivalName}/` : "(unchecked)"}`,
+          `  branch        ${conventions.branch}`,
+          `  worktreeDir   ${conventions.worktreeDir}`,
+          `  commitStyle   ${conventions.commitStyle}`,
+          `  commitPrefix  ${conventions.commitPrefix ?? "(none)"}`,
+          `  finishMerge   ${conventions.finishMerge}`,
+          ...(conventionWarnings(conventions).map((w) => `  ! ${w}`)),
+        ];
+        const setKey = async (key: string, value: string): Promise<void> => {
+          if (key === "commitStyle" && !["free", "conventional", "prefix"].includes(value)) {
+            send(pi, "fest-status", "commitStyle must be free | conventional | prefix.");
+            return;
+          }
+          if (key === "finishMerge" && !["merge", "squash"].includes(value)) {
+            send(pi, "fest-status", "finishMerge must be merge | squash.");
+            return;
+          }
+          if (key === "festivalName" && value) {
+            try { new RegExp(value); } catch {
+              send(pi, "fest-status", `festivalName must be a valid regex — got ${JSON.stringify(value)}`);
+              return;
+            }
+          }
+          const next = await saveConfig(root, { conventions: { [key]: value } as Partial<Conventions> as Conventions });
+          send(pi, "fest-status", `conventions.${key} = ${JSON.stringify(value)} — effective: ${conventionsEcho(next.conventions)}`);
+        };
+        const applyWords = async (words: string): Promise<void> => {
+          const { patch, unparsed } = parseConventionWords(words);
+          if (!Object.keys(patch).length) {
+            send(pi, "fest-status", "Could not map that to a convention key. Set keys directly (/fest conventions set <key> <value>) or phrase it like 'conventional commits, feature/* branches, worktrees in .wt/{festival}'.");
+            send(pi, "fest-conventions-request", `The user asked to set camp conventions in plain words: "${words}". Nothing was applied automatically — interpret the request and apply it via camp_conventions set calls.`);
+            return;
+          }
+          const proposed = Object.entries(patch).map(([k, v]) => `  ${k} = ${JSON.stringify(v)}`);
+          const confirmed = typeof ctx.ui.confirm === "function"
+            ? await ctx.ui.confirm("Apply conventions", `${proposed.join("\n")}${unparsed.length ? `\n\nNot understood (ignored): ${unparsed.join("; ")}` : ""}`)
+            : true;
+          if (!confirmed) {
+            send(pi, "fest-status", "Conventions unchanged.");
+            return;
+          }
+          const next = await saveConfig(root, { conventions: patch as Conventions });
+          send(pi, "fest-status", `Applied:\n${proposed.join("\n")}\nEffective: ${conventionsEcho(next.conventions)}`);
+          if (unparsed.length) {
+            send(pi, "fest-conventions-request", `The user asked for camp conventions in plain words: "${words}". Applied automatically: ${JSON.stringify(patch)}. Not understood: ${unparsed.join("; ")} — interpret these and apply via camp_conventions set if they map to a convention key.`);
+          }
+        };
+        if (action === "set") {
+          const [key, ...valueParts] = rest;
+          const value = valueParts.join(" ");
+          const keys = ["festivalName", "branch", "worktreeDir", "commitStyle", "commitPrefix", "finishMerge"];
+          if (!key || !keys.includes(key) || !value) {
+            send(pi, "fest-status", `Usage: /fest conventions set <${keys.join("|")}> <value>`);
+            return;
+          }
+          await setKey(key, value);
+          return;
+        }
+        if (action === "reset") {
+          const next = await saveConfig(root, { conventions: { ...DEFAULT_CONVENTIONS } });
+          send(pi, "fest-status", `Conventions reset to defaults: ${conventionsEcho(next.conventions)}`);
+          return;
+        }
+        if (action === "prompt") {
+          const words = rest.join(" ").trim();
+          if (!words) {
+            send(pi, "fest-status", "Usage: /fest conventions prompt <plain words — e.g. 'conventional commits, feature branches, squash'>");
+            return;
+          }
+          await applyWords(words);
+          return;
+        }
+        // No action (or "show"): float the conventions card, then the interactive editor.
+        await showCard(ctx.ui, {
+          title: "✦ camp conventions",
+          lines: [
+            "Machine-checked conventions in .ompfest.json — the plugin enforces these itself.",
+            "(Judgement rules live in RULES.md — /fest rules.)",
+            "",
+            ...conventionLines(config.conventions),
+          ],
+          footer: "esc to close — choose an action next if the picker is available",
+        });
+        if (action === "show" || typeof ctx.ui.select !== "function") {
+          return;
+        }
+        const choice = await ctx.ui.select("Camp conventions", [
+          { label: "Edit a key", description: "pick a convention, then set its value" },
+          { label: "Describe in plain words", description: "e.g. 'conventional commits, feature/* branches, squash merges'" },
+          { label: "Reset to defaults", description: "restore the built-in conventions" },
+          { label: "Done", description: "close the editor" },
+        ]);
+        if (choice === "Edit a key") {
+          const keyChoices: { key: keyof Conventions; label: string; desc: string; kind: "enum" | "text"; choices?: string[] }[] = [
+            { key: "commitStyle", label: `commitStyle (${config.conventions.commitStyle})`, desc: "free | conventional | prefix", kind: "enum", choices: ["free", "conventional", "prefix"] },
+            { key: "commitPrefix", label: `commitPrefix (${config.conventions.commitPrefix ?? "none"})`, desc: "prepended when commitStyle=prefix; {camp}/{festival} placeholders", kind: "text" },
+            { key: "branch", label: `branch (${config.conventions.branch})`, desc: "worktree branch template — {festival} placeholder", kind: "text" },
+            { key: "worktreeDir", label: `worktreeDir (${config.conventions.worktreeDir})`, desc: "worktree path template — {project}/{festival}", kind: "text" },
+            { key: "finishMerge", label: `finishMerge (${config.conventions.finishMerge})`, desc: "merge | squash — how fest_complete merges worktrees back", kind: "enum", choices: ["merge", "squash"] },
+            { key: "festivalName", label: `festivalName (${config.conventions.festivalName || "unchecked"})`, desc: "regex festival names must match", kind: "text" },
+          ];
+          const picked = await ctx.ui.select("Which convention?", keyChoices.map((k) => ({ label: k.label, description: k.desc })));
+          const spec = keyChoices.find((k) => k.label === picked);
+          if (!spec) return;
+          let value: string | undefined;
+          if (spec.kind === "enum" && spec.choices) {
+            value = await ctx.ui.select(`${spec.key} — ${spec.desc}`, spec.choices);
+          } else if (typeof ctx.ui.input === "function") {
+            value = await ctx.ui.input(`conventions.${spec.key}`, spec.desc);
+          }
+          if (value !== undefined) {
+            await setKey(spec.key, value);
+          }
+          return;
+        }
+        if (choice === "Describe in plain words") {
+          if (typeof ctx.ui.input !== "function") {
+            send(pi, "fest-status", "No input UI — use /fest conventions prompt <words> instead.");
+            return;
+          }
+          const words = await ctx.ui.input("Describe conventions", "e.g. 'conventional commits, feature/* branches, squash merges'");
+          if (words?.trim()) {
+            await applyWords(words);
+          }
+          return;
+        }
+        if (choice === "Reset to defaults") {
+          const confirmed = typeof ctx.ui.confirm === "function"
+            ? await ctx.ui.confirm("Reset conventions", "Restore all conventions to defaults?")
+            : true;
+          if (confirmed) {
+            const next = await saveConfig(root, { conventions: { ...DEFAULT_CONVENTIONS } });
+            send(pi, "fest-status", `Conventions reset: ${conventionsEcho(next.conventions)}`);
+          }
+        }
+      },
+    },
     settings: {
       desc: "view or toggle plugin settings (.ompfest.json): /fest settings [key] [value]",
       run: async (args, ctx) => {
@@ -1050,7 +1200,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
   };
 
   pi.registerCommand("fest", {
-    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|portfolio|dispatch|pause|review|next|status|show|select|join|team|orphans|task|plan|promote|validate|markers|workflow|approve|reject|parallel|rules|settings|doctor|cmd|camp|idea|help]",
+    description: "Native festival control: /fest [flows|draft|finish|conflicts|blockers|resume|release|workers|portfolio|dispatch|pause|review|next|status|show|select|join|team|orphans|task|plan|promote|validate|markers|workflow|approve|reject|parallel|rules|conventions|settings|doctor|cmd|camp|idea|help]",
     getArgumentCompletions: async (prefix) => {
       const items: AutocompleteItemLike[] = Object.keys(subs)
         .filter((n) => n !== "")

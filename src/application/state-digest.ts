@@ -10,6 +10,9 @@ import type { CampDetect } from "../ports.js";
 import { claimedFestivalDir } from "./fest-resolve.js";
 import { festivalOwner } from "./festival-ownership.js";
 import { campRules, campRulesCount } from "./festival-rules.js";
+import { conventionsEcho } from "./conventions.js";
+import { loadConfig } from "../domain/config.js";
+import { DEFAULT_CONVENTIONS } from "../domain/types.js";
 import type { LoopTracker } from "./loop-tracker.js";
 
 export interface DigestDeps {
@@ -34,6 +37,9 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
   const festivalDir = await claimedFestivalDir(deps.tracker, deps.detect, sessionId, location.campRoot);
   const rulesCount = campRulesCount(await campRules(location.campRoot));
   const rulesLine = rulesCount > 0 ? `camp rules: ${rulesCount} (camp RULES.md applies to every festival — violations fail gates)` : undefined;
+  const conv = (await loadConfig(location.campRoot)).conventions;
+  const nonDefault = conv.commitStyle !== "free" || conv.finishMerge !== "merge" || conv.festivalName !== "" || conv.branch !== DEFAULT_CONVENTIONS.branch || conv.worktreeDir !== DEFAULT_CONVENTIONS.worktreeDir;
+  const conventionsLine = nonDefault ? `conventions: ${conventionsEcho(conv)}` : undefined;
   if (!festivalDir) {
     const festivals = await deps.detect.listFestivals(location.campRoot);
     const names = festivals.map((f) => `${f.id} (${f.status})`).join(", ") || "none";
@@ -41,6 +47,7 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
       `fest: camp=${location.campName ?? location.campRoot} — no active festival. festivals: ${names}.`,
       "This session is explicitly unselected. Use /fest select <id> to coordinate (transfer requires confirmation) or /fest join <id> to collaborate without transfer; start /fest idea → /fest plan for new work.",
       ...(rulesLine ? [rulesLine] : []),
+      ...(conventionsLine ? [conventionsLine] : []),
       RULES,
     ].join("\n");
   }
@@ -57,6 +64,7 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
     `fest: camp=${location.campName ?? "?"} festival=${festivalId} unit=${unit} pending=${pending.length} progress=${progress.completed}/${progress.total}`,
   ];
   if (rulesLine) lines.push(rulesLine);
+  if (conventionsLine) lines.push(conventionsLine);
   if (progress.gatePending) {
     lines.push(
       coordinator

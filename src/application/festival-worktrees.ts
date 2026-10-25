@@ -9,7 +9,8 @@ import { lstat, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { writeAtomically } from "./fs-atomic.js";
-import type { CampProject } from "../domain/types.js";
+import { conventionWorktreeDir, renderConvention } from "./conventions.js";
+import { DEFAULT_CONVENTIONS, type CampProject, type Conventions } from "../domain/types.js";
 import type { ExecRunner } from "../ports.js";
 
 export const WORKTREES_FILE = ".omp-fest-worktrees.json";
@@ -82,14 +83,15 @@ export async function createFestivalWorktrees(
   festivalDir: string,
   festivalName: string,
   projects: CampProject[],
+  conventions: Conventions = DEFAULT_CONVENTIONS,
 ): Promise<FestivalWorktree[]> {
   const rows = await readFestivalWorktrees(festivalDir);
-  const branch = `fest/${festivalName}`;
+  const branch = renderConvention(conventions.branch, { festival: festivalName });
   for (const project of projects) {
     const projectPath = isAbsolute(project.path) ? project.path : resolve(campRoot, project.path);
     if (rows.some((row) => row.projectPath === projectPath)) continue;
     if (!existsSync(projectPath) || !(await isGitRepo(exec, projectPath))) continue;
-    const worktreePath = join(campRoot, "projects", "worktrees", basename(projectPath), festivalName);
+    const worktreePath = conventionWorktreeDir(conventions, campRoot, projectPath, festivalName);
     if (!existsSync(worktreePath)) {
       const baseBranch = (await gitOutput(exec, projectPath, ["rev-parse", "--abbrev-ref", "HEAD"])) || "main";
       const baseCommit = await gitOutput(exec, projectPath, ["rev-parse", "HEAD"]);
@@ -122,6 +124,7 @@ async function worktreeDirtyFiles(exec: ExecRunner, worktreePath: string): Promi
 export async function mergeFestivalWorktrees(
   exec: ExecRunner,
   festivalDir: string,
+  mode: "merge" | "squash" = "merge",
 ): Promise<WorktreeMergeResult> {
   const rows = await readFestivalWorktrees(festivalDir);
   const result: WorktreeMergeResult = { merged: [], removed: [], conflicts: [], dirty: [] };
@@ -137,7 +140,7 @@ export async function mergeFestivalWorktrees(
       remaining.push(row);
       continue;
     }
-    const merge = await exec.run("git", ["-C", row.projectPath, "merge", "--no-ff", "--no-edit", row.branch]);
+    const merge = await exec.run("git", ["-C", row.projectPath, "merge", ...(mode === "squash" ? ["--squash"] : ["--no-ff", "--no-edit"]), row.branch]);
     if (merge.code !== 0) {
       const files = (await exec.run("git", ["-C", row.projectPath, "diff", "--name-only", "--diff-filter=U"])).stdout
         .split("\n").map((line) => line.trim()).filter(Boolean);
@@ -145,6 +148,16 @@ export async function mergeFestivalWorktrees(
       result.conflicts.push({ project: row.project, branch: row.branch, files: files.slice(0, 25) });
       remaining.push(row);
       continue;
+    }
+    if (mode === "squash") {
+      // squash merge stages changes without committing; commit with the prepared MERGE_MSG.
+      const commit = await exec.run("git", ["-C", row.projectPath, "commit", "--no-edit"]);
+      if (commit.code !== 0) {
+        await exec.run("git", ["-C", row.projectPath, "reset", "--hard", "HEAD"]);
+        result.conflicts.push({ project: row.project, branch: row.branch, files: [`squash commit failed: ${commit.stderr.trim() || commit.stdout.trim()}`] });
+        remaining.push(row);
+        continue;
+      }
     }
     result.merged.push(row);
     const remove = await exec.run("git", ["-C", row.projectPath, "worktree", "remove", row.worktreePath]);
