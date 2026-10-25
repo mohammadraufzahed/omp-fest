@@ -11,7 +11,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readFile } from "node:fs/promises";
 import type { CampCli, CampDetect, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
-import { festivalOwner } from "../../application/festival-ownership.js";
+import { festivalOwner, festivalOwnerIsDead } from "../../application/festival-ownership.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
@@ -23,9 +23,9 @@ import { installVisualReferences, prepareVisualReferences, referencesForTask, ta
 import { createWireframe, WireframeInputError, type WireframeSpec } from "../../application/visual-wireframe.js";
 import { structuredPlanSchema, type StructuredPlan } from "../../application/structured-plan.js";
 import { normalizePlanInput } from "../../application/plan-input.js";
-import { abandonPlanPreview, approvedPlan, markPlanApproved, markPlanScaffolded, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
+import { abandonPlanPreview, approvedPlan, listPlanPreviews, markPlanApproved, markPlanScaffolded, previewPlan, type ApprovedPlan } from "../../application/plan-artifacts.js";
 import { finalizeApprovedScaffold } from "../../application/plan-scaffold.js";
-import { createPlanDraft, readPlanDraft, updatePlanDraft, listPlanDrafts, type PlanDraftFields } from "../../application/plan-drafts.js";
+import { createPlanDraft, deletePlanDraft, deletePlanDraftsForPlan, readPlanDraft, updatePlanDraft, listPlanDrafts, type PlanDraftFields } from "../../application/plan-drafts.js";
 import { findPlanningConflicts } from "../../application/planning-conflicts.js";
 import { classifyAttachment, type AttachmentRole } from "../../domain/reference-classification.js";
 import { DEFAULT_CONFIG, type NextUnit, type OmpFestConfig } from "../../domain/types.js";
@@ -34,7 +34,7 @@ import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import type { ZodLike } from "./zod-types.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { registerFestivalTeamTools } from "./team-tools.js";
-import { beginFestivalCreation, completeFestivalCreation, listFestivalCreationOrphans, recordFestivalCreation, rollbackFestivalCreation } from "../../application/festival-creation.js";
+import { beginFestivalCreation, classifyCreationOrphan, completeFestivalCreation, festivalCreationIsScaffolded, listFestivalCreationOrphans, recordFestivalCreation, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { readFestivalTeam, joinFestivalTeam } from "../../application/festival-team.js";
 import { INTEGRATION_GUIDE, integrationReviewStatus } from "../../application/integration-review.js";
 import { planningDiagnostic } from "../../application/planning-errors.js";
@@ -281,7 +281,10 @@ async function dirOrResult(
   if (owner.sessionId !== sid) {
     const team = resolved.campRoot ? await readFestivalTeam(resolved.campRoot, resolved.dir) : undefined;
     if (!team?.participants.some((participant) => participant.sessionId === sid)) {
-      return { result: textResult({ kind: "festival_owned", festival: basename(resolved.dir), owner: owner.sessionId, hint: `Use /fest join ${basename(resolved.dir)} to collaborate without transferring coordinator ownership.` }) };
+      const hint = festivalOwnerIsDead(owner)
+        ? `The recorded owner ${owner.sessionId} is gone (process exited). /fest select ${basename(resolved.dir)} transfers ownership immediately — no confirmation needed.`
+        : `Use /fest join ${basename(resolved.dir)} to collaborate without transferring coordinator ownership.`;
+      return { result: textResult({ kind: "festival_owned", festival: basename(resolved.dir), owner: owner.sessionId, ownerDead: festivalOwnerIsDead(owner) || undefined, hint }) };
     }
   } else if (resolved.campRoot) {
     await joinFestivalTeam(resolved.campRoot, resolved.dir, sid, sid);
@@ -329,6 +332,30 @@ function festivalRelativeTaskPath(festivalDir: string, taskPath: string): string
 export function registerTools(pi: PiLike, deps: ToolDeps): void {
   const z = pi.zod;
   const supervisor = deps.supervisor ?? new Supervisor();
+  // A raw exception can never reach the model — every tool returns a
+  // structured failure envelope so the next action is always recoverable.
+  const raw = pi;
+  const guarded: PiLike = {
+    ...raw,
+    registerTool(tool: Record<string, unknown>): void {
+      if (typeof tool.execute === "function" && typeof tool.name === "string") {
+        const execute = tool.execute as (...args: unknown[]) => Promise<unknown>;
+        const name = tool.name;
+        tool.execute = async (...args: unknown[]) => {
+          try {
+            return await execute(...args);
+          } catch (error) {
+            return textResult({
+              kind: `${name}_failed`, code: "UNHANDLED_ERROR", error: String(error),
+              nextAction: "Inspect the error output; retry the tool with corrected input or resolve the underlying state it reports.",
+            });
+          }
+        };
+      }
+      raw.registerTool(tool);
+    },
+  };
+  pi = guarded;
   registerSupervisorTools(pi, deps, supervisor, { isMainSession: (ctx) => ctx.agent?.kind !== "sub" });
   registerQualityTools(pi, { ...deps, supervisor });
   registerFestivalTeamTools(pi, deps, supervisor);
@@ -785,7 +812,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description:
       "Single stateful planning API. Use action create/update/read/list for persisted incremental drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
     parameters: z.object({
-      action: z.enum(["create", "read", "update", "list", "preview", "scaffold", "cancel"]).optional(),
+      action: z.enum(["create", "read", "update", "delete", "list", "preview", "scaffold", "cancel"]).optional(),
       name: z.string().optional(), plan: z.string().optional(), draftId: z.string().optional(), draftRevision: z.string().optional(),
       goal: z.string().optional(), scope: z.array(z.string()).optional(), exclusions: z.array(z.string()).optional(),
       acceptance: z.array(z.string()).optional(), inspection: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
@@ -798,7 +825,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       baseRevision: z.string().optional(), proposalRevision: z.string().optional(),
       conflictChoice: z.enum(["sequence", "narrow", "worktree"]).optional().describe("Human-selected resolution after returning planning_conflict options and asking conversationally; never open a blocking selection modal"),
     }),
-    async execute(_id: string, params: { action?: "create" | "read" | "update" | "list" | "preview" | "scaffold" | "cancel"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { action?: "create" | "read" | "update" | "delete" | "list" | "preview" | "scaffold" | "cancel"; name?: string; plan?: string; draftId?: string; draftRevision?: string; goal?: string; scope?: string[]; exclusions?: string[]; acceptance?: string[]; inspection?: { path: string; reason: string }[]; workingDir?: string; files?: string[]; rules?: string; verification?: PlanDraftFields["verification"]; attachments?: { name: string; description: string; role?: AttachmentRole }[]; spec?: StructuredPlan; approvedRevision?: string; referencesDir?: string; visualIntent?: PlanDraftFields["visualIntent"]; referenceAction?: "preview" | "revise"; festival?: string; baseRevision?: string; proposalRevision?: string; conflictChoice?: "sequence" | "narrow" | "worktree" }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       const root = await campRootOf(deps, ctx);
       if (!root) {
         return await idleResult(deps, ctx);
@@ -809,11 +836,21 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         if (blocked) return blocked;
       }
       if (draftAction === "list") {
-        return textResult({ kind: "plan_drafts", drafts: (await listPlanDrafts(root)).map(({ draftId, revision, fields, missing }) => ({ draftId, revision, name: fields.name, goal: fields.goal, missing })) });
+        return textResult({
+          kind: "plan_drafts",
+          drafts: (await listPlanDrafts(root)).map(({ draftId, revision, fields, missing }) => ({ draftId, revision, name: fields.name, goal: fields.goal, missing })),
+          previews: (await listPlanPreviews(root)).map(({ name, plan, state, planRevision, updatedAt }) => ({ name, plan, state, ...(planRevision ? { planRevision } : {}), ...(updatedAt ? { updatedAt } : {}) })),
+        });
       }
       if (draftAction === "read") {
         try { return textResult({ kind: "plan_draft", ...await readPlanDraft(root, params.draftId ?? "") }); }
         catch (error) { return planFailure(error, { field: "draftId" }); }
+      }
+      if (draftAction === "delete") {
+        try {
+          if (!params.draftId) throw new Error("delete requires draftId");
+          return textResult({ kind: "plan_draft_deleted", draftId: params.draftId, deleted: await deletePlanDraft(root, params.draftId, params.draftRevision ?? undefined) });
+        } catch (error) { return planFailure(error, { field: "draftId" }); }
       }
       if (draftAction === "create" || draftAction === "update") {
         try {
@@ -987,6 +1024,30 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (beforeFestivals.some((festival) => festival.id === params.name || basename(festival.path) === params.name)) {
         return textResult({ kind: "plan_failed", code: "FESTIVAL_ALREADY_EXISTS", error: `Festival ${params.name} already exists. Choose a new plan name; existing festivals are never overwritten.` });
       }
+      // Resume or clear a leftover creation journal instead of dead-stopping the retry.
+      const pending = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.name === params.name);
+      if (pending) {
+        const classification = classifyCreationOrphan(pending);
+        if (classification === "in_flight") {
+          return textResult({ kind: "plan_failed", code: "CREATION_IN_FLIGHT", error: `A scaffold transaction for ${params.name} started recently and may still be running. If it crashed, /fest orphans rollback ${pending.receipt.id} resolves it.` });
+        }
+        if (classification === "resume") {
+          if (await festivalCreationIsScaffolded(pending.receipt)) {
+            try {
+              await completeFestivalCreation(pending.receipt);
+              return textResult({
+                kind: "plan_scaffolded", planRevision: approved.planRevision, counts: approved.counts,
+                festivalDir: pending.festivalDir, validation: { score: 100 }, resumedTransaction: true,
+                nextSteps: [`The earlier scaffold was already validated; its transaction is finalized. Run fest_validate before promotion, then fest_promote {festival:"${pending.receipt.name}"} twice.`],
+              });
+            } catch (cleanupError) {
+              return textResult({ kind: "plan_failed", error: `Prior scaffold cleanup failed: ${String(cleanupError)}`, hint: `Resolve the transaction with /fest orphans rollback ${pending.receipt.id}.` });
+            }
+          }
+          return textResult({ kind: "plan_failed", code: "CREATION_ORPHANED", error: `Festival ${params.name} has an incomplete scaffold that was never validated.`, orphanedCreation: pending, hint: `Review it with /fest orphans, or run /fest orphans rollback ${pending.receipt.id} to quarantine the partial festival and retry.` });
+        }
+        // stale journals are cleared inside beginFestivalCreation
+      }
       const creation = await beginFestivalCreation(root, params.name, planPath, sessionIdOf(ctx));
       let festivalDir: string | undefined;
       let planMarked = false;
@@ -1015,6 +1076,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         await markPlanScaffolded(root, planPath, params.name, approved.planRevision, festivalDir, bundle?.files);
         planMarked = true;
         await completeFestivalCreation(creation);
+        const removedDrafts = await deletePlanDraftsForPlan(root, params.name).catch(() => [] as string[]);
         const skipped = gates.output.match(/Skipping sequence "[^"]+"/g) ?? [];
         const needsWorkingDir = !workingDir;
         return textResult({
@@ -1022,6 +1084,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           planRevision: approved.planRevision,
           counts: { phases: parsed.phases_created, sequences: parsed.sequences_created, tasks: parsed.tasks_created },
           festivalDir,
+          ...(removedDrafts.length ? { draftsRemoved: removedDrafts } : {}),
           ...(bundle ? { visualReferences: bundle.pages.map((page) => `references/pages/${page}/PAGE.md`) } : {}),
           rules: { ...rulesSeed, gateFilesStamped: gateRules },
           ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),

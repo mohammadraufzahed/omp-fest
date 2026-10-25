@@ -165,6 +165,8 @@ export interface OmpFestConfig {
   webhookUrl?: string;
   pauseAtGates: boolean;
   evidenceRequiredOnGates: boolean;
+  /** Per-file/checkout write reservations. Off for worktree-per-festival or legacy projects. */
+  writeLocks: boolean;
 }
 
 export const DEFAULT_CONFIG: OmpFestConfig = {
@@ -176,4 +178,5 @@ export const DEFAULT_CONFIG: OmpFestConfig = {
   gateNotify: ["ui", "camp-notify"],
   pauseAtGates: true,
   evidenceRequiredOnGates: true,
+  writeLocks: true,
 };

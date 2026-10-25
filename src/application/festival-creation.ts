@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { withStaleAwareLock } from "./fs-lock.js";
 
 const JOURNAL_VERSION = 1;
 const MARKER = ".omp-fest-creation.json";
@@ -102,19 +103,34 @@ export async function festivalCreationIsScaffolded(receipt: CreationReceipt): Pr
   } catch { return false; }
 }
 
+/** A journal that never recorded a festival dir and is this old was abandoned mid-write. */
+const STALE_JOURNAL_MS = 30 * 60_000;
+
 async function withCreationIndexLock<T>(directory: string, action: () => Promise<T>): Promise<T> {
-  const lock = join(directory, ".index.lock");
-  try { await mkdir(lock, { mode: 0o700 }); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const info = await lstat(lock);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Festival creation lock is unsafe.", { cause: error });
-    if (Date.now() - info.mtimeMs > 10_000) await rm(lock, { recursive: true, force: true });
-    else throw new Error("Another plan creation is starting; retry shortly.", { cause: error });
-    await mkdir(lock, { mode: 0o700 });
-  }
-  try { return await action(); }
-  finally { await rm(lock, { recursive: true, force: true }); }
+  return withStaleAwareLock(join(directory, ".index.lock"), action, { label: "Festival creation index", busyMs: 10_000, staleMs: 30_000 });
+}
+
+/**
+ * Classify a same-name journal on scaffold retry:
+ * `resume` — festivalDir recorded: the tool re-validates, then completes or rolls back.
+ * `stale` — no festivalDir and older than STALE_JOURNAL_MS: auto-clear and proceed.
+ * `in_flight` — anything else: keep blocking (a live scaffold may be running).
+ */
+export function classifyCreationOrphan(orphan: FestivalCreationOrphan, nowMs = Date.now()): "resume" | "stale" | "in_flight" {
+  if (orphan.festivalDir) return "resume";
+  return nowMs - Date.parse(orphan.receipt.startedAt) > STALE_JOURNAL_MS ? "stale" : "in_flight";
+}
+
+/** Remove a verified-stale journal that never recorded a festival directory. */
+export async function clearStaleCreationJournal(campRoot: string, orphan: FestivalCreationOrphan): Promise<void> {
+  const camp = await realpath(campRoot);
+  if (classifyCreationOrphan(orphan) !== "stale") throw new Error("Only stale journals without a festival directory may be cleared automatically.");
+  const dir = await ensureStorage(camp);
+  await withCreationIndexLock(dir, async () => {
+    const current = await readJournal(orphan.receipt.journalPath, camp);
+    if (current.id !== orphan.receipt.id || current.festivalDir) throw new Error("Creation journal changed since inspection; reread orphans before clearing.");
+    await rm(orphan.receipt.journalPath);
+  });
 }
 
 export async function beginFestivalCreation(campRoot: string, name: string, planPath: string, sessionId: string): Promise<CreationReceipt> {
@@ -123,8 +139,13 @@ export async function beginFestivalCreation(campRoot: string, name: string, plan
   await realDirectory(join(camp, "festivals")); await realDirectory(planning);
   const dir = await ensureStorage(camp);
   return withCreationIndexLock(dir, async () => {
-    if ((await listFestivalCreationOrphans(camp)).some((orphan) => orphan.receipt.name === name)) {
-      throw new Error(`Festival ${name} already has an incomplete creation transaction. Review /fest orphans before retrying.`);
+    const collisions = (await listFestivalCreationOrphans(camp)).filter((orphan) => orphan.receipt.name === name);
+    const unresolved = collisions.filter((orphan) => classifyCreationOrphan(orphan) !== "stale");
+    if (unresolved.length) {
+      throw new Error(`Festival ${name} already has an incomplete creation transaction ${unresolved[0]?.receipt.id ?? ""}. Review /fest orphans before retrying.`);
+    }
+    for (const orphan of collisions) {
+      await rm(orphan.receipt.journalPath, { force: true });
     }
     const existing = await lstat(join(planning, name)).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
     if (existing) throw new Error(`Festival ${name} already exists in planning; existing data is never overwritten.`);

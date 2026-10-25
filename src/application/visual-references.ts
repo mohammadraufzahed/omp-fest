@@ -1,6 +1,6 @@
-import { lstat, mkdir, readFile, readdir, realpath, rmdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { setTimeout } from "node:timers/promises";
+import { withStaleAwareLock } from "./fs-lock.js";
 import type { CampDetect } from "../ports.js";
 
 const REFERENCE_LINE = /^\s*Visual reference:\s*(\S.*?)\s*$/gim;
@@ -365,21 +365,12 @@ export async function withVisualReferenceLock<T>(festivalDir: string, action: ()
   if (!(await lstat(root)).isDirectory()) {
     throw new Error("Visual references must be a real directory");
   }
-  const lock = join(root, ".ompfest-visual.lock");
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await mkdir(lock);
-      break;
-    } catch (error) {
-      if (attempt >= 50 || !(typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST")) {
-        throw new Error("Visual references are locked by another writer; retry or inspect the stale .ompfest-visual.lock directory", { cause: error });
-      }
-      await setTimeout(20);
-    }
-  }
   try {
-    return await action();
-  } finally {
-    await rmdir(lock);
+    return await withStaleAwareLock(join(root, ".ompfest-visual.lock"), action, { label: "Visual references", busyMs: 2_000 });
+  } catch (error) {
+    if (error instanceof Error && error.name === "LockBusyError") {
+      throw new Error("Visual references are locked by another writer; retry shortly", { cause: error });
+    }
+    throw error;
   }
 }

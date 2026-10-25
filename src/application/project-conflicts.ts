@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { setTimeout } from "node:timers/promises";
+import { LockBusyError, processIsAlive, withStaleAwareLock } from "./fs-lock.js";
 
 const REGISTRY_FILE = ".omp-fest-reservations.json";
 const LOCK_DIR = ".omp-fest-reservations.lock";
-const LOCK_ATTEMPTS = 80;
-const LOCK_WAIT_MS = 25;
+const LOCK_BUSY_MS = 2_000;
+/** A reservation row older than this without a live owner pid is orphaned. */
+const ORPHAN_ROW_MS = 60 * 60_000;
 
 export interface ProjectReservationRequest {
   sessionId: string;
@@ -21,6 +23,9 @@ export interface ProjectReservationRequest {
 export interface ProjectReservation extends ProjectReservationRequest {
   projectDir: string;
   reservedAt: string;
+  /** Process that holds the reservation; lets stale rows be reclaimed after a crash. */
+  pid?: number;
+  host?: string;
 }
 
 export interface ProjectReservationIdentity {
@@ -71,11 +76,116 @@ interface Registry {
   reservations: ProjectReservation[];
 }
 
-/** Parse only the supported package install shell form; every other shell effect remains guarded. */
+const PACKAGE_MANAGERS = new Set(["pnpm", "npm", "yarn", "bun", "deno"]);
+const INSTALL_SUBCOMMANDS = new Set(["install", "i", "add", "ci", "dedupe", "up", "update"]);
+/** Flags on env wrappers (mise/fnm/asdf exec, npx, bunx) that consume a following value word. */
+const WRAPPER_VALUE_FLAGS = new Set(["-t", "--tool", "-j", "--jobs", "-w", "--cwd", "--env", "-e", "-u", "--using", "--cd"]);
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function splitShellWords(command: string): string[] | undefined {
+  const words: string[] = [];
+  let current = "";
+  let quote: string | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const ch = command[index] ?? "";
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; continue; }
+    if (/\s/.test(ch)) { if (current) words.push(current); current = ""; continue; }
+    if (/[<>`$()\\\n]/.test(ch)) return undefined;
+    if (ch === "&" || ch === "|" || ch === ";") {
+      if (current) { words.push(current); current = ""; }
+      const next = command[index + 1];
+      if ((ch === "&" || ch === "|") && next === ch) { words.push(ch + ch); index += 1; }
+      else words.push(ch);
+      continue;
+    }
+    current += ch;
+  }
+  if (quote) return undefined;
+  if (current) words.push(current);
+  return words;
+}
+
+function pmBinary(word: string | undefined): string | undefined {
+  return word?.replace(/^.*\//, "").replace(/\.(?:cmd|exe|bat|ps1|cjs|mjs|js)$/, "");
+}
+function isPackageManager(word: string | undefined): boolean {
+  return word !== undefined && PACKAGE_MANAGERS.has(pmBinary(word) ?? "");
+}
+
+/**
+ * Parse a package-manager install invocation of any supported form:
+ * optional `cd <dir> &&`, optional env assignments and wrappers
+ * (env, corepack, `mise|fnm|asdf|direnv exec`, npx, bunx), then
+ * `pnpm|npm|yarn|bun|deno` with an install-family subcommand plus any
+ * flags/args. Bare `yarn` also counts (it means `yarn install`).
+ * Anything else returns undefined so the shell-mutation guard stays on.
+ */
 export function parseSupportedPackageInstall(command: string): { workingDirectory?: string } | undefined {
-  const match = /^\s*(?:cd\s+([A-Za-z0-9_./-]+)\s*&&\s*)?corepack\s+pnpm\s+install\s+--filter\s+([A-Za-z0-9@._/-]+\.\.\.)\s+--frozen-lockfile\s*$/.exec(command);
-  if (!match) return undefined;
-  return match[1] ? { workingDirectory: match[1] } : {};
+  const words = splitShellWords(command.trim());
+  if (!words || words.length === 0) return undefined;
+  let index = 0;
+  let workingDirectory: string | undefined;
+  if (words[0] === "cd" && words.length >= 4 && words[2] === "&&") {
+    workingDirectory = words[1];
+    index = 3;
+  }
+  const skipToPm = (): boolean => {
+    for (;;) {
+      const word = words[index];
+      if (word === undefined) return false;
+      if (word === "--") { index += 1; return true; }
+      if (isPackageManager(word)) return true;
+      if (ENV_ASSIGNMENT.test(word) || word === "env" || word === "corepack") { index += 1; continue; }
+      if (WRAPPER_VALUE_FLAGS.has(word)) { index += 2; continue; }
+      if (word.startsWith("-")) { index += 1; continue; }
+      return false;
+    }
+  };
+  for (let hops = 0; hops < 8; hops += 1) {
+    const word = words[index];
+    if (word === undefined) return undefined;
+    if (word === "--" || word === "env" || word === "corepack" || ENV_ASSIGNMENT.test(word)) { index += 1; continue; }
+    if (word === "npx" || word === "bunx") { index += 1; if (!skipToPm()) return undefined; continue; }
+    if ((word === "mise" || word === "fnm" || word === "asdf" || word === "direnv") &&
+        (words[index + 1] === "exec" || words[index + 1] === "x")) {
+      index += 2;
+      // direnv exec takes a directory argument before the command.
+      if (word === "direnv" && !isPackageManager(words[index]) && words[index] !== "--") {
+        const dirArg = words[index];
+        if (!dirArg || dirArg.startsWith("-")) return undefined;
+        index += 1;
+      }
+      if (!skipToPm()) return undefined;
+      continue;
+    }
+    break;
+  }
+  const pm = pmBinary(words[index]);
+  if (!pm || !PACKAGE_MANAGERS.has(pm)) return undefined;
+  const sub = words[index + 1];
+  if (sub === undefined) return pm === "yarn" ? (workingDirectory ? { workingDirectory } : {}) : undefined;
+  if (sub.startsWith("-") || !INSTALL_SUBCOMMANDS.has(sub)) return undefined;
+  // No shell separator may hide after the install arguments.
+  if (words.slice(index + 2).some((word) => word === "&&" || word === "||" || word === ";" || word === "|" || word === "&")) {
+    return undefined;
+  }
+  return workingDirectory ? { workingDirectory } : {};
+}
+
+/** Extract file targets of `>`/`>>` redirects so the guard can tell checkout writes from /tmp noise. */
+export function shellRedirectTargets(command: string): string[] {
+  const targets: string[] = [];
+  const pattern = /(?:^|[^<>&0-9])\d?>{1,2}\s*([^\s;|&><]+)/g;
+  for (const match of command.matchAll(pattern)) {
+    const target = match[1]?.replace(/^['"]|['"]$/g, "");
+    if (target && !/^&\d+$/.test(target) && target !== "/dev/null") targets.push(target);
+  }
+  return targets;
 }
 
 function contains(root: string, path: string): boolean {
@@ -212,7 +322,9 @@ async function readRegistry(project: string): Promise<Registry> {
         typeof row.assignmentId !== "string" || !row.assignmentId.trim() || typeof row.reservedAt !== "string" || !row.reservedAt ||
         !Array.isArray(row.files) || !row.files.every((file: unknown) => typeof file === "string" && file.length > 0 &&
           !isAbsolute(file) && contains(project, resolve(project, file)) && file === (relative(project, resolve(project, file)).split(sep).join("/") || ".")) ||
-        [row.festival, row.task, row.worker].some((field) => field !== undefined && typeof field !== "string")) {
+        [row.festival, row.task, row.worker].some((field) => field !== undefined && typeof field !== "string") ||
+        (row.pid !== undefined && (typeof row.pid !== "number" || !Number.isInteger(row.pid))) ||
+        (row.host !== undefined && typeof row.host !== "string")) {
       throw new Error("Project reservation record is invalid; refusing to discard its boundary.");
     }
     const key = JSON.stringify([row.sessionId, row.assignmentId]);
@@ -233,24 +345,26 @@ async function writeRegistry(project: string, registry: Registry): Promise<void>
   }
 }
 
+/** Rows whose recorded owner process is dead, or too old to still be held, are orphans. */
+function sweepDeadReservations(registry: Registry): Registry | undefined {
+  const host = hostname();
+  const now = Date.now();
+  const live = registry.reservations.filter((row) => {
+    if (row.pid !== undefined && row.host === host && !processIsAlive(row.pid)) return false;
+    if (Date.parse(row.reservedAt) < now - ORPHAN_ROW_MS) return false;
+    return true;
+  });
+  return live.length === registry.reservations.length ? undefined : { ...registry, reservations: live };
+}
+
 async function withProjectLock<T>(project: string, action: () => Promise<T>): Promise<T | undefined> {
   const lock = join(await registryDirectory(project), LOCK_DIR);
-  for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
-    try {
-      await mkdir(lock);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      await setTimeout(LOCK_WAIT_MS);
-      continue;
-    }
-    try {
-      return await action();
-    } finally {
-      // Only the process that acquired this lock removes it. Never infer stale ownership.
-      await rm(lock, { recursive: true, force: true });
-    }
+  try {
+    return await withStaleAwareLock(lock, action, { label: "write-lock registry", busyMs: LOCK_BUSY_MS, staleMs: 30_000 });
+  } catch (error) {
+    if (error instanceof LockBusyError) return undefined;
+    throw error;
   }
-  return undefined;
 }
 
 /** Acquire a transient whole-checkout reservation for a bounded install operation. */
@@ -258,7 +372,9 @@ export async function reserveProjectCheckout(projectDir: string, request: Projec
   validateIdentity(request);
   const project = await canonicalProjectDirectory(projectDir);
   const result = await withProjectLock(project, async (): Promise<ProjectReservationResult> => {
-    const registry = await readRegistry(project);
+    const stale = sweepDeadReservations(await readRegistry(project));
+    const registry = stale ?? (await readRegistry(project));
+    if (stale) await writeRegistry(project, registry);
     const conflicts = registry.reservations.filter((row) => !sameIdentity(row, request));
     if (conflicts.length) return { kind: "conflict", conflicts };
     const reservation: ProjectReservation = {
@@ -266,6 +382,8 @@ export async function reserveProjectCheckout(projectDir: string, request: Projec
       files: [],
       projectDir: project,
       reservedAt: new Date().toISOString(),
+      pid: process.pid,
+      host: hostname(),
     };
     registry.reservations.push(reservation);
     await writeRegistry(project, registry);
@@ -288,7 +406,9 @@ export async function reserveProjectFiles(projectDir: string, request: ProjectRe
       });
       if (info?.isDirectory()) throw new Error(`A write lock must target a file, not a directory: ${file}`);
     }
-    const registry = await readRegistry(project);
+    const stale = sweepDeadReservations(await readRegistry(project));
+    const registry = stale ?? (await readRegistry(project));
+    if (stale) await writeRegistry(project, registry);
     const existing = registry.reservations.find((row) => sameIdentity(row, request));
     if (existing && (existing.files.length !== files.length || existing.files.some((file, index) => file !== files[index]))) {
       throw new Error("An existing reservation boundary cannot change; release it explicitly before reserving again.");
@@ -301,6 +421,8 @@ export async function reserveProjectFiles(projectDir: string, request: ProjectRe
       files,
       projectDir: project,
       reservedAt: new Date().toISOString(),
+      pid: process.pid,
+      host: hostname(),
     };
     registry.reservations.push(reservation);
     await writeRegistry(project, registry);
@@ -332,12 +454,27 @@ export async function listProjectReservations(projectDir: string): Promise<Proje
   return result;
 }
 
+/** Drop reservation rows whose owning process is dead (or far too old). Returns the count removed. */
+export async function sweepProjectReservations(projectDir: string): Promise<number> {
+  const project = await canonicalProjectDirectory(projectDir);
+  const result = await withProjectLock(project, async () => {
+    const stale = sweepDeadReservations(await readRegistry(project));
+    if (!stale) return 0;
+    const removed = (await readRegistry(project)).reservations.length - stale.reservations.length;
+    await writeRegistry(project, stale);
+    return removed;
+  });
+  return result ?? 0;
+}
+
 /** Advisory queue check only: dispatch must still reserve atomically. */
 export async function checkProjectConflicts(projectDir: string, files: string[], exclude?: ProjectReservationIdentity): Promise<ProjectConflictResult> {
   const project = await canonicalProjectDirectory(projectDir);
   const result = await withProjectLock(project, async (): Promise<ProjectConflictResult> => {
     const canonical = await canonicalFiles(project, await realpath(projectDir), files);
-    const registry = await readRegistry(project);
+    const stale = sweepDeadReservations(await readRegistry(project));
+    const registry = stale ?? (await readRegistry(project));
+    if (stale) await writeRegistry(project, registry);
     const conflicts = registry.reservations.filter((row) => (!exclude || !sameIdentity(row, exclude)) && overlaps(row.files, canonical));
     return conflicts.length ? { kind: "conflict", conflicts } : { kind: "clear" };
   });

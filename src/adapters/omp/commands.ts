@@ -4,7 +4,9 @@
  */
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { joinFestivalTeam, transferFestivalTeamCoordinator, readFestivalTeam } from "../../application/festival-team.js";
-import { festivalOwner, type FestivalOwner, claimFestivalOwnership } from "../../application/festival-ownership.js";
+import { listPlanDrafts } from "../../application/plan-drafts.js";
+import { listPlanPreviews } from "../../application/plan-artifacts.js";
+import { festivalOwner, type FestivalOwner, claimFestivalOwnership, festivalOwnerIsDead } from "../../application/festival-ownership.js";
 import { completeFestivalCreation, festivalCreationIsScaffolded, listFestivalCreationOrphans, listQuarantinedFestivals, quarantineFestival, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { listStalePortfolioAssignments, readPortfolioState, setPortfolioPaused, setPortfolioWorkerLimit } from "../../application/portfolio-state.js";
@@ -171,6 +173,7 @@ const SETTING_SPECS: SettingSpec[] = [
   { key: "progressWidget", desc: "persistent progress widget above the editor", kind: "bool", parse: BOOL },
   { key: "pauseAtGates", desc: "stop for human approval at gates", kind: "bool", parse: BOOL },
   { key: "evidenceRequiredOnGates", desc: "require evidence text on gate approval", kind: "bool", parse: BOOL },
+  { key: "writeLocks", desc: "per-file/checkout write reservations (off for worktree-per-festival or legacy projects)", kind: "bool", parse: BOOL },
   { key: "autoCommitAfterTask", desc: "auto fest_commit after task completed", kind: "enum", choices: ["ask", "always", "never"], parse: enumOf(["ask", "always", "never"]) },
   { key: "autonomyCeiling", desc: "max autonomy level", kind: "enum", choices: ["low", "medium", "high"], parse: enumOf(["low", "medium", "high"]) },
   {
@@ -726,7 +729,7 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
         const sid = sessionIdOf(ctx);
         const current = await festivalOwner(match.festival.path);
         let transfer: FestivalOwner | undefined;
-        if (current && current.sessionId !== sid) {
+        if (current && current.sessionId !== sid && !festivalOwnerIsDead(current)) {
           const confirmed = typeof ctx.ui.confirm === "function"
             ? await ctx.ui.confirm("Transfer festival ownership", `${match.festival.id} is owned by omp session ${current.sessionId}. Transfer it to this session?`)
             : false;
@@ -734,6 +737,10 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
             send(pi, "fest-status", `Ownership unchanged — ${match.festival.id} remains with ${current.sessionId}.`);
             return;
           }
+          transfer = current;
+        }
+        // A dead owner never needs confirmation — the recording session's process is gone.
+        if (current && current.sessionId !== sid && festivalOwnerIsDead(current)) {
           transfer = current;
         }
         if (transfer) await joinFestivalTeam(location.campRoot, match.festival.path, sid, transfer.sessionId);
@@ -887,15 +894,23 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
           send(pi, "fest-status", `Restored ${basename(restored)}.`);
           return;
         }
+        const drafts = await listPlanDrafts(root).catch(() => []);
+        const previews = await listPlanPreviews(root).catch(() => []);
+        const stalePortfolio = await listStalePortfolioAssignments(root, 15 * 60_000).catch(() => []);
         const lines = [
           "Incomplete creation transactions (not automatically removed):",
-          ...(journals.length ? journals.map((item) => `- ${item.receipt.id} · ${item.receipt.name} · ${item.festivalDir ?? "no festival directory recorded"} · ${item.receipt.sessionId}`) : ["- none"]),
+          ...(journals.length ? journals.map((item) => `- ${item.receipt.id} · ${item.receipt.name} · ${item.festivalDir ?? "no festival directory recorded"} · ${item.receipt.sessionId} · ${item.festivalDir ? "resume with /fest orphans rollback " + item.receipt.id : "journal only"}`) : ["- none"]),
+          "Plan drafts (fest_plan {action:\"delete\", draftId} removes):",
+          ...(drafts.length ? drafts.map((item) => `- ${item.draftId} · ${item.fields.name} · missing: ${item.missing.join(", ") || "complete"}`) : ["- none"]),
+          "Plan previews (expire after 24h unless approved and scaffolded):",
+          ...(previews.length ? previews.map((item) => `- ${item.name} · ${item.state}`) : ["- none"]),
+          "Stale portfolio assignments (no heartbeat for 15m):",
+          ...(stalePortfolio.length ? stalePortfolio.map((item) => `- ${item.task} · ${item.status} · ${item.sessionId}`) : ["- none"]),
           "Unowned legacy planning candidates (inspect before quarantine):",
           ...(legacy.length ? legacy.map((item) => `- ${item.id} · ${item.path}`) : ["- none"]),
           "Quarantined festivals (restorable):",
           ...(quarantined.length ? quarantined.map((item) => `- ${item.id} · ${item.name}`) : ["- none"]),
           "Actions: /fest orphans rollback <transaction-id> · /fest orphans quarantine <festival-id> · /fest orphans restore <quarantine-id>",
-          "Plan drafts and previews in .ompfest/plans are not orphans and are never removed by this flow.",
         ];
         send(pi, "fest-status", lines.join("\n"));
       },

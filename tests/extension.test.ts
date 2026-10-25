@@ -646,6 +646,20 @@ it("tool_call hook nudges raw fest bash + ad hoc todos inside a camp", async () 
   expect(ownTool).toBeUndefined();
 });
 
+it("tool_call hook lets all writes and installs through when writeLocks is false", async () => {
+  const root = await makeCamp();
+  await writeFile(join(root, ".ompfest.json"), JSON.stringify({ writeLocks: false }));
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const hook = handlers.get("tool_call") as (
+    event: unknown,
+    ctx: unknown,
+  ) => Promise<{ block?: boolean; reason?: string } | undefined>;
+  expect(await hook({ toolName: "bash", input: { command: "cat > src/file.ts" } }, ctx)).toBeUndefined();
+  expect(await hook({ toolName: "bash", input: { command: "rm -rf src/legacy" } }, ctx)).toBeUndefined();
+  expect(await hook({ toolName: "write", input: { path: join(root, "src/new.ts") } }, ctx)).toBeUndefined();
+});
+
 it("tool_call hook stays silent outside a camp", async () => {
   const { pi, handlers, ctx } = mockPi("/tmp");
   ompFest(pi as never);

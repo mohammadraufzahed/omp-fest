@@ -79,7 +79,7 @@ export class FestCliAdapter implements FestCli {
 
   async validate(festivalDir: string, fix = false): Promise<{ score: number; output: string }> {
     const args = fix ? ["validate", "--fix"] : ["validate"];
-    const result = await this.exec.run("fest", args, festivalDir);
+    const result = await this.exec.run("fest", args, festivalDir, 300_000);
     const output = result.stdout + result.stderr;
     const score = Number(/Score\s+(\d+)\/100/.exec(output)?.[1] ?? "0");
     return { score, output };
@@ -164,7 +164,8 @@ export class FestCliAdapter implements FestCli {
     if (opts.dryRun) {
       args.push("--dry-run");
     }
-    const result = await this.checked(this.exec.run("fest", args, campRoot));
+    // Scaffold/validate run over whole festivals; give them room before killing.
+    const result = await this.checked(this.exec.run("fest", args, campRoot, 300_000));
     return result.stdout;
   }
 

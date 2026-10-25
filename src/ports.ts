@@ -21,7 +21,7 @@ export interface ExecResult {
 }
 
 export interface ExecRunner {
-  run(command: string, args: string[], cwd?: string): Promise<ExecResult>;
+  run(command: string, args: string[], cwd?: string, timeoutMs?: number): Promise<ExecResult>;
 }
 
 /** Structured access to the `fest` CLI. */

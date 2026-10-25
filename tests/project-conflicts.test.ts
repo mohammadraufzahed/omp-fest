@@ -27,19 +27,58 @@ afterEach(async () => {
 });
 
 describe("project reservations", () => {
-  it("parses only the bounded corepack pnpm install command", () => {
+  it("parses package-manager installs across wrappers, managers, and cwd prefixes", () => {
     const command = "cd projects/worktrees/modules-monorepo/employee-health-mock-contract-cleanup && corepack pnpm install --filter employee-health-client... --frozen-lockfile";
     expect(parseSupportedPackageInstall(command)).toEqual({
       workingDirectory: "projects/worktrees/modules-monorepo/employee-health-mock-contract-cleanup",
     });
-    expect(parseSupportedPackageInstall("corepack pnpm install --filter employee-health-client... --frozen-lockfile")).toEqual({});
+    for (const supported of [
+      "corepack pnpm install --filter employee-health-client... --frozen-lockfile",
+      "pnpm install",
+      "pnpm install --frozen-lockfile",
+      "npm install",
+      "npm ci",
+      "npm i",
+      "yarn",
+      "yarn install --immutable",
+      "yarn add lodash",
+      "bun install",
+      "deno install --entrypoint main.ts",
+      "mise exec -- pnpm install --frozen-lockfile",
+      "mise exec corepack pnpm install",
+      "mise exec -t node@22 -- pnpm install",
+      "direnv exec . npm install",
+      "direnv exec subdir pnpm install",
+      "npx pnpm install",
+      "bunx pnpm install",
+      "CI=true pnpm install",
+      "env CI=true pnpm install",
+      "fnm exec pnpm install",
+      "asdf exec npm ci",
+      "cd repo && npm install",
+      "cd repo && mise exec -- pnpm install",
+    ]) expect(parseSupportedPackageInstall(supported), supported).toBeDefined();
+    expect(parseSupportedPackageInstall("cd repo && pnpm install")).toEqual({ workingDirectory: "repo" });
     for (const mutation of [
       `${command} && touch owned.ts`,
-      command.replace("corepack pnpm", "npm"),
       command.replace("--frozen-lockfile", "--frozen-lockfile > install.log"),
       `python -c 'import os; os.remove("owned.ts")'`,
       "corepack pnpm install --filter employee-health-client... --frozen-lockfile | cat",
-    ]) expect(parseSupportedPackageInstall(mutation)).toBeUndefined();
+      "pnpm run install-script",
+      "pnpm exec install-tool",
+      "pnpm run x",
+      "pnpm; npm install",
+      "pnpm install `whoami`",
+      "pnpm install $(cat x)",
+      "pip install requests",
+      "apt install git",
+      "npm",
+      "pnpm",
+      "npx some-tool",
+      "cd && pnpm install",
+      "cd repo ; pnpm install",
+      "echo hi > pnpm install",
+    ]) expect(parseSupportedPackageInstall(mutation), mutation).toBeUndefined();
   });
 
   it("resolves the selected install cwd to its owning checkout", async () => {

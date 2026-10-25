@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { withStaleAwareLock } from "./fs-lock.js";
 
 export type FlowFieldKind = "username" | "secret" | "otp" | "text" | "choice" | "confirmation";
 export interface BrowserFlowField { id: string; label: string; kind: FlowFieldKind; required: boolean; choices?: string[]; selector?: string; credentialRef?: string }
@@ -72,15 +73,21 @@ export async function listBrowserFlows(root: string) {
   return Promise.all(entries.filter((entry) => entry.endsWith(".flow.json")).sort().map((entry) => readBrowserFlow(root, entry.slice(0, -".flow.json".length))));
 }
 export async function updateBrowserFlow(root: string, id: string, revision: string, patch: Partial<BrowserFlowInput>) {
-  const dir = await directory(root), path = pathOf(dir, id), lockPath = `${path}.lock`;
-  const lock = await open(lockPath, "wx", 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Flow is being edited; reread its revision."); throw error; });
-  const temp = `${path}.${randomUUID()}.tmp`;
+  const dir = await directory(root), path = pathOf(dir, id);
   try {
-    const prior = await readBrowserFlow(root, id); if (prior.revision !== revision) throw new Error("Stale flow revision; reread before editing.");
-    const clean = validateInput({ ...prior, ...patch, name: id });
-    const flow: BrowserLoginFlow = { ...clean, path: clean.path ?? "/", id, revision: `${createHash("sha256").update(JSON.stringify(clean)).digest("hex")}-${randomUUID()}`, updatedAt: new Date().toISOString() };
-    await writeFile(temp, JSON.stringify(flow, null, 2) + "\n", { flag: "wx", mode: 0o600 }); await rename(temp, path); return flow;
-  } finally { await unlink(temp).catch(() => undefined); await lock.close(); await unlink(lockPath); }
+    return await withStaleAwareLock(`${path}.lock`, async () => {
+      const temp = `${path}.${randomUUID()}.tmp`;
+      try {
+        const prior = await readBrowserFlow(root, id); if (prior.revision !== revision) throw new Error("Stale flow revision; reread before editing.");
+        const clean = validateInput({ ...prior, ...patch, name: id });
+        const flow: BrowserLoginFlow = { ...clean, path: clean.path ?? "/", id, revision: `${createHash("sha256").update(JSON.stringify(clean)).digest("hex")}-${randomUUID()}`, updatedAt: new Date().toISOString() };
+        await writeFile(temp, JSON.stringify(flow, null, 2) + "\n", { flag: "wx", mode: 0o600 }); await rename(temp, path); return flow;
+      } finally { await unlink(temp).catch(() => undefined); }
+    }, { label: "Browser flow" });
+  } catch (error) {
+    if (error instanceof Error && error.name === "LockBusyError") throw new Error("Flow is being edited; reread its revision.", { cause: error });
+    throw error;
+  }
 }
 export async function deleteBrowserFlow(root: string, id: string, revision: string) {
   const flow = await readBrowserFlow(root, id); if (flow.revision !== revision) throw new Error("Stale flow revision; reread before deleting.");
