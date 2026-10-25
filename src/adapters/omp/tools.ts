@@ -8,10 +8,13 @@
  * coding-agent package installed).
  */
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { readFile } from "node:fs/promises";
-import type { CampCli, CampDetect, FestCli } from "../../ports.js";
+import { lstat, readFile, writeFile } from "node:fs/promises";
+import type { CampCli, CampDetect, ExecRunner, FestCli } from "../../ports.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
-import { festivalOwner, festivalOwnerIsDead } from "../../application/festival-ownership.js";
+import { festivalOwner, festivalOwnerIsDead, releaseFestivalOwnership } from "../../application/festival-ownership.js";
+import { createFestivalWorktrees, mergeFestivalWorktrees, readFestivalWorktrees } from "../../application/festival-worktrees.js";
+import { listProjectReservations } from "../../application/project-conflicts.js";
+import { summarizeProgress } from "../../domain/progress.js";
 import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
@@ -47,6 +50,7 @@ export interface ToolDeps {
   camp: CampCli;
   detect: CampDetect;
   tracker: LoopTracker;
+  exec?: ExecRunner;
   supervisor?: Supervisor;
   /** Per-project .ompfest.json — gate behavior honors pauseAtGates/evidenceRequiredOnGates. */
   config?: () => Promise<OmpFestConfig>;
@@ -299,6 +303,20 @@ async function coordinatorRequired(dir: string, sessionId: string): Promise<Tool
     : textResult({ kind: "coordinator_required", festival: basename(dir), coordinator: owner?.sessionId, hint: "Joined sessions may implement and submit claimed tasks. Only the coordinator integrates, changes task state, completes tasks, advances gates, promotes, or commits." });
 }
 
+
+/**
+ * Worktree-per-festival: when a festival lands in festivals/active, create one
+ * git worktree per camp project under projects/worktrees/<project>/<festival>.
+ * Non-git camps and missing exec silently skip — worktrees are additive.
+ */
+async function maybeCreateFestivalWorktrees(deps: ToolDeps, campRoot: string, festivalDir: string, festivalName: string) {
+  if (!deps.exec || !festivalDir.includes(`${sep}festivals${sep}active${sep}`)) return [];
+  try {
+    return await createFestivalWorktrees(deps.exec, campRoot, festivalDir, festivalName, await deps.camp.projects(campRoot));
+  } catch (error) {
+    return { error: String(error) };
+  }
+}
 
 async function campRootOf(deps: ToolDeps, ctx: ToolContextLike): Promise<string | undefined> {
   const location = await deps.detect.locate(ctx.cwd);
@@ -801,7 +819,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         return textResult({ status: "cancelled", hint: "Gate dialog aborted — the gate stays pending." });
       }
       const output = await deps.fest.workflowReject(dir, reason.trim() || "no reason given");
-      return textResult({ status: "rejected", reason, output });
+      return textResult({ kind: "gate_rejected", code: "GATE_REJECTED", retryable: true, status: "rejected", reason, feedback: reason, output, nextAction: "Address the rejection feedback, update evidence, then resubmit fest_gate_submit." });
     },
   });
 
@@ -1277,7 +1295,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         if (match.kind === "match" && deps.tracker.claimFestival(sid, match.festival.path)) {
           persistClaim(pi, match.festival.path, location.campRoot);
         }
-        return textResult({ kind: "promoted", output, nextSteps: SUPERVISOR_POLICY });
+        const worktrees = match.kind === "match" ? await maybeCreateFestivalWorktrees(deps, location.campRoot, match.festival.path, match.festival.id) : undefined;
+        return textResult({ kind: "promoted", output, ...(Array.isArray(worktrees) && worktrees.length ? { worktrees: worktrees.map((row) => row.worktreePath) } : {}), nextSteps: SUPERVISOR_POLICY });
       }
       const dir = location.festivalDir ??
         (location.campRoot ? await claimedFestivalDir(deps.tracker, deps.detect, sid, location.campRoot) : undefined);
@@ -1294,13 +1313,256 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const output = await deps.fest.promote(dir);
       deps.detect.bustCache?.();
       // The promote renamed festivals/<status>/<id> — re-point the claim at the new dir.
+      let worktreeNote: Awaited<ReturnType<typeof maybeCreateFestivalWorktrees>> | undefined;
       if (location.campRoot && deps.tracker.claimedFestivalIdFor(sid) === promotedId) {
         const moved = (await deps.detect.listFestivals(location.campRoot)).find((f) => f.id === promotedId);
         if (moved && deps.tracker.claimFestival(sid, moved.path)) {
           persistClaim(pi, moved.path, location.campRoot);
         }
+        worktreeNote = moved ? await maybeCreateFestivalWorktrees(deps, location.campRoot, moved.path, moved.id) : undefined;
       }
-      return textResult({ kind: "promoted", output, nextSteps: SUPERVISOR_POLICY });
+      return textResult({ kind: "promoted", output, ...(Array.isArray(worktreeNote) && worktreeNote.length ? { worktrees: worktreeNote.map((row) => row.worktreePath) } : {}), nextSteps: SUPERVISOR_POLICY });
+    },
+  });
+
+  pi.registerTool({
+    name: "camp_init",
+    label: "Camp Init",
+    description:
+      "Initialize a new camp in the current directory (camp init + .ompfest.json defaults). " +
+      "Use when the agent starts in a non-camp directory; after init, start new work with /fest idea -> /fest plan.",
+    parameters: z.object({}),
+    async execute(_id: string, _params: Record<string, never>, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const location = await deps.detect.locate(ctx.cwd);
+      if (location.campRoot) {
+        return textResult({ kind: "camp_initialized", campRoot: location.campRoot, already: true, nextAction: "Camp exists — start work with /fest idea -> /fest plan <goal>." });
+      }
+      const result = await deps.camp.raw(ctx.cwd, ["init"]);
+      if (result.code !== 0) {
+        return textResult({ kind: "camp_init_failed", code: "CAMP_INIT_FAILED", retryable: true, error: result.stderr.trim() || result.stdout.trim() });
+      }
+      const configPath = join(ctx.cwd, ".ompfest.json");
+      if (!(await lstat(configPath).catch(() => undefined))) {
+        await writeFile(configPath, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
+      }
+      const festOk = await deps.fest.available();
+      deps.detect.bustCache?.();
+      return textResult({
+        kind: "camp_initialized",
+        campRoot: ctx.cwd,
+        output: result.stdout.trim() || undefined,
+        ...(festOk ? {} : { warning: "fest CLI not found — install it with: npm i -g @obedience-corp/festival" }),
+        nextAction: "Camp ready — start work with /fest idea <text> then /fest plan <goal>.",
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "camp_status",
+    label: "Camp Status",
+    description:
+      "Whole-camp coordination view: every festival with its status, owner session, open unit, " +
+      "progress, recorded worktrees, pending gates, plus orphan transactions and active write reservations.",
+    parameters: z.object({}),
+    async execute(_id: string, _params: Record<string, never>, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const location = await deps.detect.locate(ctx.cwd);
+      const root = location.campRoot;
+      if (!root) return await idleResult(deps, ctx);
+      const sid = sessionIdOf(ctx);
+      const festivals = await deps.detect.listFestivals(root);
+      const orphans = await listFestivalCreationOrphans(root);
+      const projects = await deps.camp.projects(root).catch(() => []);
+      const reservations = (await Promise.all(projects.map((project) =>
+        listProjectReservations(isAbsolute(project.path) ? project.path : resolve(root, project.path)).catch(() => []),
+      ))).flat();
+      const rows = await Promise.all(festivals.map(async (festival) => {
+        const owner = await festivalOwner(festival.path).catch(() => undefined);
+        const worktrees = await readFestivalWorktrees(festival.path).catch(() => []);
+        const progress = summarizeProgress(await deps.detect.readProgress(festival.path).catch(() => []));
+        const openTasks = (await deps.detect.pendingTasks(festival.path).catch(() => [])).filter((task) => !task.done).length;
+        return {
+          id: festival.id,
+          status: festival.status,
+          ...(owner ? { owner: owner.sessionId, stale: festivalOwnerIsDead(owner) || undefined } : {}),
+          progress: `${progress.completed}/${progress.total}`,
+          ...(progress.currentLabel ? { current: progress.currentLabel } : {}),
+          ...(progress.gatePending ? { gatePending: true } : {}),
+          ...(openTasks ? { openTasks } : {}),
+          ...(worktrees.length ? { worktrees: worktrees.map((row) => row.worktreePath) } : {}),
+        };
+      }));
+      return textResult({
+        kind: "camp_status",
+        camp: location.campName,
+        sessionId: sid,
+        festivals: rows,
+        orphans: orphans.map((orphan) => ({ transaction: orphan.receipt.id, name: orphan.receipt.name, state: classifyCreationOrphan(orphan) })),
+        reservations: reservations.map((row) => ({ worker: row.worker ?? row.sessionId, files: row.files, project: basename(row.projectDir) })),
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "fest_advance",
+    label: "Fest Advance",
+    description:
+      "Single-stepping helper: inspects camp + festival state and returns the ONE legal next " +
+      "action for the supervisor — the tool to call, its params, and why. Use when unsure what " +
+      "comes next instead of guessing the lifecycle.",
+    parameters: z.object({}),
+    async execute(_id: string, _params: Record<string, never>, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const location = await deps.detect.locate(ctx.cwd);
+      const root = location.campRoot;
+      if (!root) {
+        return textResult({
+          kind: "advance", code: "NO_CAMP", retryable: false,
+          nextAction: { tool: "camp_init", params: {}, why: "No camp found — initialize one." },
+        });
+      }
+      const festivals = await deps.detect.listFestivals(root);
+      const claimed = await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), root);
+      const dir = claimed ?? location.festivalDir;
+      if (!dir) {
+        if (festivals.some((festival) => festival.status === "ready")) {
+          const ready = festivals.find((festival) => festival.status === "ready");
+          return textResult({
+            kind: "advance", code: "READY_TO_START", retryable: true,
+            nextAction: { tool: "fest_promote", params: { festival: ready?.id }, why: `Festival ${ready?.id ?? "?"} is ready — promote it to active.` },
+          });
+        }
+        if (festivals.some((festival) => festival.status === "planning")) {
+          return textResult({
+            kind: "advance", code: "PLANNING_IN_PROGRESS", retryable: true,
+            nextAction: { tool: "camp_status", params: {}, why: "Festival(s) still planning — check status; drive planning via fest_plan/scaffold." },
+          });
+        }
+        const orphans = await listFestivalCreationOrphans(root);
+        if (orphans.length > 0) {
+          return textResult({
+            kind: "advance", code: "ORPHANS_PRESENT", retryable: true,
+            nextAction: { tool: "fest_orphans", params: {}, why: `${orphans.length} orphan transaction(s) — inspect and rollback/restore.` },
+          });
+        }
+        return textResult({
+          kind: "advance", code: "NO_FESTIVAL", retryable: false,
+          nextAction: { tool: "fest_plan", params: {}, why: "No active festival — plan one (or camp ideas via /fest ideas)." },
+        });
+      }
+      const festivalName = basename(dir);
+      const next = await deps.fest.next(dir).catch(() => undefined);
+      const status = dir.includes(`${sep}completed${sep}`) ? "completed" : dir.split(sep).at(-2) ?? "active";
+      if (status !== "active") {
+        return textResult({
+          kind: "advance", code: `STATUS_${status.toUpperCase()}`, retryable: true, festival: festivalName, status,
+          nextAction: status === "ready"
+            ? { tool: "fest_promote", params: { festival: festivalName }, why: "Festival is ready — promote to active." }
+            : { tool: "camp_status", params: {}, why: `Festival is ${status} — inspect state.` },
+        });
+      }
+      if (!next) {
+        return textResult({ kind: "advance", code: "NEXT_UNKNOWN", retryable: true, festival: festivalName,
+          nextAction: { tool: "camp_status", params: {}, why: "Could not read fest next — inspect status." } });
+      }
+      const nextActions: Record<string, { tool: string; params?: Record<string, unknown>; why: string }> = {
+        task: { tool: "fest_next", why: "A task is next — claim and implement it (or delegate per delegateMode)." },
+        wf_step: { tool: "fest_next", why: "A workflow step is next — run it." },
+        gate_step: { tool: "fest_gate_submit", params: { evidence: "<one line per recorded constraint>" }, why: "A gate is pending — submit evidence; the human decides." },
+        complete: { tool: "fest_complete", params: {}, why: "All tasks done — finish: merge worktrees, promote to completed." },
+        blocked: { tool: "camp_status", params: {}, why: "Festival blocked — inspect status to unblock." },
+        idle: { tool: "camp_status", params: {}, why: "Nothing pending — inspect camp state." },
+      };
+      const action = nextActions[next.kind] ?? nextActions.idle;
+      return textResult({
+        kind: "advance", code: `NEXT_${next.kind.toUpperCase()}`, retryable: true,
+        festival: festivalName, status, unit: next,
+        nextAction: action,
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: "fest_complete",
+    label: "Fest Complete",
+    description:
+      "Finish a festival end-to-end: verify all tasks done -> merge each festival worktree into its " +
+      "project base branch -> remove worktrees -> promote active -> completed -> release the claim. " +
+      "Idempotent: a merge conflict or dirty worktree is reported and the rest stays resumable — fix and rerun.",
+    parameters: z.object({
+      festival: z.string().optional().describe("Festival name/id; omit for the claimed festival"),
+      force: z.boolean().optional().describe("Skip the verified final integration review requirement"),
+    }),
+    async execute(_id: string, params: { festival?: string; force?: boolean }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const blocked = supervisorOnly(ctx, "festival completion");
+      if (blocked) return blocked;
+      const location = await deps.detect.locate(ctx.cwd);
+      const root = location.campRoot;
+      if (!root) return await idleResult(deps, ctx);
+      const sid = sessionIdOf(ctx);
+      let dir: string | undefined;
+      if (params.festival) {
+        const match = matchFestival(await deps.detect.listFestivals(root), params.festival);
+        if (match.kind !== "match") {
+          return textResult({ kind: "complete_failed", code: "FESTIVAL_NOT_FOUND", retryable: false, selector: params.festival, hint: "No festival matched; run fest_status or /fest status to list festivals." });
+        }
+        dir = match.festival.path;
+      } else {
+        dir = location.festivalDir ?? await claimedFestivalDir(deps.tracker, deps.detect, sid, root);
+      }
+      if (!dir) return await idleResult(deps, ctx);
+      const owner = await festivalOwner(dir);
+      if (owner && owner.sessionId !== sid && !festivalOwnerIsDead(owner)) {
+        return textResult({ kind: "festival_owned", code: "FESTIVAL_OWNED", retryable: false, festival: basename(dir), owner: owner.sessionId, hint: "Completion is coordinator-only; use /fest select to take ownership first." });
+      }
+      if (!dir.includes(`${sep}festivals${sep}active${sep}`) && !dir.includes(`${sep}festivals${sep}completed${sep}`)) {
+        return textResult({ kind: "complete_blocked", code: "NOT_ACTIVE", retryable: false, festival: basename(dir), hint: "Only an active festival can be completed — promote it first." });
+      }
+      if (dir.includes(`${sep}festivals${sep}completed${sep}`)) {
+        return textResult({ kind: "festival_completed", festival: basename(dir), already: true });
+      }
+      const unit = await deps.fest.next(dir);
+      if (unit.kind === "gate_step") {
+        return textResult({ kind: "complete_blocked", code: "GATE_PENDING", retryable: false, unit, hint: "A gate is pending human approval — /fest approve or /fest reject first." });
+      }
+      if (unit.kind !== "complete") {
+        return textResult({ kind: "complete_blocked", code: "TASKS_OPEN", retryable: false, unit, hint: "All tasks must be completed before finish — continue fest_next until it returns complete." });
+      }
+      const review = await integrationReviewStatus(dir, deps.detect);
+      if (!params.force && review.status !== "verified") {
+        return textResult({ kind: "complete_blocked", code: "REVIEW_NOT_VERIFIED", retryable: true, review, hint: "Run the final integration pass (/fest finish) and record results with fest_integration — or pass force to skip." });
+      }
+      let mergedWorktrees: string[] = [];
+      if (deps.exec) {
+        const merge = await mergeFestivalWorktrees(deps.exec, dir);
+        if (merge.dirty.length) {
+          return textResult({ kind: "complete_blocked", code: "WORKTREE_DIRTY", retryable: true, dirty: merge.dirty, hint: "Uncommitted changes in the worktree — commit them (fest_commit) or discard before finishing." });
+        }
+        if (merge.conflicts.length) {
+          return textResult({ kind: "complete_blocked", code: "MERGE_CONFLICT", retryable: true, conflicts: merge.conflicts, hint: "Merge conflicts in the project repo — merge the base branch into the worktree branch, resolve, rerun fest_complete." });
+        }
+        mergedWorktrees = merge.removed;
+      }
+      const output = await deps.fest.promote(root, basename(dir));
+      deps.detect.bustCache?.();
+      await releaseFestivalOwnership(dir, sid);
+      deps.tracker.clearFestival(sid);
+      // Finish notification: camp notify channel + optional configured webhook.
+      const summary = `festival ${basename(dir)} completed${mergedWorktrees.length ? ` — merged worktrees: ${mergedWorktrees.join(", ")}` : ""}`;
+      await deps.camp.notify(root, summary).catch(() => undefined);
+      const config = deps.config ? await deps.config() : DEFAULT_CONFIG;
+      if (config.webhookUrl) {
+        await fetch(config.webhookUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ event: "festival_completed", festival: basename(dir), mergedWorktrees, camp: location.campName }),
+        }).catch(() => undefined);
+      }
+      return textResult({
+        kind: "festival_completed",
+        festival: basename(dir),
+        output,
+        ...(mergedWorktrees.length ? { mergedWorktrees } : {}),
+        nextSteps: "Festival completed and worktrees merged — the project base branch has the work.",
+      });
     },
   });
 

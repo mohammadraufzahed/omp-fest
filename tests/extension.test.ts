@@ -841,3 +841,39 @@ it("does not treat discovered browser tools as permission to expose credentials"
   const denied: unknown = JSON.parse((await flow("test", { action: "run", id: "login" }, undefined, undefined, ctx)).content[0]!.text);
   expect(denied).toMatchObject({ kind: "flow_blocked", code: "MAIN_AGENT_REQUIRED" });
 });
+
+it("fest_advance on a bare camp points at fest_plan; camp_status reports an empty coordination view", async () => {
+  const root = await makeCamp();
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const ctx = { cwd: root };
+  const advance = toolExecutors.get("fest_advance"), status = toolExecutors.get("camp_status");
+  if (!advance || !status) throw new Error("Missing flow-v2 tools");
+  const step = JSON.parse((await advance("t", {}, undefined, undefined, ctx)).content[0]!.text) as { kind: string; nextAction: { tool: string } };
+  expect(step.nextAction.tool).toBe("fest_plan");
+  const camp = JSON.parse((await status("t", {}, undefined, undefined, ctx)).content[0]!.text) as { kind: string; festivals: unknown[]; orphans: unknown[] };
+  expect(camp.kind).toBe("camp_status");
+  expect(camp.festivals).toEqual([]);
+});
+
+it("camp_init reports an existing camp without invoking the CLI", async () => {
+  const root = await makeCamp();
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const init = toolExecutors.get("camp_init");
+  if (!init) throw new Error("Missing camp_init tool");
+  const result = JSON.parse((await init("t", {}, undefined, undefined, { cwd: root })).content[0]!.text) as { kind: string };
+  expect(result.kind).toBe("camp_initialized");
+});
+
+it("fest_capabilities contract:true returns the agent contract", async () => {
+  const root = await makeCamp();
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const capabilities = toolExecutors.get("fest_capabilities");
+  if (!capabilities) throw new Error("Missing fest_capabilities tool");
+  const contract = JSON.parse((await capabilities("t", { contract: true }, undefined, undefined, { cwd: root })).content[0]!.text) as { kind: string; contract: string };
+  expect(contract.kind).toBe("agent_contract");
+  expect(contract.contract).toContain("fest_complete");
+  expect(contract.contract.length).toBeGreaterThan(400);
+});

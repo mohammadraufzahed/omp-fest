@@ -167,6 +167,8 @@ export interface OmpFestConfig {
   evidenceRequiredOnGates: boolean;
   /** Per-file/checkout write reservations. Off for worktree-per-festival or legacy projects. */
   writeLocks: boolean;
+  /** Subagent delegation policy: "never" blocks worker spawns, "always" delegates every unit, "auto" delegates units with disjoint scope. */
+  delegateMode: "auto" | "always" | "never";
 }
 
 export const DEFAULT_CONFIG: OmpFestConfig = {
@@ -179,4 +181,5 @@ export const DEFAULT_CONFIG: OmpFestConfig = {
   pauseAtGates: true,
   evidenceRequiredOnGates: true,
   writeLocks: true,
+  delegateMode: "auto",
 };
