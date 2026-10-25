@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { prepareStructuredPlan, type StructuredPlan, type PreparedStructuredPlan } from "./structured-plan.js";
+import { withStaleAwareLock } from "./fs-lock.js";
 
 export interface PlanArtifact {
   name: string;
@@ -29,13 +30,12 @@ function errorCode(error: unknown): string | undefined {
     : undefined;
 }
 async function withArtifactLock<T>(path: string, action: () => Promise<T>): Promise<T> {
-  const lockPath = `${path}.lock`;
-  const lock = await open(lockPath, "wx", 0o600).catch((error: unknown) => {
-    if (errorCode(error) === "EEXIST") throw new Error("Plan preview is being saved; retry after it completes");
+  try {
+    return await withStaleAwareLock(`${path}.lock`, action, { label: "Plan preview" });
+  } catch (error) {
+    if (error instanceof Error && error.name === "LockBusyError") throw new Error("Plan preview is being saved; retry after it completes", { cause: error });
     throw error;
-  });
-  try { return await action(); }
-  finally { await lock.close(); await unlink(lockPath); }
+  }
 }
 
 async function writeAtomically(path: string, content: string): Promise<void> {
@@ -158,6 +158,65 @@ export async function approvedPlan(root: string, plan: string, name: string, rev
 }
 
 /** Record completed scaffold state separately so the immutable approval digest remains valid. */
+export interface PlanPreviewInfo {
+  name: string;
+  plan: string;
+  state: string;
+  planRevision?: string;
+  updatedAt?: string;
+}
+
+/** List every plan preview/status in .ompfest/plans — drafts plus scaffolded, approved, rejected, cancelled, expired. */
+export async function listPlanPreviews(root: string): Promise<PlanPreviewInfo[]> {
+  const plans = join(await realpath(root), ".ompfest", "plans");
+  const entries = await readdir(plans).catch((error: unknown) => {
+    if (errorCode(error) === "ENOENT") return [] as string[];
+    throw error;
+  });
+  const result: PlanPreviewInfo[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".STRUCTURE.md.status.json")) continue;
+    const name = entry.slice(0, -".STRUCTURE.md.status.json".length);
+    const path = join(plans, entry);
+    try {
+      const status: unknown = JSON.parse(await readFile(path, "utf8"));
+      if (!status || typeof status !== "object" || !("state" in status) || typeof status.state !== "string") continue;
+      const row = status as Record<string, unknown>;
+      result.push({
+        name,
+        plan: join(plans, `${name}.STRUCTURE.md`),
+        state: row.state as string,
+        ...(typeof row.planRevision === "string" ? { planRevision: row.planRevision } : {}),
+        ...(typeof row.completedAt === "string" ? { updatedAt: row.completedAt }
+          : typeof row.approvedAt === "string" ? { updatedAt: row.approvedAt } : {}),
+      });
+    } catch { /* corrupt status files are skipped, not surfaced as previews */ }
+  }
+  return result.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Mark saved/approved previews older than a TTL as expired — never deletes artifacts. */
+export async function expireStalePlanPreviews(root: string, ttlMs = 24 * 60 * 60_000, nowMs = Date.now()): Promise<string[]> {
+  const expired: string[] = [];
+  for (const preview of await listPlanPreviews(root)) {
+    if (preview.state !== "saved_preview" && preview.state !== "approved") continue;
+    const info = await lstat(`${preview.plan}.status.json`).catch(() => undefined);
+    const age = info ? nowMs - info.mtimeMs : Number.POSITIVE_INFINITY;
+    if (age <= ttlMs) continue;
+    try {
+      await withArtifactLock(preview.plan, async () => {
+        const statusPath = `${preview.plan}.status.json`;
+        const current: unknown = JSON.parse(await readFile(statusPath, "utf8"));
+        if (!current || typeof current !== "object" || !("state" in current) ||
+            (current.state !== "saved_preview" && current.state !== "approved")) return;
+        await writeAtomically(statusPath, JSON.stringify({ ...(current as Record<string, unknown>), state: "expired", expiredAt: new Date(nowMs).toISOString() }) + "\n");
+      });
+      expired.push(preview.name);
+    } catch { /* preview changed under us; leave it alone */ }
+  }
+  return expired;
+}
+
 export async function markPlanScaffolded(root: string, plan: string, name: string, revision: string, festivalDir: string, references: { path: string; content: string }[] = []): Promise<void> {
   const path = await artifactPath(root, plan, name);
   await withArtifactLock(path, async () => {

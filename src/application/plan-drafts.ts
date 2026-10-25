@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { withStaleAwareLock } from "./fs-lock.js";
 import { previewPlan, type PlanArtifact } from "./plan-artifacts.js";
 import { inferVerificationEvidencePath } from "./plan-input.js";
 import type { StructuredPlan } from "./structured-plan.js";
@@ -187,12 +188,7 @@ export async function readPlanDraft(root: string, draftId: string): Promise<Plan
 /** Preview under the same lock as edits so an older revision cannot save after a newer edit. */
 export async function previewPlanDraft(root: string, draftId: string, revision: string, references: { path: string; content: string }[] = []) {
   const target = await location(root, draftId);
-  const lockPath = `${target.file}.lock`;
-  const lock = await open(lockPath, "wx", 0o600).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Draft is being edited; read its current revision before previewing");
-    throw error;
-  });
-  try {
+  return withStaleAwareLock(`${target.file}.lock`, async () => {
     const draft = await readPlanDraft(root, draftId);
     if (draft.revision !== revision) throw new Error("Stale draft revision; read the current draft before previewing");
     if (draft.missing.length || !draft.fields.workingDir) throw new Error(`Draft is incomplete: ${draft.missing.join(", ")}`);
@@ -201,23 +197,26 @@ export async function previewPlanDraft(root: string, draftId: string, revision: 
       ...(draft.fields.referencesDir ? { referencesDir: draft.fields.referencesDir } : {}),
     };
     return { ...await previewPlan(root, draft.plan, artifact, references), draftId, draftRevision: revision };
-  } finally {
-    await lock.close();
-    await unlink(lockPath);
-  }
+  }, { label: "Plan draft" }).catch((error: unknown) => {
+    if (error instanceof Error && error.name === "LockBusyError") throw new Error("Draft is being edited; read its current revision before previewing");
+    throw error;
+  });
 }
 
 /** A field patch replaces only supplied fields; a stale revision never overwrites newer work. */
 export async function updatePlanDraft(root: string, draftId: string, revision: string, patch: Partial<PlanDraftFields>): Promise<PlanDraft> {
   const target = await location(root, draftId);
-  const lockPath = `${target.file}.lock`;
-  const lock = await open(lockPath, "wx", 0o600).catch((error: unknown) => {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Draft is being edited; read its current revision before updating");
-    throw error;
-  });
+  return withStaleAwareLock(`${target.file}.lock`, async () => updatePlanDraftUnlocked(target, draftId, revision, patch), { label: "Plan draft" })
+    .catch((error: unknown) => {
+      if (error instanceof Error && error.name === "LockBusyError") throw new Error("Draft is being edited; read its current revision before updating");
+      throw error;
+    });
+}
+
+async function updatePlanDraftUnlocked(target: { root: string; file: string }, draftId: string, revision: string, patch: Partial<PlanDraftFields>): Promise<PlanDraft> {
   const temporary = `${target.file}.${randomUUID()}.tmp`;
   try {
-    const previous = await readPlanDraft(root, draftId);
+    const previous = await readPlanDraft(target.root, draftId);
     if (previous.revision !== revision) throw new Error("Stale draft revision; read the current draft before editing");
     const verification = patch.verification && previous.fields.verification
       ? { ...previous.fields.verification, ...patch.verification }
@@ -241,13 +240,53 @@ export async function updatePlanDraft(root: string, draftId: string, revision: s
     return draft;
   } finally {
     await unlink(temporary).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
-    await lock.close();
-    await unlink(lockPath);
   }
+}
+
+/** Delete a draft under its edit lock; a wrong revision never deletes newer work. */
+export async function deletePlanDraft(root: string, draftId: string, revision?: string): Promise<boolean> {
+  const target = await location(root, draftId);
+  return withStaleAwareLock(`${target.file}.lock`, async () => {
+    if (revision !== undefined) {
+      const draft = await readPlanDraft(root, draftId);
+      if (draft.revision !== revision) throw new Error("Stale draft revision; read the current draft before deleting");
+    }
+    await rm(target.file, { force: true });
+    await rm(`${target.file}.lock`, { force: true }).catch(() => undefined);
+    return true;
+  }, { label: "Plan draft" });
+}
+
+/** Drafts are advisory — once the plan scaffolded they are removed. */
+export async function deletePlanDraftsForPlan(root: string, name: string): Promise<string[]> {
+  const deleted: string[] = [];
+  for (const draft of await listPlanDrafts(root)) {
+    if (draft.fields.name !== name) continue;
+    try {
+      if (await deletePlanDraft(root, draft.draftId)) deleted.push(draft.draftId);
+    } catch { /* a concurrent edit owns it; the draft is advisory and may stay */ }
+  }
+  return deleted;
 }
 
 export async function listPlanDrafts(root: string): Promise<PlanDraft[]> {
   const target = await location(root, "draft-list");
   const entries = await readdir(join(target.root, ".ompfest", "plans"));
   return Promise.all(entries.filter((name) => name.endsWith(".draft.json")).sort().map((name) => readPlanDraft(root, name.slice(0, -".draft.json".length))));
+}
+
+/** Remove orphaned lock/tmp debris left by crashed draft operations. */
+export async function sweepPlanDraftDebris(root: string, olderThanMs = 15 * 60_000, nowMs = Date.now()): Promise<string[]> {
+  const target = await location(root, "draft-list");
+  const dir = join(target.root, ".ompfest", "plans");
+  const removed: string[] = [];
+  for (const entry of await readdir(dir)) {
+    if (!entry.endsWith(".tmp") && !entry.endsWith(".draft.json.lock")) continue;
+    const path = join(dir, entry);
+    const info = await stat(path).catch(() => undefined);
+    if (!info || nowMs - info.mtimeMs <= olderThanMs) continue;
+    await rm(path, { recursive: true, force: true });
+    removed.push(entry);
+  }
+  return removed;
 }

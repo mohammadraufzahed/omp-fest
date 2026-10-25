@@ -22,7 +22,8 @@ import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY } from "./src/applicati
 import { orientSession } from "./src/application/orient.js";
 import { restoreClaimFromBranch } from "./src/application/session-claim.js";
 import { claimedFestivalDir } from "./src/application/fest-resolve.js";
-import { festivalOwner } from "./src/application/festival-ownership.js";
+import { festivalOwner, touchFestivalOwnership } from "./src/application/festival-ownership.js";
+import { reconcileCamp } from "./src/application/reconcile.js";
 import { buildStateDigest } from "./src/application/state-digest.js";
 import { sessionIdOf } from "./src/application/session-id.js";
 import { CampCliAdapter } from "./src/adapters/cli/camp-cli.js";
@@ -37,7 +38,7 @@ import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
 import { planInterviewKickoff } from "./src/domain/orientation.js";
 import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
 import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
-import { NativeWriteLockInvocations, packageInstallCheckout, projectRootForFile, reserveProjectCheckout, reserveProjectFiles, releaseProjectFiles, parseSupportedPackageInstall } from "./src/application/project-conflicts.js";
+import { NativeWriteLockInvocations, packageInstallCheckout, projectRootForFile, reserveProjectCheckout, reserveProjectFiles, releaseProjectFiles, parseSupportedPackageInstall, shellRedirectTargets } from "./src/application/project-conflicts.js";
 import { readPortfolioState, updatePortfolioAssignment, updatePortfolioAssignmentRuntime } from "./src/application/portfolio-state.js";
 import { releaseFestivalTask } from "./src/application/festival-team.js";
 import type { WorkerAssignment } from "./src/application/supervisor.js";
@@ -160,13 +161,23 @@ function writeTool(toolName: string): boolean {
 }
 
 function shellWritesFiles(command: string): boolean {
-  return /\b(?:tee|cp|mv|rm|touch|mkdir|install|truncate|apply_patch)\b/.test(command) ||
+  return /\b(?:tee|cp|mv|rm|touch|mkdir|truncate|apply_patch)\b/.test(command) ||
     /\b(?:sed|perl)\b[^;\n]*\s-i(?:\s|$)/.test(command) ||
     /\bgit\s+apply\b/.test(command) ||
     /\bdd\b[^;\n]*\bof=/.test(command) ||
     /\bawk\b[^;\n]*\s-i\s+inplace\b/.test(command) ||
-    /(?:^|[^<])>{1,2}\s*(?:\/|\.{0,2}\/|[A-Za-z0-9_.-])/.test(command) ||
     /\b(?:python(?:\d+(?:\.\d+)*)?|node|ruby|php)\s+(?:-c|-e|-r)\b/.test(command);
+}
+
+/** Redirect targets inside the camp or a Git checkout still need the write-lock path; /tmp noise does not. */
+async function shellRedirectsProtected(command: string, cwd: string, campRoot: string): Promise<boolean> {
+  const camp = resolve(campRoot);
+  for (const target of shellRedirectTargets(command)) {
+    const resolved = resolve(isAbsolute(target) ? target : resolve(cwd, target));
+    if (resolved === camp || resolved.startsWith(`${camp}${sep}`)) return true;
+    if (await projectRootForFile(resolved)) return true;
+  }
+  return false;
 }
 
 
@@ -283,6 +294,12 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return;
     }
     const orientation = await orientSession(ctx.cwd, detect, claimedDir);
+    if (orientation.location.campRoot) {
+      const campRoot = orientation.location.campRoot;
+      void reconcileCamp(campRoot, async (root) => (await camp.projects(root)).map((project) => project.path)).then((summary) => {
+        if (summary.total) silentContext(`omp-fest startup reconcile: ${summary.describe()}.`);
+      }).catch((error: unknown) => pi.logger?.warn(`omp-fest startup reconcile failed: ${String(error)}`));
+    }
     if (orientation.statusLine && config.statusLine) {
       ctx.ui.setStatus("omp-fest", orientation.statusLine);
     }
@@ -374,6 +391,9 @@ export default function ompFest(pi: ExtensionApiLike): void {
       ? await claimedFestivalDir(tracker, detect, sid, location.campRoot)
       : undefined);
     const owner = festivalDir ? await festivalOwner(festivalDir) : undefined;
+    if (owner?.sessionId === sid && festivalDir) {
+      await touchFestivalOwnership(festivalDir, sid).catch(() => undefined);
+    }
     const rolePolicy = owner?.sessionId === sid
       ? `${SUPERVISOR_POLICY}\n${INTEGRATION_GUIDE}`
       : digest.includes("festival collaborator")
@@ -396,7 +416,10 @@ export default function ompFest(pi: ExtensionApiLike): void {
       if (!location.campRoot) {
         return undefined;
       }
-      if (writeTool(toolName)) {
+      // writeLocks=false: worktree-per-festival and legacy projects run without
+      // file/checkout reservations — every agent writes freely.
+      const writeLocksEnabled = (await loadConfig(location.campRoot)).writeLocks;
+      if (writeTool(toolName) && writeLocksEnabled) {
         const sid = sessionIdOf(ctx);
         const campRoot = location.campRoot;
         const administrativeRoot = resolve(campRoot, ".ompfest");
@@ -439,7 +462,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
           return { block: true, reason: String(error) };
         }
       }
-      const supportedInstall = toolName === "bash" ? parseSupportedPackageInstall(command) : undefined;
+      const supportedInstall = toolName === "bash" && writeLocksEnabled ? parseSupportedPackageInstall(command) : undefined;
       if (supportedInstall) {
         const sid = sessionIdOf(ctx);
         const workingDir = resolve(ctx.cwd, supportedInstall.workingDirectory ?? ".");
@@ -466,8 +489,8 @@ export default function ompFest(pi: ExtensionApiLike): void {
           return { block: true, reason: `omp-fest cannot safely reserve package install checkout: ${String(error)}` };
         }
       }
-      if (toolName === "bash" && shellWritesFiles(command) && !supportedInstall) {
-        return { block: true, reason: "omp-fest blocks shell-based project file mutations because it cannot acquire exact per-file write locks. Use native write/edit tools with explicit target paths, or the supported corepack pnpm install command for a Git checkout." };
+      if (toolName === "bash" && writeLocksEnabled && !supportedInstall && (shellWritesFiles(command) || await shellRedirectsProtected(command, ctx.cwd, location.campRoot))) {
+        return { block: true, reason: "omp-fest blocks shell-based project file mutations because it cannot acquire exact per-file write locks. Use native write/edit tools with explicit target paths, or a package-manager install command inside a Git checkout (pnpm/npm/yarn/bun/deno, optionally via corepack, mise exec, direnv exec, npx, or bunx)." };
       }
       if (
         toolName === "bash" &&
