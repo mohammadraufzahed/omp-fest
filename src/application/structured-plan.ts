@@ -26,6 +26,9 @@ export interface StructuredPlan {
     id: string;
     name: string;
     type: "implementation" | "planning" | "research" | "validation";
+    objective: string;
+    deliverables: string[];
+    completionCriteria: string[];
     sequences: { id: string; name: string; tasks: StructuredTask[] }[];
   }[];
 }
@@ -50,6 +53,7 @@ export function structuredPlanSchema(z: ZodLike): ZodSchema {
     phases: z.array(z.object({
       id: z.string(), name: z.string(),
       type: z.enum(["implementation", "planning", "research", "validation"]),
+      objective: z.string(), deliverables: strings(), completionCriteria: strings(),
       sequences: z.array(z.object({
         id: z.string(), name: z.string(),
         tasks: z.array(z.object({
@@ -65,6 +69,7 @@ export function structuredPlanSchema(z: ZodLike): ZodSchema {
     })),
   });
 }
+
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
@@ -129,6 +134,9 @@ function parsePlan(value: unknown): StructuredPlan {
       if (type !== "implementation" && type !== "planning" && type !== "research" && type !== "validation") throw new Error(`${label}.type is unsupported`);
       return {
         id: id(phase.id, `${label}.id`), name: text(phase.name, `${label}.name`), type,
+        objective: text(phase.objective, `${label}.objective`),
+        deliverables: stringList(phase.deliverables, `${label}.deliverables`, true),
+        completionCriteria: stringList(phase.completionCriteria, `${label}.completionCriteria`, true),
         sequences: list(phase.sequences, `${label}.sequences`, (value, label) => {
           const sequence = record(value, label);
           return {
@@ -473,11 +481,25 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
   for (const task of tasks) {
     if (!necessary.has(task.id)) throw new Error(`Unnecessary task ${task.id}: link acceptance coverage or make it a prerequisite of covered work`);
   }
-  if (plan.phases.length === 1 && plan.phases[0]?.type === "implementation") {
-    const phase = plan.phases[0];
-    const taskCount = phase.sequences.reduce((total, sequence) => total + sequence.tasks.length, 0);
-    if (phase.sequences.length > 1 || taskCount > 3) {
-      throw new Error("A single implementation phase is only valid for a small, single-lane change with at most three tasks; split substantive development into distinct milestone phases.");
+  for (const phase of plan.phases) {
+    const phaseTasks = phase.sequences.flatMap((sequence) => sequence.tasks);
+    if (phase.objective.toLowerCase().replace(/\s+/g, " ") === plan.goal.toLowerCase().replace(/\s+/g, " ")) {
+      throw new Error(`Phase ${phase.id}.objective must describe this milestone, not repeat the festival goal`);
+    }
+    if (phase.type === "implementation") {
+      if (!phaseTasks.some((task) => task.implements.length)) {
+        throw new Error(`Implementation phase ${phase.id} must contain implementation work`);
+      }
+      if (phaseTasks.length > 3) {
+        throw new Error(`Implementation phase ${phase.id} contains more than three tasks; split it at independently reviewable milestones`);
+      }
+    } else if (phaseTasks.some((task) => task.implements.length)) {
+      throw new Error(`Phase ${phase.id} is ${phase.type} but contains implementation tasks; use an implementation phase`);
+    } else if (phase.type !== "validation" && phaseTasks.some((task) => task.verifies.length)) {
+      throw new Error(`Phase ${phase.id} is ${phase.type} but contains verification tasks; use a validation phase`);
+    }
+    if (phase.type === "validation" && !phaseTasks.some((task) => task.verifies.length)) {
+      throw new Error(`Validation phase ${phase.id} must contain verification work`);
     }
   }
   const counts = { phases: plan.phases.length, sequences: plan.phases.reduce((total, phase) => total + phase.sequences.length, 0), tasks: tasks.length };
@@ -494,7 +516,10 @@ export async function prepareStructuredPlan(root: string, workingDir: string, na
   const verificationSummary = ["## Verification"];
   for (const [phaseIndex, phase] of plan.phases.entries()) {
     hierarchy.push(`  - **Phase ${phaseIndex + 1}:** ${structuredPhaseName(phase.name)} (${phase.type})`);
-    work.push(`### ${structuredPhaseName(phase.name)} (${phase.type})`);
+    hierarchy.push(`    - Objective: ${markdownText(phase.objective)}`);
+    hierarchy.push(`    - Deliverables: ${phase.deliverables.map(markdownText).join("; ")}`);
+    hierarchy.push(`    - Completion: ${phase.completionCriteria.map(markdownText).join("; ")}`);
+    work.push(`### ${structuredPhaseName(phase.name)} (${phase.type})`, "", `Objective: ${markdownText(phase.objective)}`, "", "Deliverables:", ...phase.deliverables.map((item) => `- ${markdownText(item)}`), "", "Completion criteria:", ...phase.completionCriteria.map((item) => `- ${markdownText(item)}`));
     for (const [sequenceIndex, sequence] of phase.sequences.entries()) {
       hierarchy.push(`    - Sequence ${sequenceIndex + 1}: ${structuredHierarchyName(sequence.name)}`);
       work.push(`Sequence: ${markdownText(sequence.name)}`);

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,7 +27,7 @@ describe("fest_wireframe_create", () => {
       registerTool: (tool) => tools.set(tool.name as string, tool.execute as ToolExecute),
     } satisfies PiLike, {
       fest: {} as FestCli,
-      camp: {} as CampCli,
+      camp: { projects: () => Promise.resolve([]) } as unknown as CampCli,
       detect: new CampFsDetect(),
       tracker: new LoopTracker(),
     });
@@ -90,7 +90,54 @@ describe("fest_wireframe_create", () => {
     expect(await readFile(repeated.pagePath, "utf8")).toBe(page);
   });
 
-  it("rejects invalid screenshot geometry and output paths that escape the project", async () => {
+  it("resolves audit source paths from an explicitly selected linked project, not the camp cwd", async () => {
+    const campRoot = await mkdtemp(join(tmpdir(), "wireframe-camp-"));
+    const projectRoot = await mkdtemp(join(tmpdir(), "wireframe-linked-project-"));
+    roots.push(campRoot, projectRoot);
+    await mkdir(join(campRoot, "festivals", "planning"), { recursive: true });
+    await mkdir(join(campRoot, "projects"), { recursive: true });
+    await mkdir(join(campRoot, ".ompfest", "plans"), { recursive: true });
+    await mkdir(join(projectRoot, "src", "components"), { recursive: true });
+    await writeFile(join(projectRoot, "src", "components", "SearchBox.tsx"), "export const SearchBox = () => null;\n");
+    await symlink(projectRoot, join(campRoot, "projects", "web"));
+    await mkdir(join(campRoot, "projects", "mobile"));
+    const tools = new Map<string, ToolExecute>();
+    registerTools({
+      zod: { object: schema, string: schema, number: schema, boolean: schema, enum: schema, array: schema } as never,
+      registerTool: (tool) => tools.set(tool.name as string, tool.execute as ToolExecute),
+    } satisfies PiLike, {
+      fest: {} as FestCli,
+      camp: { projects: () => Promise.resolve([]) } as unknown as CampCli,
+      detect: new CampFsDetect(),
+      tracker: new LoopTracker(),
+    });
+    const call = tools.get("fest_wireframe_create")!;
+    const spec = {
+      title: "Search", slug: "search", direction: "ltr" as const,
+      source: { width: 100, height: 100, displayWidth: 100, displayHeight: 100 },
+      components: [{ id: "search.input", role: "search input", kind: "text-field", x: 0, y: 0, width: 80, height: 20 }],
+      componentAudit: [{ component: "SearchBox", status: "matched" as const, sourcePaths: ["src/components/SearchBox.tsx"], notes: "Inspected the linked project's search component." }],
+      measurements: [], states: [], openQuestions: [],
+    };
+    const params = {
+      attachmentRole: "ui_design",
+      outputDirectory: ".ompfest/plans/search.references/pages/search",
+      spec,
+    };
+    const ambiguous = JSON.parse((await call("test", params, undefined, undefined, { cwd: campRoot })).content[0]!.text) as { code: string; candidates: string[] };
+    expect(ambiguous.code).toBe("WORKING_DIR_REQUIRED");
+    expect(ambiguous.candidates).toEqual(expect.arrayContaining(["projects/mobile", "projects/web"]));
+    const result = JSON.parse((await call("test", { ...params, workingDir: "projects/web" }, undefined, undefined, { cwd: campRoot })).content[0]!.text) as {
+      kind: string; pagePath: string; auditWarnings: unknown[]; pathPolicy: { workingDir: string; outputDirectoryBase: string };
+    };
+    expect(result).toMatchObject({
+      kind: "wireframe_created", auditWarnings: [],
+      pathPolicy: { workingDir: "projects/web", outputDirectoryBase: "camp root" },
+    });
+    expect(result.pagePath).toBe(join(campRoot, ".ompfest", "plans", "search.references", "pages", "search", "PAGE.md"));
+  });
+
+  it("rejects invalid screenshot geometry and output paths that escape the camp root", async () => {
     const root = await mkdtemp(join(tmpdir(), "wireframe-tool-invalid-"));
     roots.push(root);
     await writeFile(join(root, "README.md"), "# Component search notes\n");
@@ -98,7 +145,7 @@ describe("fest_wireframe_create", () => {
     registerTools({
       zod: { object: schema, string: schema, number: schema, boolean: schema, enum: schema, array: schema } as never,
       registerTool: (tool) => tools.set(tool.name as string, tool.execute as ToolExecute),
-    } satisfies PiLike, { fest: {} as FestCli, camp: {} as CampCli, detect: new CampFsDetect(), tracker: new LoopTracker() });
+    } satisfies PiLike, { fest: {} as FestCli, camp: { projects: () => Promise.resolve([]) } as unknown as CampCli, detect: new CampFsDetect(), tracker: new LoopTracker() });
     const call = tools.get("fest_wireframe_create")!;
     const result = JSON.parse((await call("test", {
       attachmentRole: "ui_design",

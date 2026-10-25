@@ -63,6 +63,13 @@ describe("persisted plan drafts", () => {
     expect(await readFile(preview.plan, "utf8")).toBe(savedPreview);
   });
 
+  it("requires explicit milestone phases when a compact draft grows beyond three acceptance statements", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, { ...fields, acceptance: ["First", "Second", "Third", "Fourth"] });
+    expect(draft.missing).toContain("full structured spec with meaningful milestone phases");
+    await expect(previewPlanDraft(root, draft.draftId, draft.revision)).rejects.toThrow("Draft is incomplete");
+  });
+
   it("supports incremental goal edits on stored structured specs", async () => {
     const { root, fields } = await fixture();
     const compact = await createPlanDraft(root, fields);
@@ -71,6 +78,28 @@ describe("persisted plan drafts", () => {
     expect(updated.spec.goal).toBe("Revised approved outcome");
     expect(updated.spec.phases).toEqual(compact.spec.phases);
     expect(updated.missing).toEqual([]);
+  });
+
+  it("keeps legacy drafts readable but requires milestone data before preview", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, fields);
+    const file = join(root, ".ompfest", "plans", `${draft.draftId}.draft.json`);
+    const saved = JSON.parse(await readFile(file, "utf8")) as {
+      spec: { phases: Record<string, unknown>[] };
+      fields: { spec?: { phases: Record<string, unknown>[] } };
+    };
+    for (const phase of saved.spec.phases) {
+      delete phase.objective;
+      delete phase.deliverables;
+      delete phase.completionCriteria;
+    }
+    await writeFile(file, JSON.stringify(saved));
+    const legacy = await readPlanDraft(root, draft.draftId);
+    expect(legacy.missing).toContain("full structured spec with phase objectives, deliverables and completion criteria");
+    await expect(previewPlanDraft(root, legacy.draftId, legacy.revision)).rejects.toThrow("Draft is incomplete");
+    const upgraded = await updatePlanDraft(root, legacy.draftId, legacy.revision, { spec: draft.spec });
+    expect(upgraded.missing).toEqual([]);
+    expect(upgraded.spec.phases[0]?.objective).toBe(draft.spec.phases[0]?.objective);
   });
   it("infers package-script and explicit test-target evidence while preserving partial verification edits", async () => {
     const { root, fields } = await fixture();

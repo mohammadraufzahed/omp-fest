@@ -33,6 +33,9 @@ async function fixture() {
     questions: [],
     inspection: [{ path: "src/feature.ts", reason: "Existing implementation and public interface" }, { path: "package.json", reason: "Available verification scripts" }],
     phases: [{
+      objective: "Enable the requested behavior while preserving the public interface",
+      deliverables: ["Working feature behavior", "Regression coverage for the enabled result"],
+      completionCriteria: ["A valid request returns the enabled result", "Regression tests pass"],
       id: "phase-build", name: "Build feature", type: "implementation",
       sequences: [{
         id: "sequence-core", name: "Core behavior",
@@ -96,7 +99,8 @@ describe("structured plan preparation", () => {
     expect(second).toEqual(first);
     expect(first.counts).toEqual({ phases: 1, sequences: 1, tasks: 2 });
     expect(first.digest).toMatch(/^[a-f0-9]{64}$/);
-    expect(first.markdown).toContain("- **Festival:** feature\n  - **Phase 1:** BUILD_FEATURE (implementation)\n    - Sequence 1: Core behavior\n      - Task 1: Enable feature\n      - Task 2: Verify feature");
+    expect(first.markdown).toContain("- **Festival:** feature\n  - **Phase 1:** BUILD_FEATURE (implementation)\n    - Objective: Enable the requested behavior while preserving the public interface\n    - Deliverables: Working feature behavior; Regression coverage for the enabled result\n    - Completion: A valid request returns the enabled result; Regression tests pass\n    - Sequence 1: Core behavior\n      - Task 1: Enable feature\n      - Task 2: Verify feature");
+    expect(first.preview).toContain("Objective: Enable the requested behavior while preserving the public interface");
     expect(first.markdown).toContain("## Task Contracts");
     expect(first.preview).toContain("Dependencies: implement");
     expect(first.preview).toContain("Priority: normal");
@@ -140,7 +144,13 @@ describe("structured plan preparation", () => {
   it("requires explicit transitive dependencies for cross-sequence acceptance verification", async () => {
     const { root, workingDir, spec, verify } = await fixture();
     spec.phases[0]!.sequences[0]!.tasks.pop();
-    spec.phases.push({ id: "phase-checks", name: "Checks", type: "validation", sequences: [{ id: "sequence-checks", name: "Checks", tasks: [verify] }] });
+    spec.phases.push({
+      id: "phase-checks", name: "Checks", type: "validation",
+      objective: "Prove the implemented acceptance behavior",
+      deliverables: ["Validation result"],
+      completionCriteria: ["The verification command passes"],
+      sequences: [{ id: "sequence-checks", name: "Checks", tasks: [verify] }],
+    });
     verify.dependsOn = [];
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("Cross-sequence verification");
     verify.dependsOn = ["implement"];
@@ -191,17 +201,6 @@ describe("structured plan preparation", () => {
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).preview).toContain("Nonblocking: Should a later release add analytics?");
   });
 
-  it("requires substantive development to use distinct milestone phases", async () => {
-    const { root, workingDir, spec } = await fixture();
-    const first = spec.phases[0]!;
-    const sequence = first.sequences[0]!;
-    const verify = sequence.tasks.pop()!;
-    verify.dependsOn = ["implement"];
-    first.sequences.push({ id: "sequence-checks", name: "Regression checks", tasks: [verify] });
-    await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow(
-      "A single implementation phase is only valid for a small, single-lane change",
-    );
-  });
 
   it("allows a compact single-lane implementation phase at the three-task boundary", async () => {
     const { root, workingDir, spec } = await fixture();
@@ -220,7 +219,7 @@ describe("structured plan preparation", () => {
     });
   });
 
-  it("rejects a four-task single-phase development plan", async () => {
+  it("rejects an oversized implementation milestone even when another phase exists", async () => {
     const { root, workingDir, spec } = await fixture();
     const tasks = spec.phases[0]!.sequences[0]!.tasks;
     const [implement, verify] = tasks;
@@ -230,14 +229,26 @@ describe("structured plan preparation", () => {
     first.implements = [];
     first.verifies = [];
     first.verification = [];
+    first.dependsOn = ["implement"];
     const second = structuredClone(first);
     second.id = "extra-second";
     second.title = "Connect supporting behavior";
     second.dependsOn = ["extra-first"];
     verify!.dependsOn = ["extra-second"];
     tasks.splice(1, 0, first, second);
+    const finalCheck = structuredClone(verify!);
+    finalCheck.id = "final-check";
+    finalCheck.title = "Final regression check";
+    finalCheck.dependsOn = ["verify"];
+    spec.phases.push({
+      id: "phase-validation", name: "Final validation", type: "validation",
+      objective: "Prove the delivered behavior remains correct",
+      deliverables: ["Regression result for the delivered behavior"],
+      completionCriteria: ["The regression command succeeds"],
+      sequences: [{ id: "sequence-validation", name: "Final checks", tasks: [finalCheck] }],
+    });
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow(
-      "at most three tasks",
+      "more than three tasks",
     );
   });
 
@@ -255,6 +266,8 @@ describe("structured plan preparation", () => {
     ["empty sequences", (s: StructuredPlan) => { s.phases[0]!.sequences = []; }, /nonempty array/],
     ["empty tasks", (s: StructuredPlan) => { s.phases[0]!.sequences[0]!.tasks = []; }, /nonempty array/],
     ["invalid phase type", (s: StructuredPlan) => { Object.assign(s.phases[0]!, { type: "deployment" }); }, /unsupported/],
+    ["phase repeats festival goal", (s: StructuredPlan) => { s.phases[0]!.objective = s.goal; }, /must describe this milestone/],
+    ["phase mislabeled as validation", (s: StructuredPlan) => { s.phases[0]!.type = "validation"; }, /contains implementation tasks/],
     ["blocking question", (s: StructuredPlan) => { s.questions.push({ question: "Which API?", blocking: true }); }, /Unresolved blocking/],
     ["invalid question flag", (s: StructuredPlan) => { s.questions.push({ question: "Which API?", blocking: "false" as unknown as boolean }); }, /boolean/],
     ["missing implementation", (s: StructuredPlan) => { s.phases[0]!.sequences[0]!.tasks[0]!.implements = []; }, /no implementation/],
@@ -292,7 +305,13 @@ describe("structured plan preparation", () => {
   it("checks task dependencies across sequences and phases in serialization order", async () => {
     const { root, workingDir, spec, verify } = await fixture();
     spec.phases[0]!.sequences[0]!.tasks.pop();
-    spec.phases.push({ id: "phase-validation", name: "Validate", type: "validation", sequences: [{ id: "sequence-checks", name: "Regression checks", tasks: [verify] }] });
+    spec.phases.push({
+      id: "phase-validation", name: "Validate", type: "validation",
+      objective: "Prove the delivered behavior",
+      deliverables: ["Regression validation result"],
+      completionCriteria: ["The regression command succeeds"],
+      sequences: [{ id: "sequence-checks", name: "Regression checks", tasks: [verify] }],
+    });
     expect((await prepareStructuredPlan(root, workingDir, "feature", spec)).counts).toEqual({ phases: 2, sequences: 2, tasks: 2 });
     spec.phases.reverse();
     await expect(prepareStructuredPlan(root, workingDir, "feature", spec)).rejects.toThrow("earlier in serialized execution order");
@@ -303,7 +322,13 @@ describe("structured plan preparation", () => {
     const first = spec.phases[0]!;
     if (kind === "phase") {
       first.sequences[0]!.tasks.pop();
-      spec.phases.push({ id: "phase-check", name: "Build-feature", type: "validation", sequences: [{ id: "sequence-check", name: "Checks", tasks: [verify] }] });
+      spec.phases.push({
+        id: "phase-check", name: "Build-feature", type: "validation",
+        objective: "Prove the delivered behavior",
+        deliverables: ["Regression validation result"],
+        completionCriteria: ["The regression command succeeds"],
+        sequences: [{ id: "sequence-check", name: "Checks", tasks: [verify] }],
+      });
     } else if (kind === "sequence") {
       first.sequences[0]!.tasks.pop();
       first.sequences.push({ id: "sequence-check", name: "Core-behavior", tasks: [verify] });
@@ -473,6 +498,7 @@ describe("structuredPlanSchema", () => {
     expect(Object.keys(schema.fields!)).toEqual(["goal", "scope", "exclusions", "acceptance", "questions", "inspection", "phases"]);
     const phase = (schema.fields!.phases as Shape).item as Shape;
     expect((phase.fields!.type as Shape).values).toEqual(["implementation", "planning", "research", "validation"]);
+    expect(Object.keys(phase.fields!)).toEqual(["id", "name", "type", "objective", "deliverables", "completionCriteria", "sequences"]);
     const sequence = (phase.fields!.sequences as Shape).item as Shape;
     const task = (sequence.fields!.tasks as Shape).item as Shape;
     expect(Object.keys(task.fields!)).toEqual(["id", "title", "description", "priority", "dependsOn", "implements", "verifies", "files", "verification"]);

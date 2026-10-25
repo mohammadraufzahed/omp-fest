@@ -23,7 +23,12 @@ async function fixture() {
       goal: "Enable the approved feature", scope: ["Existing feature and regression coverage"], exclusions: ["API redesign"],
       acceptance: [{ id: "AC-01", description: "Feature returns the enabled result" }], questions: [],
       inspection: [{ path: "package.json", reason: "Existing verification script" }],
-      phases: [{ id: "build", name: "Build", type: "implementation", sequences: [{ id: "core", name: "core_feature", tasks: [{
+      phases: [{
+        id: "build", name: "Build", type: "implementation",
+        objective: "Enable the approved behavior without changing the public API",
+        deliverables: ["Feature behavior available to callers"],
+        completionCriteria: ["Feature returns the enabled result", "Regression test exits zero"],
+        sequences: [{ id: "core", name: "core_feature", tasks: [{
         id: "implement", title: "Implement_feature", description: "Enable the result without changing the API", dependsOn: [],
         implements: ["AC-01"], verifies: ["AC-01"], files: [{ path: "feature.ts", status: "existing" }],
         verification: [{ command: "npm run test", cwd: ".", evidencePath: "package.json", expected: "Regression test exits zero" }],
@@ -53,7 +58,9 @@ describe("approved scaffold finalization", () => {
     }
     expect(await readFile(join(festival, "FESTIVAL_GOAL.md"), "utf8")).toContain("API redesign");
     expect(await readFile(join(festival, "FESTIVAL_OVERVIEW.md"), "utf8")).toContain("No new dependencies.");
+    expect(await readFile(join(phase, "PHASE_GOAL.md"), "utf8")).toContain("Enable the approved behavior without changing the public API");
     expect(await readFile(join(phase, "PHASE_GOAL.md"), "utf8")).toContain("Feature returns the enabled result");
+    expect(await readFile(join(phase, "PHASE_GOAL.md"), "utf8")).toContain("- [ ] Regression test exits zero");
     expect(await readFile(join(sequence, "SEQUENCE_GOAL.md"), "utf8")).toContain('fest_working_dir: "projects/app"');
     const task = await readFile(join(sequence, "01_implement_feature.md"), "utf8");
     expect(task).toContain("Task ID: implement");

@@ -51,7 +51,7 @@ export function buildOrientationNote(input: OrientationInput): string {
   if (input.pendingGate) {
     lines.push(`Pending gate: ${input.pendingGate} — requires human approval`);
   }
-  lines.push("Use the fest_* tools for the festival loop (fest_raw for uncovered commands) — never the shell.");
+  lines.push("Use the fest_* tools for the festival loop (fest_raw for uncovered commands); create plans and scaffold only through fest_plan, never raw scaffold or the shell.");
   return lines.join("\n");
 }
 
@@ -84,20 +84,23 @@ export const PLAN_GUIDE = [
   "   Ask only when repository evidence and the request cannot settle a material scope, behavior, risk",
   "   or tradeoff. Ask ONE concise grounded question per reply, then wait. Do not re-ask supplied facts,",
   "   demand expected phases, or manufacture questions to complete a questionnaire.",
-  "2. Preserve Festival milestones: a single implementation phase is only for a small, single-lane",
-  "   change with at most three tasks. Substantive development MUST have multiple meaningful",
-  "   implementation phases; split by independently reviewable milestones, not by arbitrary task counts.",
-  "   Never collapse several milestones or work lanes into one catch-all phase or rename sequences as phases.",
-  "   Add sequences only for distinct lanes within a milestone; parallelize only genuinely independent work.",
+  "2. Preserve Festival milestones. Each phase needs a distinct objective, concrete deliverables and",
+  "   observable completionCriteria; the objective must not repeat the festival goal. Every",
+  "   implementation phase is bounded to at most three tasks, regardless of other phases in the plan.",
+  "   Split larger development into independently reviewable implementation milestones. Do not hide",
+  "   implementation tasks in planning/research/validation phases. Sequences are genuine work lanes",
+  "   inside a milestone, not substitutes for phases. The human reviews milestone boundaries in the",
+  "   persisted preview; do not invent phases just to satisfy the task limit.",
   "   Complex changes need explicit dependencies, boundaries and risks. Preserve human constraints.",
   "   Define observable acceptance criteria: what behavior/output proves done, under which conditions.",
   "   Every acceptance ID needs implementation and verification coverage; avoid vague 'works' checks.",
   "3. Build a StructuredPlan, not handwritten parser-specific Markdown:",
   "   {goal, scope:[], exclusions:[], acceptance:[{id,description}],",
   "    questions:[{question,blocking}], inspection:[{path,reason}],",
-  "    phases:[{id,name,type,sequences:[{id,name,tasks:[{id,title,description,priority?:'urgent'|'high'|'normal'|'low',",
-  "      dependsOn:[], implements:[], verifies:[], files:[{path,status:'existing'|'proposed'}],",
-  "      verification:[{command,cwd,evidencePath?,expected}]}]}]}]}.",
+  "    phases:[{id,name,type,objective,deliverables:[],completionCriteria:[],",
+  "      sequences:[{id,name,tasks:[{id,title,description,priority?:'urgent'|'high'|'normal'|'low',",
+  "        dependsOn:[], implements:[], verifies:[], files:[{path,status:'existing'|'proposed'}],",
+  "        verification:[{command,cwd,evidencePath?,expected}]}]}]}]}.",
   "   Preserve any priority the human/request provides. Use urgent/high/normal/low only when the request",
   "   provides evidence for urgency; otherwise set priority to normal. Never invent urgency. Priority",
   "   is advisory dispatch order only; it does not change task dependencies, acceptance, task order or verification.",

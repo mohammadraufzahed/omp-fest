@@ -109,12 +109,17 @@ function build(root: string, draftId: string, fields: PlanDraftFields, previous?
   const spec = fields.spec ?? {
     goal: fields.goal ?? "", scope: fields.scope ?? [], exclusions: fields.exclusions ?? [], acceptance,
     questions: [], inspection: fields.inspection ?? [],
-    phases: [{ id: "build", name: "BUILD", type: "implementation", sequences: [{ id: "implementation", name: "IMPLEMENT", tasks: [{
-      id: "implement", title: fields.goal ?? "", description: fields.goal ?? "", dependsOn: [],
-      implements: acceptance.map((item) => item.id), verifies: acceptance.map((item) => item.id),
-      files: (fields.files ?? []).map((path) => ({ path, status: "existing" })),
-      verification: draftVerification,
-    }] }] }],
+    phases: [{ id: "build", name: "BUILD", type: "implementation",
+      objective: "Deliver the approved small, single-lane change",
+      deliverables: [fields.goal ?? "The approved change"],
+      completionCriteria: acceptance.map((item) => item.description),
+      sequences: [{ id: "implementation", name: "IMPLEMENT", tasks: [{
+        id: "implement", title: fields.goal ?? "", description: fields.goal ?? "", dependsOn: [],
+        implements: acceptance.map((item) => item.id), verifies: acceptance.map((item) => item.id),
+        files: (fields.files ?? []).map((path) => ({ path, status: "existing" })),
+        verification: draftVerification,
+      }] }],
+    }],
   } satisfies StructuredPlan;
   const verificationMissing = fields.spec
     ? spec.phases.flatMap((phase) => phase.sequences.flatMap((sequence) => sequence.tasks.flatMap((task) => task.verifies.length && !task.verification.length
@@ -132,6 +137,7 @@ function build(root: string, draftId: string, fields: PlanDraftFields, previous?
   const missing = [
     ...(!spec.goal.trim() ? ["goal"] : []), ...(!spec.scope.length ? ["scope"] : []),
     ...(!spec.acceptance.length ? ["acceptance"] : []), ...(!spec.inspection.length ? ["inspection"] : []),
+    ...(!fields.spec && acceptance.length > 3 ? ["full structured spec with meaningful milestone phases"] : []),
     ...(!fields.workingDir ? ["workingDir"] : []), ...verificationMissing,
     ...(fields.attachments ?? []).filter((item) => item.role === "unknown").map((item) => `attachment role: ${item.name}`),
   ];
@@ -177,9 +183,17 @@ export async function readPlanDraft(root: string, draftId: string): Promise<Plan
     if (value.draftId !== draftId || typeof value.revision !== "string" || !/^[a-f0-9]{64}$/.test(value.revision)
       || !value.fields || typeof value.fields !== "object" || !value.spec || typeof value.spec !== "object"
       || !Array.isArray(value.missing) || typeof value.plan !== "string") throw new Error();
-    validate(value.fields, target.root);
     if (!Array.isArray(value.spec.phases) || !Array.isArray(value.spec.acceptance) || typeof value.spec.goal !== "string") throw new Error();
-    return value as PlanDraft;
+    const saved = value as PlanDraft;
+    const hasMilestoneContracts = saved.spec.phases.every((phase) =>
+      typeof phase.objective === "string" && !!phase.objective.trim()
+      && Array.isArray(phase.deliverables) && phase.deliverables.length > 0
+      && phase.deliverables.every((item) => typeof item === "string" && !!item.trim())
+      && Array.isArray(phase.completionCriteria) && phase.completionCriteria.length > 0
+      && phase.completionCriteria.every((item) => typeof item === "string" && !!item.trim()));
+    return hasMilestoneContracts
+      ? saved
+      : { ...saved, missing: [...new Set([...saved.missing, "full structured spec with phase objectives, deliverables and completion criteria"])] };
   } catch (error) {
     throw new Error("Invalid persisted plan draft", { cause: error });
   }

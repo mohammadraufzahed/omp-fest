@@ -113,11 +113,14 @@ export async function finalizeApprovedScaffold(root: string, festival: string, a
     if (sequences.length !== phase.sequences.length) throw new Error(`Scaffold sequences differ for ${phase.id}`);
     const phaseTasks = phase.sequences.flatMap((sequence) => sequence.tasks);
     await queue(join(phaseDir, "PHASE_GOAL.md"), "phase", phase.name, [
-      `# Phase Goal: ${display(phase.name)}`, "", "## Objective", display(artifact.spec.goal),
+      `# Phase Goal: ${display(phase.name)}`, "", "## Objective", display(phase.objective),
       "", `Approved phase: ${display(phase.id)} (${phase.type}).`, "", "## Scope",
       ...phase.sequences.map((sequence) => `- ${display(sequence.id)}: ${display(sequence.name)}`),
-      "", "## Success Criteria", ...acceptance(artifact.spec, new Set(phaseTasks.flatMap((task) => [...task.implements, ...task.verifies]))),
-      "", "## Deliverables", ...phaseTasks.map((task) => `- ${display(task.id)}: ${display(task.description)}`),
+      "", "## Success Criteria",
+      ...phase.completionCriteria.map((criterion) => `- [ ] ${display(criterion)}`),
+      ...acceptance(artifact.spec, new Set(phaseTasks.flatMap((task) => [...task.implements, ...task.verifies]))),
+      "", "## Deliverables", ...phase.deliverables.map((item) => `- ${display(item)}`),
+      ...phaseTasks.map((task) => `- ${display(task.id)}: ${display(task.description)}`),
     ].join("\n"), structuredPhaseName(phase.name).toLowerCase());
     for (const [s, sequence] of phase.sequences.entries()) {
       const sequenceEntry = sequences[s];

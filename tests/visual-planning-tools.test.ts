@@ -40,7 +40,12 @@ async function setup() {
     goal: "Search results in RTL", scope: ["Results search"], exclusions: ["Pagination"],
     acceptance: [{ id: "results/AC-01", description: "Search works in RTL" }],
     questions: [], inspection: [{ path: "package.json", reason: "Existing test command" }],
-    phases: [{ id: "build", name: "BUILD", type: "implementation", sequences: [{
+    phases: [{
+      id: "build", name: "BUILD", type: "implementation",
+      objective: "Make RTL search results easy to use",
+      deliverables: ["Search results rendered correctly in RTL"],
+      completionCriteria: ["Matching results appear in expected RTL order"],
+      sequences: [{
       id: "ui", name: "ui", tasks: [{
         id: "results", title: "results", description: "Implement and verify RTL search",
         dependsOn: [], implements: ["results/AC-01"], verifies: ["results/AC-01"],
@@ -72,6 +77,7 @@ async function setup() {
   const taskComplete = vi.fn(() => Promise.resolve({ ok: true, output: "done" }));
   const workflowAdvance = vi.fn(() => Promise.resolve("pending"));
   const workflowApprove = vi.fn(() => Promise.resolve("approved"));
+  const rawCli = vi.fn(() => Promise.resolve({ code: 0, stdout: "", stderr: "" }));
   const fest: FestCli = {
     scaffoldFromPlan,
     gatesApply: () => Promise.resolve({ created: 0, output: "ok" }),
@@ -81,6 +87,7 @@ async function setup() {
     taskComplete,
     workflowAdvance,
     workflowApprove,
+    raw: rawCli,
   } as unknown as FestCli;
   const tracker = new LoopTracker();
   tracker.claimFestival("session-1", festival);
@@ -117,7 +124,7 @@ async function setup() {
     await handler?.(args, { cwd: root, sessionManager: { getSessionId: () => "session-1" }, ui: { notify: vi.fn() } });
     return sent.at(-1) ?? "";
   }
-  return { root, referencesDir, festival, plan, spec, taskPath, scaffoldFromPlan, promote, taskComplete, workflowAdvance, workflowApprove, call, command, scaffold, fest, tracker };
+  return { root, referencesDir, festival, plan, spec, taskPath, scaffoldFromPlan, promote, taskComplete, workflowAdvance, workflowApprove, call, command, scaffold, fest, tracker, rawCli };
 }
 
 describe("visual planning tool handoff", () => {
@@ -127,6 +134,14 @@ describe("visual planning tool handoff", () => {
     await writeFile(join(festival, "fest.yaml"), "id: feature\nname: Feature\n");
     expect(await call("fest_next", { festival: "feature" })).toMatchObject({ kind: "festival_unselected" });
     expect(await festivalOwner(festival)).toBeUndefined();
+  });
+  it("blocks raw scaffold routes so phase validation cannot be bypassed", async () => {
+    const { call, command, rawCli } = await setup();
+    expect(await call("fest_raw", { args: ["scaffold", "from-plan", "feature"] })).toMatchObject({
+      kind: "typed_tool_required", code: "PLAN_SCAFFOLD_REQUIRES_APPROVED_PLAN",
+    });
+    expect(await command("cmd scaffold from-plan feature")).toContain("Raw scaffold is blocked");
+    expect(rawCli).not.toHaveBeenCalled();
   });
   it("refuses completion while the current task is paused by a project reservation", async () => {
     const { plan, taskPath, taskComplete, tracker, call, scaffold } = await setup();
@@ -185,6 +200,58 @@ describe("visual planning tool handoff", () => {
     const stale = await call("fest_plan", { action: "preview", draftId: draft.draftId, draftRevision: draft.revision });
     expect(stale.kind).toBe("plan_failed");
     expect(stale.error).toContain("Draft changed");
+  });
+  it("persists and previews all six supplied milestone phases instead of synthesizing a one-task draft", async () => {
+    const { call, plan, spec } = await setup();
+    const sourceTask = spec.phases[0]!.sequences[0]!.tasks[0]!;
+    const phases = [
+      ...[1, 2, 3].map((index) => ({
+        id: `build-${index}`, name: `Build milestone ${index}`, type: "implementation" as const,
+        objective: `Deliver implementation milestone ${index}`,
+        deliverables: [`Implementation deliverable ${index}`],
+        completionCriteria: [`Milestone ${index} behavior is implemented`],
+        sequences: [{
+          id: `build-lane-${index}`, name: `Build lane ${index}`,
+          tasks: [{
+            ...structuredClone(sourceTask), id: `implement-${index}`, title: `Implement milestone ${index}`,
+            description: `Implement acceptance in milestone ${index}`,
+            dependsOn: index === 1 ? [] : [`implement-${index - 1}`],
+            implements: [`results/AC-0${index}`], verifies: [], verification: [],
+          }],
+        }],
+      })),
+      ...[1, 2, 3].map((index) => ({
+        id: `verify-${index}`, name: `Verify milestone ${index}`, type: "validation" as const,
+        objective: `Verify implementation milestone ${index}`,
+        deliverables: [`Verification result ${index}`],
+        completionCriteria: [`Milestone ${index} regression check passes`],
+        sequences: [{
+          id: `verify-lane-${index}`, name: `Verification lane ${index}`,
+          tasks: [{
+            ...structuredClone(sourceTask), id: `check-${index}`, title: `Check milestone ${index}`,
+            description: `Run the milestone ${index} regression check`,
+            dependsOn: [`implement-${index}`], implements: [], verifies: [`results/AC-0${index}`],
+            files: [], verification: structuredClone(sourceTask.verification),
+          }],
+        }],
+      })),
+    ];
+    const fullSpec = { ...structuredClone(spec), acceptance: [
+      { id: "results/AC-01", description: "Milestone one behavior is available" },
+      { id: "results/AC-02", description: "Milestone two behavior is available" },
+      { id: "results/AC-03", description: "Milestone three behavior is available" },
+    ], phases };
+    const draft = await call("fest_plan", {
+      action: "create", name: "feature", workingDir: ".", spec: fullSpec,
+    });
+    expect(draft.kind).toBe("plan_draft");
+    const saved = await call("fest_plan", { action: "read", draftId: draft.draftId });
+    expect((saved.spec as StructuredPlan).phases).toHaveLength(6);
+    const preview = await call("fest_plan", { action: "preview", draftId: draft.draftId, draftRevision: draft.revision });
+    expect(preview).toMatchObject({ kind: "plan_preview", counts: { phases: 6, sequences: 6, tasks: 6 } });
+    const markdown = await readFile(plan, "utf8");
+    expect(markdown).toContain("Deliver implementation milestone 3");
+    expect(markdown).toContain("Verify implementation milestone 3");
   });
 
   it("opens a native proposal review before allowing scaffolding", async () => {

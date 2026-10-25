@@ -596,17 +596,26 @@ ${questions}
 `;
 }
 
-export async function createWireframe(outputDirectory: string, workingDirectory: string, spec: WireframeSpec): Promise<{ svgPath: string; pagePath: string; componentCount: number; openQuestions: string[]; auditWarnings: WireframeAuditWarning[] }> {
-  const auditWarnings = await validate(spec, workingDirectory);
-  if (isAbsolute(outputDirectory)) throw new Error("outputDirectory must be relative to the project working directory");
-  const output = resolve(workingDirectory, outputDirectory);
-  const rel = relative(resolve(workingDirectory), output);
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("outputDirectory must stay inside the project working directory and cannot be the project root");
+export async function createWireframe(
+  outputDirectory: string,
+  workingDirectory: string,
+  spec: WireframeSpec,
+  outputRoot = workingDirectory,
+): Promise<{ svgPath: string; pagePath: string; componentCount: number; openQuestions: string[]; auditWarnings: WireframeAuditWarning[] }> {
+  const projectRoot = await realpath(workingDirectory);
+  const campRoot = await realpath(outputRoot);
+  const auditWarnings = await validate(spec, projectRoot);
+  if (isAbsolute(outputDirectory)) throw new Error("outputDirectory must be relative to the camp root");
+  const output = resolve(campRoot, outputDirectory);
+  const rel = relative(campRoot, output);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error("outputDirectory must stay inside the camp root and cannot be the root");
+  }
   await mkdir(output, { recursive: true });
   const actualOutput = await realpath(output);
-  const actualRelative = relative(resolve(workingDirectory), actualOutput);
+  const actualRelative = relative(campRoot, actualOutput);
   if (actualRelative === ".." || actualRelative.startsWith(`..${sep}`) || isAbsolute(actualRelative)) {
-    throw new Error("outputDirectory resolves outside the project working directory");
+    throw new Error("outputDirectory resolves outside the camp root");
   }
   const svgPath = resolve(output, "wireframe.svg");
   const pagePath = resolve(output, "PAGE.md");

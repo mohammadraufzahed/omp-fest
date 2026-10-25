@@ -13,8 +13,13 @@ describe("plan input normalization", () => {
       acceptance: [{ id: "bad id", description: "Sidebar remains usable" }],
       questions: [],
       inspection: [{ path: `${project}/src/Layout.tsx`, reason: "Existing shell" }],
-      phases: [{ id: "01_IMPLEMENT", name: "Implement", type: "implementation", sequences: [{
-        id: "01_ui", name: "UI", tasks: [{
+      phases: [{
+        id: "01_IMPLEMENT", name: "Implement", type: "implementation",
+        objective: "Keep sidebar content within the viewport on supported layouts",
+        deliverables: ["Overflow-free sidebar layout"],
+        completionCriteria: ["Sidebar remains usable without horizontal page overflow"],
+        sequences: [{
+          id: "01_ui", name: "UI", tasks: [{
           id: "01 fix sidebar", title: "Fix sidebar", description: "Fix overflow", dependsOn: [],
           implements: ["bad id"], verifies: ["bad id"],
           files: [{ path: `${project}/src/Layout.tsx`, status: "existing" }],
@@ -25,6 +30,7 @@ describe("plan input normalization", () => {
     const result = normalizePlanInput(input, project);
     expect(result.spec.acceptance[0]?.id).toBe("ac-1");
     expect(result.spec.phases[0]?.id).toBe("step-01-implement");
+    expect(result.spec.phases[0]?.objective).toBe("Keep sidebar content within the viewport on supported layouts");
     expect(result.spec.phases[0]?.sequences[0]?.tasks[0]?.id).toBe("step-01-fix-sidebar");
     expect(result.spec.inspection[0]?.path).toBe("src/Layout.tsx");
     expect(result.spec.phases[0]?.sequences[0]?.tasks[0]?.verification[0]?.cwd).toBe(".");
@@ -52,7 +58,7 @@ describe("plan input normalization", () => {
     ));
     expect(diagnostic).toMatchObject({
       code: "PHASES_TOO_COARSE",
-      nextAction: "Split the work into multiple meaningful implementation milestones; keep each phase focused and reviewable.",
+      nextAction: "Split development into reviewable implementation milestones; give each phase its own objective, deliverables and observable completion criteria.",
     });
   });
 });

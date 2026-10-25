@@ -650,8 +650,12 @@ export function registerCommands(pi: PiCommandsLike, deps: CommandDeps): void {
       },
     },
     cmd: {
-      desc: "raw fest passthrough: /fest cmd <args> — e.g. /fest cmd list --json",
+      desc: "raw fest passthrough: /fest cmd <args> — e.g. /fest cmd list --json; scaffold is blocked in favor of approved fest_plan",
       run: async (args, ctx) => {
+        if (args[0] === "scaffold") {
+          send(pi, "fest-status", "Raw scaffold is blocked. Use fest_plan {action:'scaffold'} with the approved planRevision so structured phase validation and human approval are preserved.");
+          return;
+        }
         const location = await deps.detect.locate(ctx.cwd);
         const cwd = location.festivalDir ?? (location.campRoot && deps.tracker
           ? await claimedFestivalDir(deps.tracker, deps.detect, sessionIdOf(ctx), location.campRoot)

@@ -840,7 +840,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_plan",
     label: "Fest Plan (Scaffold From Plan)",
     description:
-      "Single stateful planning API. Path contract for every stage: relative plan/referencesDir paths and workingDir are camp-root-relative; workingDir must identify an existing project directory inside the camp or an external checkout reachable through projects/<link>. Inspection, task files, verification cwd and evidencePath are relative to the selected project. Stage 1 create/update: ask which project when ambiguous and save the resolved workingDir. Stage 2 preview: use that project root, validate paths there, show the resolved target and wait for human approval. Stage 3 scaffold: use only the approved revision and its canonical camp-relative project target; never reconstruct paths from the process cwd. Final output reports absolute festivalDir and camp-relative workingDir. Plan hierarchy: a single implementation phase is only valid for one sequence with at most three tasks; substantive development needs multiple meaningful milestone phases. Never collapse distinct milestones into one catch-all phase. Use action create/update/read/list for persisted drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
+      "Single stateful planning API. Path contract for every stage: relative plan/referencesDir paths and workingDir are camp-root-relative; workingDir must identify an existing project directory inside the camp or an external checkout reachable through projects/<link>. Inspection, task files, verification cwd and evidencePath are relative to the selected project. Stage 1 create/update: inspect the target project, ask which project when ambiguous, and save the resolved workingDir. For substantive work provide the complete structured spec on create/update; each phase needs its own objective, deliverables and completionCriteria, with at most three tasks per implementation milestone. Stage 2 preview: use that project root, validate paths there, show the resolved target and milestone boundaries, then wait for human approval. Stage 3 scaffold: use only the approved revision and its canonical camp-relative project target; never reconstruct paths from the process cwd. Final output reports absolute festivalDir and camp-relative workingDir. Do not label implementation tasks as research, planning or validation. Split work by independently reviewable outcomes, not arbitrary task counts. Use action create/update/read/list for persisted drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
     parameters: z.object({
       action: z.enum(["create", "read", "update", "delete", "list", "preview", "scaffold", "cancel"]).optional(),
       name: z.string().optional(), plan: z.string().optional(), draftId: z.string().optional(), draftRevision: z.string().optional(),
@@ -892,6 +892,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             ...(params.workingDir ? { workingDir: params.workingDir } : {}), ...(params.files ? { files: params.files } : {}),
             ...(params.verification ? { verification: params.verification } : {}), ...(params.rules !== undefined ? { rules: params.rules } : {}),
             ...(params.referencesDir ? { referencesDir: params.referencesDir } : {}), ...(params.visualIntent ? { visualIntent: params.visualIntent } : {}),
+            ...(params.spec ? { spec: params.spec } : {}),
             ...(attachments ? { attachments } : {}),
           } satisfies Partial<PlanDraftFields>;
           const project = patch.workingDir || draftAction === "create" ? await resolveWorkingDir(root, deps.camp, patch.workingDir) : undefined;
@@ -1200,10 +1201,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     description:
       "Create a categorized wireframe.svg and PAGE.md only for an explicitly classified UI design reference. " +
       "Never use error screenshots, PDFs/documents, backend evidence, context, or unknown-role images as wireframe input. " +
+      "outputDirectory is camp-root-relative under .ompfest/plans; sourcePaths are relative to the selected project workingDir. " +
+      "Supply workingDir (for example projects/web) when the camp has multiple projects or the current camp context is ambiguous. " +
       "If the attachment role is ambiguous, ask the user before calling this tool.",
     parameters: z.object({
       attachmentRole: z.enum(["ui_design", "error_screenshot", "document_pdf", "context", "unknown"]).describe("Role explicitly classified from the user's request; only ui_design may generate a wireframe"),
-      outputDirectory: z.string().describe("Path inside the current project working directory; do not use ../ traversal, e.g. .ompfest/plans/page.references/pages/results"),
+      outputDirectory: z.string().describe("Camp-root-relative output path under .ompfest/plans/<name>.references/pages/<slug>; no absolute path or traversal"),
+      workingDir: z.string().optional().describe("Camp-root-relative project path, e.g. projects/web; required when camp project resolution is ambiguous"),
       spec: z.object({
         title: z.string().describe("Short page or screen title"),
         slug: z.string().describe("Lowercase kebab-case page slug"),
@@ -1258,13 +1262,20 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         openQuestions: z.array(z.string()).describe("Focused unresolved questions that could change structure or styling; empty when none"),
       }),
     }),
-    async execute(_id: string, params: { outputDirectory: string; attachmentRole: "ui_design" | "error_screenshot" | "document_pdf" | "context" | "unknown"; spec: WireframeSpec }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+    async execute(_id: string, params: { outputDirectory: string; workingDir?: string; attachmentRole: "ui_design" | "error_screenshot" | "document_pdf" | "context" | "unknown"; spec: WireframeSpec }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
       if (params.attachmentRole !== "ui_design") return textResult({ kind: "wireframe_blocked", code: "NOT_UI_DESIGN", field: "attachmentRole", expected: "ui_design", received: params.attachmentRole, nextAction: "Keep this attachment as evidence; ask the user if the attachment role is ambiguous. Do not produce a wireframe." });
       const blocked = supervisorOnly(ctx, "wireframe creation");
       if (blocked) return blocked;
       try {
-        const result = await createWireframe(params.outputDirectory, ctx.cwd, params.spec);
-        return textResult({ kind: "wireframe_created", ...result });
+        const location = await deps.detect.locate(ctx.cwd);
+        const campRoot = location.campRoot ?? ctx.cwd;
+        const workingDir = params.workingDir ?? (location.kind === "project" ? ctx.cwd : undefined);
+        const target = await resolveWorkingDir(campRoot, deps.camp, workingDir);
+        if (!target.dir) {
+          return textResult({ kind: "wireframe_failed", code: "WORKING_DIR_REQUIRED", candidates: target.candidates, nextAction: "Choose the inspected project and retry with its camp-root-relative workingDir; audit sourcePaths resolve from that project, while outputDirectory resolves from the camp root." });
+        }
+        const result = await createWireframe(params.outputDirectory, resolve(campRoot, target.dir), params.spec, campRoot);
+        return textResult({ kind: "wireframe_created", ...result, pathPolicy: { outputDirectoryBase: "camp root", sourcePathsBase: target.dir, workingDir: target.dir } });
       } catch (error) {
         return textResult({
           kind: "wireframe_failed",
@@ -1777,15 +1788,18 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_raw",
     label: "Fest Raw",
     description:
-      "Run ANY `fest` subcommand not covered by the typed tools (list, rules, context, show, markers, " +
-      "workflow, chain, feedback, promote, types, watch, deps, parse, tokens, links, ...) at the resolved " +
-      "festival or camp directory. task mutations get --yes auto-injected. Returns {code, stdout, stderr} " +
-      "and never throws — check code before trusting output.",
+      "Run supported `fest` subcommands not covered by typed tools (list, rules, context, show, markers, " +
+      "workflow, chain, feedback, promote, types, watch, deps, parse, tokens, links, ...). `scaffold` is blocked; " +
+      "use fest_plan with the approved planRevision. task mutations get --yes auto-injected. Returns " +
+      "{code, stdout, stderr} and never throws — check code before trusting output.",
     parameters: z.object({
       args: z.array(z.string()).describe("fest args, e.g. ['list','--json'] or ['workflow','status']"),
       festival: z.string().optional().describe("Festival dir/name override when at camp root"),
     }),
     async execute(_id: string, params: { args: string[]; festival?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      if (params.args[0] === "scaffold") {
+        return textResult({ kind: "typed_tool_required", code: "PLAN_SCAFFOLD_REQUIRES_APPROVED_PLAN", nextAction: "Use fest_plan {action:'scaffold'} with the approved planRevision; raw scaffold is blocked so phase validation and approval cannot be bypassed." });
+      }
       const blocked = params.args[0] && !READONLY_RAW_COMMANDS[params.args[0]]
         ? supervisorOnly(ctx, `raw fest ${params.args[0]}`)
         : undefined;

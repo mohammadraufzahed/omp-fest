@@ -54,7 +54,7 @@ omp install ./omp-fest   # symlinks it — edits go live instantly
  - 🖼️ **visual planning only for UI changes** — wireframes are generated only for explicit page, screen, layout, component, styling, or visual-interaction work. PDF/document/backend/API/error screenshots remain diagnostic evidence and are never converted into wireframes or iframes.
 - 🎯 **session festival selection** — new omp sessions start unselected. `/fest select [festival]` claims coordinator ownership; `/fest join <festival>` joins an existing team without transfer. Only explicit selection/join binds the session.
 - **native `/fest` flow** — planning, selection, approval, blockers, conflict handling, workers, evidence, login flows and release use omp tools/UI. `fest_plan` owns editable draft revisions and structured preview/scaffold; `fest_capabilities` reports actual host support.
- - 🌐 **the WHOLE CLI, not just the hits** — `fest_raw` / `camp_raw` run any subcommand (list, rules, chain, feedback, links, watch, jobs, idea claim/sync, ...) at the right dir, auto-inject `--yes` on task mutations, and return `{code, stdout, stderr}` typed. `/fest cmd` + `/fest camp` remain escape hatches.
+ - 🌐 **CLI passthrough with planning guardrails** — `fest_raw` / `camp_raw` expose supported subcommands; `/fest cmd` is the raw fest escape hatch. Raw `fest scaffold` is blocked: use `fest_plan` so full structured-plan validation and approval cannot be bypassed.
 
 ### Session identity and authority
 
@@ -291,11 +291,14 @@ The agent records inspected paths and asks only about material choices that the
 request and repository cannot answer. It does not ask you to restate known facts,
 invent a questionnaire, or require you to design the phase hierarchy.
 
-The plan is proportional: a single implementation phase is only for a small,
-single-lane change with at most three tasks. Substantive development must use
-multiple meaningful implementation phases, each representing an independently
-reviewable milestone; do not put several lanes or milestones into one catch-all
-phase. Extra phases must reflect real milestones, not arbitrary task splits.
+The plan is milestone-based: every phase has its own objective, deliverables and
+observable completion criteria; a phase objective cannot simply repeat the
+festival goal. Each implementation phase is limited to three tasks. Larger
+development effort must be split into independently reviewable implementation
+milestones, even when validation or other phases are present. Sequences represent
+genuinely distinct work lanes inside one milestone; do not disguise implementation
+work as research or validation. Human review of the persisted preview remains the
+semantic check that milestone boundaries are meaningful.
 Parallel lanes are optional and must be genuinely independent. Screenshots add the
 visual extraction flow below; text-only plans do not need image artifacts.
 
@@ -308,7 +311,7 @@ The `StructuredPlan` contract is:
 | `acceptance[]` | `{id, description}` with observable behavior/output, not vague quality claims. |
 | `questions[]` | `{question, blocking}`; resolve blocking questions before preview. |
 | `inspection[]` | `{path, reason}` recording existing project-relative paths actually inspected. |
-| `phases[]` | `{id, name, type, sequences}` for real milestones. |
+| `phases[]` | `{id, name, type, objective, deliverables[], completionCriteria[], sequences}` for explicit, reviewable milestones. Implementation phases contain implementation tasks only and at most three tasks; validation phases contain verification work. |
 | `sequences[]` | `{id, name, tasks}` for coherent work lanes within a phase. |
 | `tasks[]` | `{id, title, description, dependsOn, implements, verifies, files, verification, priority?}`. |
 | Task `dependsOn[]` | IDs of earlier tasks in phase/sequence/task order; no missing, forward or cyclic dependencies. |
@@ -418,6 +421,13 @@ readable SVG text for headings, labels, statuses and measurements.
 Reuse audits may cite only existing relative paths confirmed in the target project. For
 no match, cite existing files/directories actually inspected and mark `no_match`; never
 provide a guessed candidate path as evidence.
+
+Wireframe path bases are deliberately separate: `workingDir` selects the camp-linked
+project whose source files were inspected, `componentAudit[].sourcePaths` are relative
+to that project, and `outputDirectory` is camp-root-relative under
+`.ompfest/plans/<name>.references/pages/<slug>`. At a camp root with multiple
+projects, choose `workingDir` explicitly; the tool returns candidates instead of
+silently auditing the camp directory or a guessed checkout.
 Missing audit paths do not block wireframe output: the tool returns them as
 `auditWarnings`, excludes them from verified evidence, and marks entries without any
 verified path as `unverified` in PAGE.md and the SVG.
