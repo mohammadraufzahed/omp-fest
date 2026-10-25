@@ -451,6 +451,9 @@ export default function ompFest(pi: ExtensionApiLike): void {
         const campRoot = location.campRoot;
         const administrativeRoot = resolve(campRoot, ".ompfest");
         const requestedTargets = targetPaths(event.input, ctx.cwd);
+        // Device writes dispatch tools; they do not mutate checkout files.
+        const requestedDeviceTarget = typeof event.input?.path === "string" && event.input.path.startsWith("xd:/");
+        if (requestedTargets.length === 0 && requestedDeviceTarget) return undefined;
         if (requestedTargets.length === 0) return { block: true, reason: "omp-fest cannot lock this write because its target path is missing. Use a native write/edit tool with an explicit file path." };
         const targets = requestedTargets.filter((path) =>
           !path.includes(`${sep}festivals${sep}`) && !path.startsWith(`${administrativeRoot}${sep}`),

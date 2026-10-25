@@ -104,6 +104,9 @@ take project-file reservations. The native write/edit tool remains responsible
 for whether its target must already exist; an explicit target in these
 non-project directories is not a missing lock target.
 
+`xd://` device writes dispatch tools rather than modify project files, so they
+bypass project-file reservations. Pathless filesystem writes remain blocked.
+
 | Command | Behavior |
 | --- | --- |
 | `/fest portfolio` | Inspect owned festivals, fair task candidates, active/failed work, live write conflicts and advisory stale recovery candidates. No automatic release or relaunch. |

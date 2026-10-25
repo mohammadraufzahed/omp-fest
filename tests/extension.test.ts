@@ -595,6 +595,15 @@ it("allows explicit festival-document writes without a project lock", async () =
   expect(result).toBeUndefined();
 });
 
+it.each(["xd://fest_plan", "xd:/fest_raw", "xd://report_issue"])("allows device dispatch to %s without a project-file lock", async (path) => {
+  const root = await makeCamp();
+  const { pi, handlers, ctx } = mockPi(root);
+  ompFest(pi as never);
+  const before = handlers.get("tool_call") as (event: unknown, ctx: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>;
+
+  expect(await before({ toolName: "write", toolCallId: "device-write", input: { path, content: "{}" } }, ctx)).toBeUndefined();
+});
+
 it("still requires an explicit path for native writes", async () => {
   const root = await makeCamp();
   const { pi, handlers, ctx } = mockPi(root);
