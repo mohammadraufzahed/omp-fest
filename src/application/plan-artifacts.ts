@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { prepareStructuredPlan, type StructuredPlan, type PreparedStructuredPlan } from "./structured-plan.js";
+import { prepareVisualReferences } from "./visual-references.js";
 import { withStaleAwareLock } from "./fs-lock.js";
 import { writeAtomically } from "./fs-atomic.js";
 
@@ -101,7 +102,10 @@ async function currentPlanUnlocked(root: string, path: string, name: string, rev
   if (artifact.name !== name) throw new Error("Saved plan artifact is invalid or corrupted; create a fresh preview");
   const prepared = await prepareStructuredPlan(root, artifact.workingDir, artifact.name, artifact.spec);
   const markdown = await readFile(path, "utf8");
-  if (markdown !== prepared.markdown || planRevision(artifact, markdown, references) !== revision) {
+  const currentReferences = artifact.referencesDir
+    ? (await prepareVisualReferences(root, path, artifact.referencesDir)).files
+    : references;
+  if (markdown !== prepared.markdown || planRevision(artifact, markdown, currentReferences) !== revision) {
     throw new Error("Plan or references changed since approval. Preview again and obtain approval for the new planRevision.");
   }
   return artifact;

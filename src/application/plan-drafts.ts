@@ -137,7 +137,7 @@ function build(root: string, draftId: string, fields: PlanDraftFields, previous?
   const missing = [
     ...(!spec.goal.trim() ? ["goal"] : []), ...(!spec.scope.length ? ["scope"] : []),
     ...(!spec.acceptance.length ? ["acceptance"] : []), ...(!spec.inspection.length ? ["inspection"] : []),
-    ...(!fields.spec && acceptance.length > 3 ? ["full structured spec with meaningful milestone phases"] : []),
+    ...(!fields.spec ? ["full structured spec with meaningful milestone phases"] : []),
     ...(!fields.workingDir ? ["workingDir"] : []), ...verificationMissing,
     ...(fields.attachments ?? []).filter((item) => item.role === "unknown").map((item) => `attachment role: ${item.name}`),
   ];

@@ -182,8 +182,8 @@ describe("visual planning tool handoff", () => {
     expect(await readFile(join(festival, "references", "pages", "results", "wireframe.svg"), "utf8")).toContain("Find</text>");
     expect(scaffoldFromPlan).toHaveBeenCalledTimes(2);
   });
-  it("previews persisted draft content without resending a spec and rejects stale revisions", async () => {
-    const { call, plan } = await setup();
+  it("previews explicitly structured persisted draft content without resending its spec", async () => {
+    const { call, plan, spec } = await setup();
     const draft = await call("fest_plan", { action: "create",
       name: "feature",
       goal: "Fix sidebar overflow",
@@ -192,12 +192,22 @@ describe("visual planning tool handoff", () => {
       inspection: [{ path: "package.json", reason: "Existing test command" }],
       verification: { command: "npm test", evidencePath: "package.json", expected: "Sidebar behavior checks pass" },
     });
-    const preview = await call("fest_plan", { action: "preview", draftId: draft.draftId, draftRevision: draft.revision });
+    expect(draft.missing).toContain("full structured spec with meaningful milestone phases");
+    const fullSpec = structuredClone(spec);
+    fullSpec.goal = "Fix sidebar overflow";
+    fullSpec.scope = ["Sidebar layout"];
+    fullSpec.acceptance = [{ id: "sidebar/AC-01", description: "Sidebar remains usable" }];
+    const task = fullSpec.phases[0]!.sequences[0]!.tasks[0]!;
+    task.implements = ["sidebar/AC-01"];
+    task.verifies = ["sidebar/AC-01"];
+    const structured = await call("fest_plan", { action: "update", draftId: draft.draftId, draftRevision: draft.revision, spec: fullSpec });
+    expect(structured.missing).not.toContain("full structured spec with meaningful milestone phases");
+    const preview = await call("fest_plan", { action: "preview", draftId: structured.draftId, draftRevision: structured.revision });
     expect(preview.kind).toBe("plan_preview");
     expect(await readFile(plan, "utf8")).toContain("Sidebar remains usable");
-    const changed = await call("fest_plan", { action: "update", draftId: draft.draftId, draftRevision: draft.revision, goal: "Fix sidebar wrapping" });
-    expect(changed.revision).not.toBe(draft.revision);
-    const stale = await call("fest_plan", { action: "preview", draftId: draft.draftId, draftRevision: draft.revision });
+    const changed = await call("fest_plan", { action: "update", draftId: structured.draftId, draftRevision: structured.revision, goal: "Fix sidebar wrapping" });
+    expect(changed.revision).not.toBe(structured.revision);
+    const stale = await call("fest_plan", { action: "preview", draftId: structured.draftId, draftRevision: structured.revision });
     expect(stale.kind).toBe("plan_failed");
     expect(stale.error).toContain("Draft changed");
   });
@@ -552,6 +562,24 @@ describe("visual planning tool handoff", () => {
     const status = jsonObject(await readFile(join(root, ".ompfest", "plans", "finished-plan.STRUCTURE.md.status.json"), "utf8"));
     expect(status.state).toBe("scaffolded");
     expect(typeof status.planRevision).toBe("string");
+  });
+  it("scaffolds the approved visual reference bundle when scaffold omits referencesDir", async () => {
+    const { referencesDir, festival, plan, spec, call } = await setup();
+    const visual = {
+      visualIntent: "ui_visual",
+      attachments: [{ name: "design-reference", description: "User-provided UI design reference", role: "ui_design" }],
+    };
+    const preview = await call("fest_plan", {
+      name: "feature", plan, spec, referencesDir, action: "preview", ...visual,
+    }, { custom: () => Promise.resolve("closed"), confirm: () => Promise.resolve(true) });
+    expect(preview).toMatchObject({ kind: "plan_preview", approval: "approved" });
+
+    const scaffolded = await call("fest_plan", {
+      name: "feature", plan, action: "scaffold", approvedRevision: preview.planRevision,
+    });
+    expect(scaffolded.kind).toBe("plan_scaffolded");
+    expect(scaffolded.visualReferences).toEqual(["references/pages/results/PAGE.md"]);
+    expect(await readFile(join(festival, "references", "pages", "results", "PAGE.md"), "utf8")).toContain("RTL");
   });
   it("invalidates approval when visual references change", async () => {
     const { plan, spec, referencesDir, call, scaffoldFromPlan } = await setup();

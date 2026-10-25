@@ -26,7 +26,7 @@ describe("persisted plan drafts", () => {
     const { root, fields } = await fixture();
     const created = await createPlanDraft(root, fields);
     expect(created.draftId).toMatch(/^draft-/);
-    expect(created.missing).toEqual([]);
+    expect(created.missing).toContain("full structured spec with meaningful milestone phases");
     expect(await readPlanDraft(root, created.draftId)).toEqual(created);
     const updated = await updatePlanDraft(root, created.draftId, created.revision, { goal: "Make the feature reliably usable", rules: "Do not add dependencies." });
     expect(updated.revision).not.toBe(created.revision);
@@ -47,9 +47,10 @@ describe("persisted plan drafts", () => {
     expect(reordered.spec.acceptance.map((item) => item.id)).toEqual(["ac-2", "ac-1", "ac-3"]);
   });
 
-  it("previews persisted content without requiring callers to repeat the nested spec", async () => {
+  it("previews explicitly structured persisted content without requiring callers to repeat the nested spec", async () => {
     const { root, fields } = await fixture();
-    const draft = await createPlanDraft(root, fields);
+    const compact = await createPlanDraft(root, fields);
+    const draft = await updatePlanDraft(root, compact.draftId, compact.revision, { spec: compact.spec });
     const preview = await previewPlanDraft(root, draft.draftId, draft.revision);
     expect(preview.counts).toEqual({ phases: 1, sequences: 1, tasks: 1 });
     expect(preview.draftRevision).toBe(draft.revision);
@@ -63,7 +64,14 @@ describe("persisted plan drafts", () => {
     expect(await readFile(preview.plan, "utf8")).toBe(savedPreview);
   });
 
-  it("requires explicit milestone phases when a compact draft grows beyond three acceptance statements", async () => {
+  it("blocks compact scalar drafts from previewing as a synthesized single phase", async () => {
+    const { root, fields } = await fixture();
+    const draft = await createPlanDraft(root, fields);
+    expect(draft.missing).toContain("full structured spec with meaningful milestone phases");
+    await expect(previewPlanDraft(root, draft.draftId, draft.revision)).rejects.toThrow("Draft is incomplete");
+  });
+
+  it("requires a full structured spec before a compact draft can be previewed", async () => {
     const { root, fields } = await fixture();
     const draft = await createPlanDraft(root, { ...fields, acceptance: ["First", "Second", "Third", "Fourth"] });
     expect(draft.missing).toContain("full structured spec with meaningful milestone phases");
@@ -108,7 +116,7 @@ describe("persisted plan drafts", () => {
       verification: { command: "npm run test", expected: "Feature regression passes" },
     });
     expect(withoutEvidence.fields.verification?.evidencePath).toBe("package.json");
-    expect(withoutEvidence.missing).toEqual([]);
+    expect(withoutEvidence.missing).toContain("full structured spec with meaningful milestone phases");
     await mkdir(join(root, fields.workingDir!, "tests"), { recursive: true });
     await writeFile(join(root, fields.workingDir!, "tests", "sample_test.py"), "def test_feature(): pass\n");
     const testTarget = await createPlanDraft(root, {
@@ -116,7 +124,7 @@ describe("persisted plan drafts", () => {
       verification: { command: "pytest tests", expected: "Feature regression passes" },
     });
     expect(testTarget.fields.verification?.evidencePath).toBe("tests");
-    expect(testTarget.missing).toEqual([]);
+    expect(testTarget.missing).toContain("full structured spec with meaningful milestone phases");
 
     const partialUpdate = await updatePlanDraft(root, withoutEvidence.draftId, withoutEvidence.revision, {
       verification: { expected: "Updated regression result" },
@@ -127,7 +135,7 @@ describe("persisted plan drafts", () => {
       evidencePath: "package.json",
       expected: "Updated regression result",
     });
-    expect(partialUpdate.missing).toEqual([]);
+    expect(partialUpdate.missing).toContain("full structured spec with meaningful milestone phases");
   });
 
   it("reports an unresolved evidence field instead of building a misleading verification check", async () => {
@@ -144,7 +152,7 @@ describe("persisted plan drafts", () => {
   it("persists incomplete observations but does not invent scope or verification", async () => {
     const { root } = await fixture();
     const draft = await createPlanDraft(root, { name: "incomplete", goal: "Fix a bug" });
-    expect(draft.missing).toEqual(["scope", "acceptance", "inspection", "workingDir", "verification"]);
+    expect(draft.missing).toEqual(["scope", "acceptance", "inspection", "full structured spec with meaningful milestone phases", "workingDir", "verification"]);
     expect(draft.spec.phases[0]!.sequences[0]!.tasks[0]!.verification).toEqual([]);
     await expect(previewPlanDraft(root, draft.draftId, draft.revision)).rejects.toThrow("Draft is incomplete");
   });
@@ -194,7 +202,8 @@ describe("persisted plan drafts", () => {
   });
   it("rejects a corrupted saved artifact instead of accepting partial JSON", async () => {
     const { root, fields } = await fixture();
-    const draft = await createPlanDraft(root, fields);
+    const compact = await createPlanDraft(root, fields);
+    const draft = await updatePlanDraft(root, compact.draftId, compact.revision, { spec: compact.spec });
     const preview = await previewPlanDraft(root, draft.draftId, draft.revision);
     await writeFile(`${preview.plan}.json`, "{broken");
     await expect(approvedPlan(root, preview.plan, fields.name, preview.planRevision)).rejects.toThrow(
