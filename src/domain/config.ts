@@ -20,6 +20,7 @@ export async function loadConfig(dir: string): Promise<OmpFestConfig> {
     ...DEFAULT_CONFIG,
     ...pickDefined(parsed),
     autonomyCeiling: sanitizeAutonomy(parsed.autonomyCeiling) ?? DEFAULT_CONFIG.autonomyCeiling,
+    delegateMode: sanitizeDelegateMode(parsed.delegateMode) ?? DEFAULT_CONFIG.delegateMode,
   };
 }
 
@@ -51,4 +52,8 @@ function pickDefined<T extends object>(input: T): Partial<T> {
 
 function sanitizeAutonomy(value: unknown): Autonomy | undefined {
   return value === "low" || value === "medium" || value === "high" ? value : undefined;
+}
+
+function sanitizeDelegateMode(value: unknown): OmpFestConfig["delegateMode"] | undefined {
+  return value === "auto" || value === "always" || value === "never" ? value : undefined;
 }

@@ -174,6 +174,7 @@ const SETTING_SPECS: SettingSpec[] = [
   { key: "pauseAtGates", desc: "stop for human approval at gates", kind: "bool", parse: BOOL },
   { key: "evidenceRequiredOnGates", desc: "require evidence text on gate approval", kind: "bool", parse: BOOL },
   { key: "writeLocks", desc: "per-file/checkout write reservations (off for worktree-per-festival or legacy projects)", kind: "bool", parse: BOOL },
+  { key: "delegateMode", desc: "subagent delegation: auto (disjoint scope only), always, never", kind: "enum", choices: ["auto", "always", "never"], parse: enumOf(["auto", "always", "never"]) },
   { key: "autoCommitAfterTask", desc: "auto fest_commit after task completed", kind: "enum", choices: ["ask", "always", "never"], parse: enumOf(["ask", "always", "never"]) },
   { key: "autonomyCeiling", desc: "max autonomy level", kind: "enum", choices: ["low", "medium", "high"], parse: enumOf(["low", "medium", "high"]) },
   {

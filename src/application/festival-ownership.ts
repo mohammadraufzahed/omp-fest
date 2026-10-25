@@ -1,4 +1,4 @@
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { LockBusyError, processIsAlive, withStaleAwareLock } from "./fs-lock.js";
@@ -135,4 +135,19 @@ export async function touchFestivalOwnership(festivalDir: string, sessionId: str
 
 export async function festivalOwner(festivalDir: string): Promise<FestivalOwner | undefined> {
   return readOwner(festivalDir);
+}
+
+/**
+ * Drop a festival's claim. Only the recorded owner session (or a dead owner's
+ * claim) may release — a live foreign owner is reported instead of removed.
+ */
+export async function releaseFestivalOwnership(festivalDir: string, sessionId: string): Promise<"released" | "kept"> {
+  const result = await withLock(festivalDir, async () => {
+    const current = await readOwner(festivalDir);
+    if (!current) return "released" as const;
+    if (current.sessionId !== sessionId && !festivalOwnerIsDead(current)) return "kept" as const;
+    await rm(join(festivalDir, OWNER_FILE), { force: true });
+    return "released" as const;
+  });
+  return result ?? "kept";
 }

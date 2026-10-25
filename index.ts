@@ -35,6 +35,7 @@ import { notifyGate, OmpNotifier } from "./src/adapters/omp/notify.js";
 import { registerTools, type PiLike } from "./src/adapters/omp/tools.js";
 import { loadConfig } from "./src/domain/config.js";
 import { statusLineText, summarizeProgress } from "./src/domain/progress.js";
+import { readFestivalWorktrees } from "./src/application/festival-worktrees.js";
 import { planInterviewKickoff } from "./src/domain/orientation.js";
 import { classifyPlanningIntent, planningIntentGuidance } from "./src/domain/planning-intent.js";
 import { INTEGRATION_GUIDE } from "./src/application/integration-review.js";
@@ -207,7 +208,7 @@ export default function ompFest(pi: ExtensionApiLike): void {
 
 
   const cwd = process.cwd();
-  const deps = { fest, camp, detect, tracker, supervisor, config: () => loadConfig(cwd), host: { getAllTools: pi.getAllTools?.bind(pi), getActiveTools: pi.getActiveTools?.bind(pi) } };
+  const deps = { fest, camp, detect, tracker, exec, supervisor, config: () => loadConfig(cwd), host: { getAllTools: pi.getAllTools?.bind(pi), getActiveTools: pi.getActiveTools?.bind(pi) } };
 
   registerTools(pi as unknown as PiLike, deps);
   registerCommands(pi, deps);
@@ -296,6 +297,24 @@ export default function ompFest(pi: ExtensionApiLike): void {
       return;
     }
     const orientation = await orientSession(ctx.cwd, detect, claimedDir);
+    // Session briefing: after compaction/resume the model gets orientation but
+    // not narrative — last progress events, open unit, pending decisions, worktrees.
+    const briefingDir = orientation.location.festivalDir;
+    if (briefingDir) {
+      try {
+        const events = await detect.readProgress(briefingDir);
+        const recent = events.slice(-5).map((event) => `${event.ts} ${event.event}${event.task ? ` ${event.task}` : ""}`).join("; ");
+        const progress = summarizeProgress(events);
+        const worktrees = await readFestivalWorktrees(briefingDir).catch(() => []);
+        const notes = [
+          `omp-fest briefing: festival ${orientation.location.festivalId ?? basename(briefingDir)} ${progress.completed}/${progress.total} done${progress.currentLabel ? `, at ${progress.currentLabel}` : ""}.`,
+          recent ? `Recent: ${recent}` : "",
+          progress.gatePending ? "A gate is PENDING human decision — do not approve it yourself; surface it and wait." : "",
+          worktrees.length ? `Festival worktrees: ${worktrees.map((row) => row.worktreePath).join(", ")}` : "",
+        ].filter(Boolean).join(" ");
+        silentContext(notes);
+      } catch { /* briefing is best-effort */ }
+    }
     if (orientation.location.campRoot) {
       const campRoot = orientation.location.campRoot;
       void reconcileCamp(campRoot, async (root) => (await camp.projects(root)).map((project) => project.path)).then((summary) => {
@@ -585,8 +604,15 @@ export default function ompFest(pi: ExtensionApiLike): void {
     if (supervisor.state(sessionIdOf(ctx)).paused) {
       return { block: true, reason: "Festival worker dispatch is paused. Use /fest dispatch to resume." };
     }
+    const config = await configFor();
+    if (config.delegateMode === "never") {
+      return { block: true, reason: "This camp forbids subagent delegation (delegateMode=never). Do the work in the main session, or ask the user to change the setting." };
+    }
+    const modeNote = config.delegateMode === "always"
+      ? "delegateMode=always: the parent should delegate implementation units to workers."
+      : "delegateMode=auto: delegate units only when their file scope is disjoint from other live work; do small or overlapping units in the main session.";
     return {
-      note: "omp-fest worker: implement only the parent's explicit assignment; use native path-bearing write/edit tools for all project changes so exact per-file locks are acquired. Shell file mutations are blocked. Return files changed, actual verification results and blockers through the native subagent result. Do not select/claim festivals, run fest_next, complete festival tasks, commit, approve gates, change scope or transfer ownership. The parent supervisor alone reviews and records completion. When the assignment belongs to a cross-session team, the parent coordinates through fest_team; do not claim work outside your assignment. Follow the browser-verification policy in the task contract.",
+      note: `omp-fest worker: implement only the parent's explicit assignment; use native path-bearing write/edit tools for all project changes so exact per-file locks are acquired. Shell file mutations are blocked. Return files changed, actual verification results and blockers through the native subagent result. Do not select/claim festivals, run fest_next, complete festival tasks, commit, approve gates, change scope or transfer ownership. The parent supervisor alone reviews and records completion. When the assignment belongs to a cross-session team, the parent coordinates through fest_team; do not claim work outside your assignment. Follow the browser-verification policy in the task contract. Parent note — ${modeNote}`,
     };
   });
 

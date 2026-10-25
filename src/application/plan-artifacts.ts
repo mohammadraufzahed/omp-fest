@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readdir, readFile, realpath, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { prepareStructuredPlan, type StructuredPlan, type PreparedStructuredPlan } from "./structured-plan.js";
 import { withStaleAwareLock } from "./fs-lock.js";
+import { writeAtomically } from "./fs-atomic.js";
 
 export interface PlanArtifact {
   name: string;
@@ -38,15 +39,7 @@ async function withArtifactLock<T>(path: string, action: () => Promise<T>): Prom
   }
 }
 
-async function writeAtomically(path: string, content: string): Promise<void> {
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  try {
-    const file = await open(temporary, "wx", 0o600);
-    try { await file.writeFile(content); }
-    finally { await file.close(); }
-    await rename(temporary, path);
-  } finally { await unlink(temporary).catch((error: unknown) => { if (errorCode(error) !== "ENOENT") throw error; }); }
-}
+
 
 async function readArtifact(path: string): Promise<PlanArtifact> {
   try {

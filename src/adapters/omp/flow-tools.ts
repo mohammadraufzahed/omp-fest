@@ -40,7 +40,21 @@ function schema(z: ZodLike) {
 }
 export function registerFlowTools(pi: FlowHost, deps: FlowDeps): void {
   const z = pi.zod;
-  pi.registerTool({ name: "fest_capabilities", label: "Discover Fest Capabilities", description: "Report actual omp host UI, active browser MCP, current agent role/lifecycle and secure credential-store capabilities. Agent role is not a worker-launch capability check. Does not claim unsupported tool execution or secret injection.", parameters: z.object({}), async execute(_id: string, _params: unknown, _signal: unknown, _update: unknown, ctx: FlowContext) {
+  pi.registerTool({ name: "fest_capabilities", label: "Discover Fest Capabilities", description: "Report actual omp host UI, active browser MCP, current agent role/lifecycle and secure credential-store capabilities. Agent role is not a worker-launch capability check. Does not claim unsupported tool execution or secret injection. contract:true returns the ~800-token omp-fest agent contract (lifecycle, supervisor-only tools, error codes).", parameters: z.object({ contract: z.boolean().optional().describe("Return the agent contract instead of host capabilities") }), async execute(_id: string, params: { contract?: boolean }, _signal: unknown, _update: unknown, ctx: FlowContext) {
+    if (params.contract) {
+      return out({ kind: "agent_contract", contract: [
+        "LIFECYCLE: idea -> plan (fest_plan draft/preview/approve) -> scaffold -> ready -> active -> completed.",
+        "You are SUPERVISOR. Workers implement units you assign; they never drive the protocol.",
+        "SUPERVISOR-ONLY tools (workers get blocked): fest_next, fest_commit, fest_gate_submit, fest_plan, fest_promote, fest_complete, fest_orphans, fest_advance.",
+        "FLOW: camp_status (see all) -> fest_advance (one next action) -> do it -> repeat. Festivals end with fest_complete which merges worktrees and promotes to completed.",
+        "GATES: never self-approve. fest_gate_submit opens a human decision dialog; headless returns status:awaiting_human — STOP and wait for /fest approve|reject.",
+        "PLANNING: fest_plan(draft) -> preview -> human approves -> scaffold. Rejects produce a fresh revision; scaffold auto-resolves the latest approved preview.",
+        "WORKTREES: promote->active creates projects/worktrees/<project>/<festival> (branch fest/<name>); fest_complete merges+removes them. Dirty/conflicting merges fail with code=WORKTREE_DIRTY/MERGE_CONFLICT.",
+        "ERRORS: every failure is {kind, code, retryable, nextAction}. Read nextAction before retrying; retryable=true is safe to retry. Orphans are self-healing on retry.",
+        "RECOVERY: crashed mid-scaffold? Retry — dead journals auto-clear. Stuck? camp_status -> fest_advance. Orphans? fest_orphans.",
+        "WRITES: inside camp/festival dirs use native path-bearing tools; shell file mutation is blocked unless writeLocks=false.",
+      ].join("\n") });
+    }
     const hostCapabilities = discoverHostCapabilities(deps.host), ui = inspectFlowUi(ctx.ui);
     const jobs = ctx.getAsyncJobSnapshot?.();
     return out({ kind: "host_capabilities", metadataAvailable: hostCapabilities.metadataAvailable, uiInput: ui.input, uiConfirm: ui.confirm, maskedInput: ui.maskedInput, agentRole: ctx.agent?.kind ?? "unknown", browserMcp: hostCapabilities.browserTools.map(({ name, active }) => ({ name, active })), nativeAgentJobs: jobs ? [...(jobs.running ?? []), ...(jobs.recent ?? [])].map(({ id, type, status, label, agentId }) => ({ id, type, status, label, agentId })) : null, localPlaywright: await playwrightAvailable(), secureCredentialStore: await secureCredentialStoreAvailable(), secretInjection: "host-local Playwright only; no MCP secret injection claimed", limitations: ["Secret/OTP values are captured by a native masked terminal handler and never returned in tool results.", "Persistent browser cookies/session state are not stored.", "Keyring save requires secret-tool; without it credentials are run-only."] });
