@@ -2,7 +2,7 @@ import { readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CampFsDetect } from "../src/adapters/fs/camp-fs.js";
-import { pageRevision, recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../src/application/visual-evidence.js";
+import { inspectTaskVisualEvidence, pageRevision, recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../src/application/visual-evidence.js";
 import { installVisualReferences, prepareVisualReferences } from "../src/application/visual-references.js";
 import { createVisualFixture, PAGE, TASK } from "./visual-fixture.js";
 
@@ -14,6 +14,10 @@ const VERIFIED: VisualEvidence = {
 async function fixture() {
   const fixture = await createVisualFixture();
   await installVisualReferences(fixture.festival, await prepareVisualReferences(fixture.root, fixture.plan, fixture.referencesDir));
+  await writeFile(join(fixture.root, "app.ts"), "export const search = true;\n");
+  await writeFile(join(fixture.festival, "APPROVED_PLAN.json"), JSON.stringify({
+    workingDir: fixture.root, spec: { phases: [{ sequences: [{ tasks: [{ files: [{ path: "app.ts" }] }] }] }] },
+  }));
   return { ...fixture, detect: new CampFsDetect() };
 }
 
@@ -77,5 +81,64 @@ describe("visual acceptance evidence", () => {
     const content = await readFile(file, "utf8");
     await writeFile(file, content.replace(VERIFIED.proof, ""));
     expect((await visualEvidenceStatus(festival, detect)).issues.join("\n")).toContain("Invalid visual verification file");
+  });
+
+  it("reports exact missing checks and verified context fields without recording evidence", async () => {
+    const { festival, taskPath } = await fixture();
+    const missing = await inspectTaskVisualEvidence(festival, taskPath, TASK);
+    expect(missing).toMatchObject({ valid: false, source: "recorded", missingRequirements: [
+      { page: "results", check: "AC-01", reasonCode: "visual_evidence_missing", missingFields: ["status", "proof"] },
+    ] });
+    const incomplete = await inspectTaskVisualEvidence(festival, taskPath, TASK, [{ ...VERIFIED, route: undefined, viewport: undefined }]);
+    expect(incomplete.missingRequirements).toMatchObject([
+      { page: "results", check: "AC-01", reasonCode: "visual_evidence_invalid", missingFields: ["route", "viewport"] },
+    ]);
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK)).valid).toBe(false);
+  });
+
+  it("reuses current recorded evidence without rewriting it, including honest untested checks", async () => {
+    const { festival, taskPath } = await fixture();
+    for (const entry of [VERIFIED, { page: "results", check: "AC-01", status: "untested", proof: "Browser unavailable" } as VisualEvidence]) {
+      await recordVisualEvidence(festival, taskPath, TASK, [entry]);
+      const file = join(festival, "references", "verification.json");
+      const before = await readFile(file, "utf8");
+      expect(await inspectTaskVisualEvidence(festival, taskPath, TASK)).toMatchObject({ valid: true, source: "recorded", missingRequirements: [] });
+      expect(await readFile(file, "utf8")).toBe(before);
+      expect((await inspectTaskVisualEvidence(festival, taskPath, TASK, [])).valid).toBe(false);
+    }
+  });
+
+  it("rejects failed and reference-stale recorded checks", async () => {
+    const { festival, taskPath } = await fixture();
+    await recordVisualEvidence(festival, taskPath, TASK, [{ ...VERIFIED, status: "failed", proof: "Search failed" }]);
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK)).missingRequirements).toContainEqual(expect.objectContaining({ page: "results", check: "AC-01", reasonCode: "visual_check_failed" }));
+    await recordVisualEvidence(festival, taskPath, TASK, [VERIFIED]);
+    await writeFile(join(festival, "references", "pages", "results", "PAGE.md"), PAGE.replace("Search works", "Search changed"));
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK)).missingRequirements).toContainEqual(expect.objectContaining({ page: "results", check: "AC-01", reasonCode: "visual_evidence_stale" }));
+  });
+
+  it("rejects code-stale evidence for reuse and gate verification, and requires resupplying legacy records", async () => {
+    const { root, festival, taskPath, markDone, detect } = await fixture();
+    await recordVisualEvidence(festival, taskPath, TASK, [VERIFIED]);
+    await writeFile(join(root, "app.ts"), "export const search = false;\n");
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK)).missingRequirements).toContainEqual(expect.objectContaining({ reasonCode: "visual_source_stale" }));
+    await markDone();
+    expect((await visualEvidenceStatus(festival, detect)).issues.join("\n")).toContain("changed approved source contents");
+    await recordVisualEvidence(festival, taskPath, TASK, [VERIFIED]);
+    const file = join(festival, "references", "verification.json");
+    const legacy = JSON.parse(await readFile(file, "utf8")) as { records: { sourceRevision?: string }[] };
+    delete legacy.records[0]!.sourceRevision;
+    await writeFile(file, JSON.stringify(legacy));
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK)).missingRequirements).toContainEqual(expect.objectContaining({ reasonCode: "visual_source_unbound" }));
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK, [VERIFIED])).valid).toBe(true);
+  });
+
+  it("does not automatically reuse evidence without an approved source snapshot", async () => {
+    const { festival, taskPath } = await fixture();
+    await writeFile(join(festival, "APPROVED_PLAN.json"), "{}");
+    const [record] = await recordVisualEvidence(festival, taskPath, TASK, [VERIFIED]);
+    expect(record?.sourceRevision).toBeUndefined();
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK)).missingRequirements).toContainEqual(expect.objectContaining({ reasonCode: "visual_source_unbound" }));
+    expect((await inspectTaskVisualEvidence(festival, taskPath, TASK, [VERIFIED])).valid).toBe(true);
   });
 });

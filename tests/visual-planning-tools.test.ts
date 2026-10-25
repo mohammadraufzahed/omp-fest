@@ -12,6 +12,7 @@ import type { StructuredPlan } from "../src/application/structured-plan.js";
 import { listFestivalCreationOrphans } from "../src/application/festival-creation.js";
 import { festivalOwner } from "../src/application/festival-ownership.js";
 
+import { recordVisualEvidence } from "../src/application/visual-evidence.js";
 type Execute = (id: string, params: Record<string, unknown>, signal: unknown, update: unknown, ctx: unknown) => Promise<{ content: { text: string }[] }>;
 const schema = (): { optional(): unknown; describe(): unknown } => ({ optional: schema, describe: schema });
 function jsonObject(text: string): Record<string, unknown> {
@@ -247,6 +248,10 @@ describe("visual planning tool handoff", () => {
     expect((validation.visualReferences as { issues: string[] }).issues).toEqual([]);
     const next = await call("fest_next");
     expect((next.visualReferences as { content: string }[])[0]?.content).toContain("filters.search");
+    expect(next.completionRequirements).toMatchObject({
+      visualChecks: [{ page: "results", check: "AC-01", description: "Search works in RTL", requiredFields: ["status", "proof"], verifiedFields: ["route", "viewport", "state"] }],
+      visualEvidence: { valid: false, missingRequirements: [{ page: "results", check: "AC-01", reasonCode: "visual_evidence_missing" }] },
+    });
     const backend = join(festival, "001_BUILD", "02_api");
     await mkdir(backend);
     await writeFile(join(backend, "01_api.md"), "---\nfest_type: task\n---\n# Backend");
@@ -293,6 +298,11 @@ describe("visual planning tool handoff", () => {
     await scaffold({ name: "feature", plan, referencesDir });
     const noEvidence = await call("fest_task_complete", { task: taskPath, evidence: "tests passed" });
     expect(noEvidence.kind).toBe("completion_blocked");
+    expect(noEvidence).toMatchObject({
+      reasonCode: "visual_evidence_required",
+      missingRequirements: [{ page: "results", check: "AC-01", reasonCode: "visual_evidence_missing", missingFields: ["status", "proof"] }],
+      nextAction: { tool: "fest_task_complete", task: taskPath, field: "visualEvidence" },
+    });
     expect(taskComplete).not.toHaveBeenCalled();
     const failed = await call("fest_task_complete", { task: taskPath, evidence: "tests failed", visualEvidence: [
       { page: "results", check: "AC-01", status: "failed", proof: "Search did not filter" },
@@ -320,6 +330,46 @@ describe("visual planning tool handoff", () => {
     expect((stale.issues as string[]).join("\n")).toContain("Stale evidence");
     expect((await call("fest_validate")).kind).toBe("validation_failed");
     expect(await command("approve")).toContain("Stale evidence");
+  });
+
+  it("completes using valid recorded visual evidence without replacing it", async () => {
+    const { referencesDir, festival, plan, taskPath, taskComplete, call, scaffold } = await setup();
+    await scaffold({ name: "feature", plan, referencesDir });
+    const doc = await readFile(join(festival, taskPath), "utf8");
+    await recordVisualEvidence(festival, taskPath, doc, [{
+      page: "results", check: "AC-01", status: "verified", proof: "Search verified in the browser",
+      route: "/results", viewport: "1280x800", state: "initial",
+    }]);
+    const file = join(festival, "references", "verification.json");
+    const before = await readFile(file, "utf8");
+    expect(await call("fest_task_complete", { task: taskPath, evidence: "Reuse previously recorded browser and automated verification." })).toMatchObject({ status: "completed" });
+    expect(taskComplete).toHaveBeenCalledTimes(1);
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(await call("fest_task_complete", { task: taskPath, evidence: "Explicitly empty replacement", visualEvidence: [] })).toMatchObject({ kind: "completion_blocked" });
+    expect(taskComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["failed", "reference", "source", "legacy"] as const)("blocks automatic reuse of %s visual evidence", async (invalidity) => {
+    const { root, referencesDir, festival, plan, taskPath, taskComplete, call, scaffold } = await setup();
+    await scaffold({ name: "feature", plan, referencesDir });
+    await recordVisualEvidence(festival, taskPath, await readFile(join(festival, taskPath), "utf8"), [{
+      page: "results", check: "AC-01", status: invalidity === "failed" ? "failed" : "verified",
+      proof: invalidity === "failed" ? "Search failed" : "Search verified in browser",
+      route: "/results", viewport: "1280x800", state: "initial",
+    }]);
+    if (invalidity === "reference") await writeFile(join(festival, "references", "pages", "results", "PAGE.md"), PAGE.replace("Search works", "Search changed"));
+    if (invalidity === "source") await writeFile(join(root, "package.json"), `${await readFile(join(root, "package.json"), "utf8")}\n`);
+    if (invalidity === "legacy") {
+      const file = join(festival, "references", "verification.json");
+      const store = JSON.parse(await readFile(file, "utf8")) as { records: { sourceRevision?: string }[] };
+      delete store.records[0]!.sourceRevision;
+      await writeFile(file, JSON.stringify(store));
+    }
+    const result = await call("fest_task_complete", { task: taskPath, evidence: "Use recorded proof" });
+    expect(result).toMatchObject({ kind: "completion_blocked", reasonCode: "visual_evidence_required" });
+    const reasonCode = { failed: "visual_check_failed", reference: "visual_evidence_stale", source: "visual_source_stale", legacy: "visual_source_unbound" }[invalidity];
+    expect(result.missingRequirements).toContainEqual(expect.objectContaining({ page: "results", check: "AC-01", reasonCode }));
+    expect(taskComplete).not.toHaveBeenCalled();
   });
 
   it("reverifies completed tasks at the existing gate and shows route and viewport to the human", async () => {

@@ -3,6 +3,7 @@ import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { CampDetect } from "../ports.js";
 import { linkedPages, referencesForTask, taskChecks, withVisualReferenceLock } from "./visual-references.js";
+import { approvedSourceRevision } from "./integration-review.js";
 
 export type VerificationStatus = "verified" | "failed" | "untested";
 
@@ -20,6 +21,7 @@ export interface VisualEvidence {
 interface EvidenceRecord extends VisualEvidence {
   task: string;
   revision: string;
+  sourceRevision?: string;
 }
 
 interface EvidenceStore {
@@ -48,6 +50,7 @@ function isRecord(value: unknown): value is EvidenceRecord {
   const record = value as Record<string, unknown>;
   return ["task", "page", "check", "revision", "proof"].every((key) => nonempty(record[key])) &&
     ["verified", "failed", "untested"].includes(String(record.status)) &&
+    (record.sourceRevision === undefined || nonempty(record.sourceRevision)) &&
     (record.status !== "verified" || ["route", "viewport", "state"].every((key) => nonempty(record[key])));
 }
 
@@ -101,6 +104,7 @@ export async function validateVisualEvidenceForTask(
   const records: EvidenceRecord[] = [];
   const references = await referencesForTask(dir, taskDoc);
   const revisions = new Map<string, string>();
+  const sourceRevision = await approvedSourceRevision(dir);
   for (const entry of entries) {
     if (!linked.includes(entry.page) || !["verified", "failed", "untested"].includes(entry.status) ||
       typeof entry.proof !== "string" || !entry.proof.trim() ||
@@ -114,7 +118,7 @@ export async function validateVisualEvidenceForTask(
     if (!revisions.has(entry.page)) {
       revisions.set(entry.page, await pageRevision(dir, entry.page));
     }
-    records.push({ ...entry, task, revision: revisions.get(entry.page) ?? "" });
+    records.push({ ...entry, task, revision: revisions.get(entry.page) ?? "", sourceRevision });
   }
   return records;
 }
@@ -145,6 +149,64 @@ export async function recordVisualEvidence(
   });
 }
 
+interface MissingVisualRequirement {
+  page?: string;
+  check?: string;
+  reasonCode: string;
+  missingFields?: string[];
+  details: string;
+}
+
+/** Inspects pending-task evidence without rewriting or refreshing recorded revisions. */
+export async function inspectTaskVisualEvidence(dir: string, task: string, taskDoc: string, entries?: VisualEvidence[]) {
+  const checks = taskChecks(taskDoc).map(({ page, id }) => ({ page, check: id }));
+  const missingRequirements: MissingVisualRequirement[] = [];
+  const issues: string[] = [];
+  const source = entries === undefined ? "recorded" : "supplied";
+  let records: EvidenceRecord[] = [];
+  try {
+    if (entries === undefined) records = (await readStore(dir)).records.filter((record) => record.task === task);
+    const proposed = entries ?? records.filter((record) => checks.some((check) => check.page === record.page && check.check === record.check));
+    const revisions = new Map<string, string>();
+    const sourceRevision = entries === undefined && proposed.length ? await approvedSourceRevision(dir) : undefined;
+    for (const { page, check } of checks) {
+      const entry = proposed.find((candidate) => candidate.page === page && candidate.check === check);
+      if (!entry) {
+        missingRequirements.push({ page, check, reasonCode: "visual_evidence_missing", missingFields: ["status", "proof"], details: `Missing evidence for ${page}/${check} (${task})` });
+        continue;
+      }
+      const missingFields = ["proof", ...(entry.status === "verified" ? ["route", "viewport", "state"] : [])]
+        .filter((field) => !nonempty(entry[field as keyof VisualEvidence]));
+      if (!["verified", "failed", "untested"].includes(entry.status)) missingFields.unshift("status");
+      if (missingFields.length || !["verified", "failed", "untested"].includes(entry.status)) {
+        missingRequirements.push({ page, check, reasonCode: "visual_evidence_invalid", missingFields, details: `Evidence for ${page}/${check} needs a valid status and proof; verified checks also need route, viewport and state` });
+      }
+      if (entries === undefined) {
+        if (!revisions.has(page)) revisions.set(page, await pageRevision(dir, page));
+        const record = records.find((candidate) => candidate.page === page && candidate.check === check);
+        if (record?.revision !== revisions.get(page)) {
+          missingRequirements.push({ page, check, reasonCode: "visual_evidence_stale", details: `Stale evidence for ${page}/${check} (${task}) — reverify the changed reference` });
+        }
+        if (!record?.sourceRevision || !sourceRevision || record.sourceRevision !== sourceRevision) {
+          missingRequirements.push({ page, check, reasonCode: record?.sourceRevision ? "visual_source_stale" : "visual_source_unbound", details: `Evidence for ${page}/${check} (${task}) is not bound to the current approved source contents — supply fresh visual evidence` });
+        }
+      }
+      if (entry.status === "failed") {
+        missingRequirements.push({ page, check, reasonCode: "visual_check_failed", details: `Failed check ${page}/${check} (${task}): ${entry.proof}` });
+      }
+    }
+    if (!missingRequirements.length) await validateVisualEvidenceForTask(dir, task, taskDoc, proposed);
+  } catch (error) {
+    if (checks.length) missingRequirements.push(...checks.map(({ page, check }) => ({ page, check, reasonCode: "visual_evidence_invalid", details: String(error) })));
+    else missingRequirements.push({ reasonCode: "visual_evidence_invalid", details: String(error) });
+  }
+  issues.push(...missingRequirements.map((requirement) => requirement.details));
+  return {
+    valid: missingRequirements.length === 0, checks, missingRequirements, issues, source,
+    freshness: { scope: "reference_and_approved_source_content", description: "Automatic reuse requires matching PAGE.md, wireframe, approved plan and declared source file contents. Legacy or source-unbound evidence must be supplied again. Final integration and human review remain required." },
+  };
+}
+
 export async function visualEvidenceStatus(dir: string, detect: CampDetect): Promise<EvidenceStatus> {
   let store: EvidenceStore;
   try {
@@ -157,6 +219,7 @@ export async function visualEvidenceStatus(dir: string, detect: CampDetect): Pro
   const untested: EvidenceRecord[] = [];
   const issues: string[] = [];
   const revisions = new Map<string, string>();
+  const sourceRevision = store.records.some((record) => record.sourceRevision) ? await approvedSourceRevision(dir) : undefined;
   for (const task of tasks) {
     const doc = await readFile(join(dir, task.path), "utf8");
     for (const { page, id } of taskChecks(doc)) {
@@ -168,6 +231,8 @@ export async function visualEvidenceStatus(dir: string, detect: CampDetect): Pro
         issues.push(`Missing evidence for ${page}/${id} (${task.path})`);
       } else if (record.revision !== revisions.get(page)) {
         issues.push(`Stale evidence for ${page}/${id} (${task.path}) — reverify the changed reference`);
+      } else if (record.sourceRevision && record.sourceRevision !== sourceRevision) {
+        issues.push(`Stale evidence for ${page}/${id} (${task.path}) — reverify changed approved source contents`);
       } else if (record.status === "failed") {
         issues.push(`Failed check ${page}/${id} (${task.path}): ${record.proof}`);
       } else if (record.status === "untested") {

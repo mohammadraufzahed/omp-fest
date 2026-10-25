@@ -1,6 +1,6 @@
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { readFile, realpath } from "node:fs/promises";
-import { Supervisor, SUPERVISOR_ENTRY, SUPERVISOR_POLICY, type WorkerAssignment } from "../../application/supervisor.js";
+import { Supervisor, SupervisorBlocked, supervisorNextAction, SUPERVISOR_ENTRY, SUPERVISOR_POLICY, type WorkerAssignment } from "../../application/supervisor.js";
 import { dispatchQueue, taskFiles, type DispatchQueue, type DispatchTask, type WriteLockOwner } from "../../application/supervisor-queue.js";
 import { claimedFestivalDir, matchFestival } from "../../application/fest-resolve.js";
 import { festivalOwner } from "../../application/festival-ownership.js";
@@ -245,7 +245,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
   const z = pi.zod;
   pi.registerTool({
     name: "fest_supervisor",
-    description: "Queue dependency-eligible tasks across owned festivals, inspect the read-only portfolio and per-file write locks, track native worker reports, reconcile resume, retain worker questions and independently review submissions. If a worker result is unavailable, accept_reviewed lets the coordinator attest to work inspected in the shared worktree after interactive confirmation and checking no native worker is still running. Status returns a compact delta for a known revision; omit since for full state. Never launches workers or completes tasks. Main session only.",
+    description: "Queue dependency-eligible tasks across owned festivals, inspect the read-only portfolio and per-file write locks, track native worker reports, reconcile resume, retain worker questions and independently review submissions. Read status nextActions before transitioning: submitted results use accept after independent review; accept_reviewed is only an interactive, audited fallback when no worker submission is available and no native worker remains active. Acceptance calls are not probes; retry a blocker only after its named prerequisite changes. Reuse still-valid revision-bound evidence rather than automatically rerunning checks. Status returns a compact delta for a known revision; omit since for full state. Never launches workers or completes tasks. Main session only.",
     parameters: z.object({
       action: z.enum(["status", "queue", "portfolio", "resume", "assign", "running", "submit", "block", "question", "accept", "accept_reviewed", "revise"]),
       festival: z.string().optional(), task: z.string().optional(), worker: z.string().optional(),
@@ -259,7 +259,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
         if (params.action === "status") {
           const location = await deps.detect.locate(ctx.cwd);
           if (location.campRoot) await supervisorPortfolioQueue(deps, supervisor, sid, ctx.cwd);
-          return output({ ...supervisor.snapshot(sid, params.since), statusSource: "supervisor_reported", runtimeSource: "worker.runtime.source; absent means unverified" });
+          return output({ ...supervisor.snapshot(sid, params.since), nextActions: supervisor.state(sid).workers.map((row) => ({ assignment: row.id, nextAction: supervisorNextAction(row) })), statusSource: "supervisor_reported", runtimeSource: "worker.runtime.source; absent means unverified" });
         }
         if (params.action === "resume") {
           const location = await deps.detect.locate(ctx.cwd);
@@ -302,7 +302,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             }
           }
           pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sid));
-          return output(reconciliation);
+          return output({ ...reconciliation, nextActions: supervisor.state(sid).workers.map((row) => ({ assignment: row.id, nextAction: supervisorNextAction(row) })) });
         }
         if (params.action === "queue") return output((await supervisorQueue(deps, supervisor, sid, ctx.cwd, params.festival)).queue);
         if (params.action === "portfolio") return output(await supervisorPortfolioQueue(deps, supervisor, sid, ctx.cwd));
@@ -366,13 +366,14 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           const { dir: assignmentDir, campRoot } = await festivalLocation(deps, sid, ctx.cwd, assignment.festival);
           const ownership = await festivalOwner(assignmentDir);
           if (ownership?.sessionId !== sid) throw new Error("Festival ownership changed; this session cannot mutate its worker assignment.");
+          const blocked = (message: string, reasonCode: string, missingRequirements: string[], nextAction = supervisorNextAction(assignment)) => new SupervisorBlocked(message, reasonCode, missingRequirements, nextAction);
           if (params.action === "question") {
             const row = supervisor.question(sid, assignment.id, params.evidence ?? "");
             if ((await readPortfolioState(campRoot)).assignments.some((entry) => entry.id === row.assignmentId)) await updatePortfolioAssignment(campRoot, row.assignmentId, "blocked", { failure: row.question });
             result = row;
           } else if (params.action === "running") {
             const jobs = ctx.getAsyncJobSnapshot?.(), job = [...(jobs?.running ?? []), ...(jobs?.recent ?? [])].find((item) => item.id === params.runtimeId);
-            if (job?.type !== "task" || job.status !== "running" || (job.label !== assignment.worker && job.agentId !== assignment.worker)) throw new Error("Bind only a host-observed running task job whose label/agentId matches this assigned worker. Inspect fest_capabilities; do not invent runtime IDs.");
+            if (job?.type !== "task" || job.status !== "running" || (job.label !== assignment.worker && job.agentId !== assignment.worker)) throw blocked("Bind only a host-observed running task job whose label/agentId matches this assigned worker. Inspect fest_capabilities; do not invent runtime IDs.", "native_runtime_binding_required", ["Host-observed running task job matching the assigned worker"], { tool: "fest_capabilities", action: "inspect", assignment: assignment.id, instruction: "Inspect native jobs and bind the actual running matching task ID with fest_supervisor action=running. If the worker already stopped, reconcile with resume instead." });
             const row = supervisor.update(sid, assignment.id, "running", "");
             const observed = supervisor.observeRuntime(sid, { assignmentId: row.id, runtimeId: job.id, status: "running" }, "native_runtime");
             await updatePortfolioAssignment(campRoot, row.id, "running");
@@ -380,25 +381,25 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
             result = observed;
           } else if (params.action === "accept_reviewed") {
             const evidence = params.evidence ?? "";
-            if (!evidence.trim()) throw new Error("Provide concrete coordinator review evidence: inspected files, exercised checks, and observed results.");
-            if (!assignment.runtime || !["completed", "unverifiable"].includes(assignment.runtime.status)) {
-              throw new Error("Coordinator attestation requires a completed or explicitly unverifiable worker runtime; reconcile native lifecycle first.");
-            }
             if (!["assigned", "running", "blocked"].includes(assignment.status)) {
-              throw new Error(`Coordinator worktree acceptance cannot replace an existing ${assignment.status} assignment; use the normal independent review for submitted results.`);
+              throw blocked(`Coordinator worktree acceptance cannot replace an existing ${assignment.status} assignment; use the normal independent review for submitted results.`, "wrong_acceptance_path", ["An assignment without an existing worker submission"]);
             }
+            if (!assignment.runtime || !["completed", "unverifiable"].includes(assignment.runtime.status)) {
+              throw blocked("Coordinator attestation requires a completed or explicitly unverifiable worker runtime; reconcile native lifecycle first.", "runtime_reconciliation_required", ["Completed or explicitly unverifiable native lifecycle", "No active native worker"]);
+            }
+            if (!evidence.trim()) throw blocked("Provide concrete coordinator review evidence: inspected files, valid checks, and observed results.", "missing_review_evidence", ["Independent coordinator review evidence"], { tool: "fest_supervisor", action: "accept_reviewed", assignment: assignment.id, instruction: "Inspect the shared worktree and valid revision-bound evidence independently, then provide concrete review findings. Interactive confirmation is still required." });
             const jobs = ctx.getAsyncJobSnapshot?.();
-            if (!jobs) throw new Error("Cannot attest while native worker state is unavailable. Reconcile through fest_supervisor action=resume and retry.");
+            if (!jobs) throw blocked("Cannot attest while native worker state is unavailable. Reconcile through fest_supervisor action=resume and retry.", "native_snapshot_unavailable", ["Available native job snapshot proving no matching active worker"], { tool: "fest_supervisor", action: "resume", assignment: assignment.id, instruction: "Restore native job visibility and reconcile; retry coordinator attestation only once the native snapshot is available." });
             const active = (jobs.running ?? []).filter((job) =>
               job.type === "task" && job.status === "running" &&
               (job.id === assignment.runtime?.runtimeId || job.label === assignment.worker || job.agentId === assignment.worker));
-            if (active.length) throw new Error(`Worker ${assignment.worker} still has a running native job (${active.map((job) => job.id).join(", ")}); wait for it to stop before reviewing the shared worktree.`);
-            if (!ctx.ui?.confirm) throw new Error("Coordinator worktree acceptance requires an interactive native confirmation; no state changed.");
+            if (active.length) throw blocked(`Worker ${assignment.worker} still has a running native job (${active.map((job) => job.id).join(", ")}); wait for it to stop before reviewing the shared worktree.`, "native_worker_active", ["Matching native worker stopped"], { tool: "native_worker", action: "observe", assignment: assignment.id, instruction: "Wait for or message the existing active worker; recover its real result and use normal submission and review when available." });
+            if (!ctx.ui?.confirm) throw blocked("Coordinator worktree acceptance requires an interactive native confirmation; no state changed.", "interactive_confirmation_required", ["Interactive native confirmation UI"], { tool: "fest_supervisor", action: "accept_reviewed", assignment: assignment.id, instruction: "Return to a native interactive session with confirmation available; do not bypass confirmation." });
             const confirmed = await ctx.ui.confirm(
               "Accept coordinator-reviewed work?",
               `Confirm you inspected the shared worktree for ${assignment.task}, verified the stated evidence, and know worker ${assignment.worker} is no longer running. This records coordinator acceptance, not a worker submission. Evidence: ${evidence}`,
             );
-            if (!confirmed) throw new Error("Coordinator review cancelled; assignment remains open.");
+            if (!confirmed) throw blocked("Coordinator review cancelled; assignment remains open.", "confirmation_cancelled", ["Human confirmation of coordinator attestation"], { tool: "fest_supervisor", action: "status", assignment: assignment.id, instruction: "Respect cancellation. Keep the assignment open; request attestation again only after renewed human intent and valid prerequisites." });
             const team = await acceptFestivalTaskFromCoordinator(campRoot, assignmentDir, sid, assignment.id, evidence);
             const row = supervisor.update(sid, assignment.id, "accept_reviewed", evidence);
             await updatePortfolioAssignment(campRoot, row.id, "accepted", { review: evidence, reviewSource: "coordinator-worktree" });
@@ -406,7 +407,7 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           } else {
             let evidence = params.evidence ?? "", artifact: string | undefined;
             if (params.action === "submit") {
-              if (assignment.status !== "running") throw new Error(`Only a running worker can submit results (assignment status: ${assignment.status}). Do not submit coordinator notes as worker output. If the worker is completed or unverifiable and you independently reviewed the shared worktree, use action=accept_reviewed with concrete evidence; this requires interactive confirmation.`);
+              if (assignment.status !== "running") throw blocked(`Only a running worker can submit results (assignment status: ${assignment.status}). Do not submit coordinator notes as worker output. If the worker is completed or unverifiable and you independently reviewed the shared worktree, use action=accept_reviewed with concrete evidence; this requires interactive confirmation.`, "worker_not_running", ["Real running-worker result and recorded dispatch"], supervisorNextAction(assignment));
               const stored = hooks.storeReport
                 ? await hooks.storeReport(assignmentDir, evidence)
                 : await storeEvidenceBundle(assignmentDir, { kind: "worker", summary: evidence.trim().slice(0, 600), details: evidence });
@@ -436,8 +437,14 @@ export function registerSupervisorTools(pi: PiLike, deps: ToolDeps, supervisor: 
           }
         }
         pi.appendEntry?.(SUPERVISOR_ENTRY, supervisor.state(sid));
-        return output(result);
-      } catch (error) { return output({ kind: "supervisor_blocked", error: String(error) }); }
+        const resultAssignment = result && typeof result === "object" && "assignment" in result ? result.assignment : result;
+        const row = resultAssignment && typeof resultAssignment === "object" && "id" in resultAssignment
+          ? supervisor.state(sid).workers.find((worker) => worker.id === resultAssignment.id) : undefined;
+        return output(row ? { ...result as object, nextAction: supervisorNextAction(row) } : result);
+      } catch (error) {
+        const structured = error instanceof SupervisorBlocked ? error : new SupervisorBlocked(String(error), "supervisor_prerequisite_required", [String(error)], { tool: "fest_supervisor", action: "status", instruction: "Inspect current state and resolve the reported prerequisite before retrying the transition; do not probe acceptance or reword evidence." });
+        return output({ kind: "supervisor_blocked", error: String(error), reasonCode: structured.reasonCode, missingRequirements: structured.missingRequirements, nextAction: structured.nextAction, hint: structured.nextAction.instruction });
+      }
     },
   });
 }

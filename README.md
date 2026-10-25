@@ -154,6 +154,15 @@ no matching native worker is still running, and recording a separate
 `coordinator-worktree` acceptance (not a fabricated worker report). Acceptance
 does not complete the Festival task, commit changes or approve a gate.
 
+Completion and supervisor acceptance are state transitions, not diagnostic probes.
+Blocked transitions return a `reasonCode`, `missingRequirements`, and a structured
+`nextAction`; resolve that prerequisite before retrying instead of rewording the
+same evidence. Use normal acceptance for submitted worker results; reserve
+`accept_reviewed` for unavailable worker results after native lifecycle recovery.
+Independent review evaluates the implementation and existing evidence; it does
+not inherently require rerunning verification. Repeat a check only for a concrete
+coverage gap, contradictory result, or relevant change that invalidates its proof.
+
 Exact-file locks are acquired only while native `write`/`edit` calls execute and
 released when the call returns, including failed calls. Idle workers and
 different files hold no lock; overlapping writes serialize at the write
@@ -469,16 +478,23 @@ component, form, table, token and test file names for the agent to inspect;
 it never edits project files. The preview is not copied into the Festival and
 does not introduce a separate approval step.
 
-`fest_next` returns linked page paths, notes and wireframe paths with the task;
-`fest_supervisor` assignment contracts include only references linked to that
-task. `fest_validate` checks reference coverage and completed-task verification.
-For visual tasks,
-`fest_task_complete` requires one `visualEvidence` item per acceptance ID:
+`fest_next` returns linked page paths, notes and wireframe paths with the task,
+plus exact acceptance checks, required evidence fields and recorded-evidence
+validity. `fest_supervisor` assignment contracts include only references linked
+to that task. `fest_validate` checks reference coverage and completed-task
+verification. For visual tasks, `fest_task_complete` accepts one `visualEvidence`
+item per acceptance ID:
 `{page:"results", check:"AC-01", status:"verified", proof:"search test log",
 route:"/results", viewport:"1280x800", state:"initial"}`. Use `untested`
 with a reason if the interaction cannot be exercised; never invent browser
-proof. `failed` checks block completion. Evidence is saved with the reference
-revision in `references/verification.json`. `fest_gate_submit` can take new
+proof. `failed` checks block completion. Evidence is saved in
+`references/verification.json`, bound to the reference revision and the approved
+plan's declared source-file contents. Omitting `visualEvidence` reuses valid
+recorded evidence without rewriting it; an explicit empty array does not.
+Legacy records without a source fingerprint and records invalidated by reference
+or declared-source changes require fresh evidence. Undeclared project files are
+not covered by this fingerprint; keep the approved file list complete and
+reverify when other relevant inputs change. `fest_gate_submit` can take new
 evidence (including `task` for already completed tasks) to reverify checks.
 Missing, failed, or stale evidence blocks submission; untested checks are
 explicitly shown to the human. `/fest approve` also enforces these checks;

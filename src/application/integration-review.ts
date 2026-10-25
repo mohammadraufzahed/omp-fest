@@ -71,6 +71,44 @@ export interface VisualComparison {
 }
 export const INTEGRATION_CHECKS = ["acceptance", "integration", "layout", "interactions", "responsive", "console"] as const;
 
+
+/** Content identity for the source files declared by the approved project plan. */
+export async function approvedSourceRevision(festivalDir: string): Promise<string | undefined> {
+  const content = await readFile(join(festivalDir, "APPROVED_PLAN.json"), "utf8").catch((error: unknown) => {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (content === undefined) return undefined;
+  const artifact: unknown = JSON.parse(content);
+  if (!artifact || typeof artifact !== "object" || !("workingDir" in artifact) || typeof artifact.workingDir !== "string" || !artifact.workingDir.trim() ||
+      !("spec" in artifact) || !artifact.spec || typeof artifact.spec !== "object" || !("phases" in artifact.spec) || !Array.isArray(artifact.spec.phases)) return undefined;
+  const project = isAbsolute(artifact.workingDir) ? artifact.workingDir : resolve(festivalDir, "../../..", artifact.workingDir);
+  const sourcePaths = new Set<string>();
+  for (const phase of artifact.spec.phases as unknown[]) {
+    if (!phase || typeof phase !== "object" || !("sequences" in phase) || !Array.isArray(phase.sequences)) continue;
+    for (const sequence of phase.sequences as unknown[]) {
+      if (!sequence || typeof sequence !== "object" || !("tasks" in sequence) || !Array.isArray(sequence.tasks)) continue;
+      for (const task of sequence.tasks as unknown[]) {
+        if (!task || typeof task !== "object" || !("files" in task) || !Array.isArray(task.files)) continue;
+        for (const entry of task.files as unknown[]) if (entry && typeof entry === "object" && "path" in entry && typeof entry.path === "string") sourcePaths.add(entry.path);
+      }
+    }
+  }
+  if (!sourcePaths.size) return undefined;
+  const hash = createHash("sha256").update(content).update("\0").update(project);
+  for (const path of [...sourcePaths].sort()) {
+    const target = resolve(project, path);
+    const rel = relative(project, target);
+    if (isAbsolute(path) || rel === ".." || rel.startsWith(`..${sep}`)) throw new Error("Approved source file escapes project");
+    hash.update("\0").update(path).update("\0");
+    try {
+      const contents = await readFile(target);
+      hash.update("present:").update(String(contents.length)).update("\0").update(contents);
+    }
+    catch (error) { if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") hash.update("missing"); else throw error; }
+  }
+  return hash.digest("hex");
+}
 async function reviewRevision(festivalDir: string, detect: CampDetect) {
   const hash = createHash("sha256");
   const tasks = await detect.pendingTasks(festivalDir);
@@ -80,32 +118,7 @@ async function reviewRevision(festivalDir: string, detect: CampDetect) {
   for (const file of ["APPROVED_PLAN.json", "references/verification.json"]) {
     try { hash.update(await readFile(join(festivalDir, file), "utf8")); }
     catch (error) { if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error; }
-    if (file === "APPROVED_PLAN.json") {
-      const artifact: unknown = JSON.parse(await readFile(join(festivalDir, file), "utf8").catch(() => "null"));
-      if (artifact && typeof artifact === "object" && "workingDir" in artifact && typeof artifact.workingDir === "string" && "spec" in artifact && artifact.spec && typeof artifact.spec === "object" && "phases" in artifact.spec && Array.isArray(artifact.spec.phases)) {
-        const project = isAbsolute(artifact.workingDir) ? artifact.workingDir : resolve(festivalDir, "../../..", artifact.workingDir);
-        const sourcePaths = new Set<string>();
-        const phases: unknown[] = artifact.spec.phases;
-        for (const phase of phases) {
-          if (!phase || typeof phase !== "object" || !("sequences" in phase) || !Array.isArray(phase.sequences)) continue;
-          for (const sequence of phase.sequences as unknown[]) {
-            if (!sequence || typeof sequence !== "object" || !("tasks" in sequence) || !Array.isArray(sequence.tasks)) continue;
-            for (const task of sequence.tasks as unknown[]) {
-              if (!task || typeof task !== "object" || !("files" in task) || !Array.isArray(task.files)) continue;
-              for (const entry of task.files as unknown[]) if (entry && typeof entry === "object" && "path" in entry && typeof entry.path === "string") sourcePaths.add(entry.path);
-            }
-          }
-        }
-        for (const path of [...sourcePaths].sort()) {
-          const target = resolve(project, path);
-          const rel = relative(project, target);
-          if (isAbsolute(path) || rel === ".." || rel.startsWith(`..${sep}`)) throw new Error("Approved source file escapes project");
-          hash.update(path);
-          try { hash.update(await readFile(target)); }
-          catch (error) { if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") hash.update("missing"); else throw error; }
-        }
-      }
-    }
+    if (file === "APPROVED_PLAN.json") hash.update(await approvedSourceRevision(festivalDir) ?? "no-approved-source-revision");
   }
   return hash.digest("hex");
 }

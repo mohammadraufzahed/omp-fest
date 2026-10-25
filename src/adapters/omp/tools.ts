@@ -17,7 +17,7 @@ import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { resolveWorkingDir, stampWorkingDir } from "../../application/sequence-goals.js";
 import { festivalConstraints, seedFestivalRules, stampGateRules } from "../../application/festival-rules.js";
-import { recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
+import { inspectTaskVisualEvidence, recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
 import { applyReferenceRevision, findReuseCandidates, inspectReferenceRevision, renderPlanPreview } from "../../application/visual-plan-review.js";
 import { installVisualReferences, prepareVisualReferences, referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
 import { createWireframe, WireframeInputError, type WireframeSpec } from "../../application/visual-wireframe.js";
@@ -356,6 +356,16 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           return textResult({ kind: "blocked", errors: visual.issues, hint: "Fix the visual references and task links, then call fest_next again." });
         }
         const visualReferences = await referencesForTask(dir, unit.doc);
+        const checks = taskChecks(unit.doc);
+        const completionRequirements = {
+          visualChecks: checks.map(({ page, id }) => ({
+            page, check: id, description: visualReferences.find((reference) => reference.page === page)?.checks.find((check) => check.id === id)?.description,
+            requiredFields: ["status", "proof"], verifiedFields: ["route", "viewport", "state"],
+          })),
+          ...(checks.length ? { visualEvidence: await inspectTaskVisualEvidence(dir, festivalRelativeTaskPath(dir, unit.path) ?? unit.path, unit.doc) } : {}),
+          evidence: "Summarize the task's Done When checklist verification. Existing valid visual evidence is reused when visualEvidence is omitted; untested checks remain subject to human review.",
+          prerequisites: ["No project reservation conflict", "Independent acceptance of submitted worker/team work", "Festival CLI quality gates"],
+        };
         const sid = sessionIdOf(ctx);
         const stale = deps.tracker.unfinishedFor(sid) ? deps.tracker.openTaskPathFor(sid) : undefined;
         deps.tracker.taskOpened(sid, festivalRelativeTaskPath(dir, unit.path) ?? unit.path);
@@ -364,6 +374,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
             ...unit,
             browserVerification: BROWSER_VERIFICATION_POLICY,
             supervisor: SUPERVISOR_POLICY,
+            completionRequirements,
             ...(visualReferences.length > 0 ? { visualReferences } : {}),
             warning: `Previous unit ${stale} was opened but never completed+committed — the work record is stale. Finish its fest_task_complete/fest_commit before starting this one.`,
           });
@@ -372,6 +383,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           ...unit,
           browserVerification: BROWSER_VERIFICATION_POLICY,
           supervisor: SUPERVISOR_POLICY,
+          completionRequirements,
           ...(visualReferences.length > 0 ? { visualReferences } : {}),
         });
       }
@@ -411,17 +423,26 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const pausedReason = deps.tracker.pausedReasonFor(sid, pausedTask);
       if (pausedReason) return textResult({
         kind: "completion_blocked", task: pausedTask, blocker: pausedReason,
+        reasonCode: "project_reservation_conflict", missingRequirements: [{ requirement: "project_reservation_clear", details: pausedReason }],
+        nextAction: { tool: "fest_supervisor", action: "queue", instruction: "Wait for the conflicting reservation to clear before completing or committing this task." },
         hint: "This task is paused by a project reservation conflict. Do not mark it complete or commit; wait until the supervisor queue clears the reservation.",
       });
       const visual = await validateVisualReferences(dir, deps.detect);
       if (visual.issues.length) {
-        return textResult({ kind: "completion_blocked", issues: visual.issues });
+        return textResult({
+          kind: "completion_blocked", issues: visual.issues, reasonCode: "visual_references_invalid",
+          missingRequirements: visual.issues.map((details) => ({ requirement: "valid_visual_reference", details })),
+          nextAction: { action: "repair_visual_references", instruction: "Repair the listed reference or task-link issues, then retry completion. Do not rerun unrelated checks." },
+        });
       }
       const current = !params.task && !opened && visual.pages.length ? await deps.fest.next(dir) : undefined;
       const requestedTaskPath = params.task ?? opened ?? (current?.kind === "task" ? current.path : undefined);
       const taskPath = requestedTaskPath ? festivalRelativeTaskPath(dir, requestedTaskPath) : undefined;
       if (requestedTaskPath && !taskPath) {
-        return textResult({ kind: "completion_blocked", task: requestedTaskPath, hint: "Task path must resolve inside the selected festival." });
+        return textResult({ kind: "completion_blocked", task: requestedTaskPath, reasonCode: "invalid_task_path",
+          missingRequirements: [{ requirement: "festival_relative_task_path" }],
+          nextAction: { tool: "fest_next", instruction: "Use the exact task path returned for this festival." },
+          hint: "Task path must resolve inside the selected festival." });
       }
       const task = taskPath
         ? (await deps.detect.pendingTasks(dir)).find((item) => festivalRelativeTaskPath(dir, item.path) === taskPath)
@@ -432,37 +453,64 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         taskDoc = await readFile(join(dir, completionPath), "utf8").catch(() => undefined);
       }
       if (visual.pages.length && !taskDoc) {
-        return textResult({ kind: "completion_blocked", hint: "Use a valid task path returned by fest_next so its visual checks can be verified." });
+        return textResult({ kind: "completion_blocked", reasonCode: "task_document_missing",
+          missingRequirements: [{ requirement: "readable_task_document", task: completionPath }],
+          nextAction: { tool: "fest_next", instruction: "Use a valid task path returned for this festival so its visual checks can be inspected." },
+          hint: "Use a valid task path returned by fest_next so its visual checks can be verified." });
       }
       if (taskDoc && completionPath) {
         const checks = taskChecks(taskDoc);
         if (checks.length > 0) {
-          try {
-            const proposed = params.visualEvidence ?? [];
-            if (proposed.some((entry) => entry.status === "failed")) {
-              return textResult({ kind: "completion_blocked", hint: "Fix failed visual checks before marking the task completed." });
+          const verification = await inspectTaskVisualEvidence(dir, completionPath, taskDoc, params.visualEvidence);
+          if (!verification.valid) {
+            return textResult({
+              kind: "completion_blocked", task: completionPath, reasonCode: "visual_evidence_required",
+              error: verification.issues.join("\n"), missingRequirements: verification.missingRequirements,
+              expectedChecks: verification.checks, freshness: verification.freshness,
+              nextAction: {
+                tool: "fest_task_complete", task: completionPath, field: "visualEvidence",
+                checks: verification.missingRequirements,
+                instruction: "Repair failed visual checks and provide truthful evidence covering exactly the task's expected checks. Verified checks need proof, route, viewport and state; unavailable checks may be marked untested for human review. Reuse existing nonvisual verification; missing visual evidence alone does not require rerunning tests.",
+              },
+              hint: "Provide evidence for each task acceptance check, or mark it untested for human review.",
+            });
+          }
+          if (params.visualEvidence !== undefined) {
+            try {
+              await recordVisualEvidence(dir, completionPath, taskDoc, params.visualEvidence);
+            } catch (error) {
+              return textResult({ kind: "completion_blocked", reasonCode: "visual_evidence_record_failed", error: String(error),
+                missingRequirements: [{ requirement: "persisted_visual_evidence", details: String(error) }],
+                nextAction: { action: "repair_evidence_store", instruction: "Resolve the reported evidence-store problem and retry with the same evidence; do not rerun unrelated checks." },
+                hint: "Visual evidence could not be recorded." });
             }
-            await recordVisualEvidence(dir, completionPath, taskDoc, proposed);
-          } catch (error) {
-            return textResult({ kind: "completion_blocked", error: String(error), hint: "Provide evidence for each task acceptance check, or mark it untested for human review." });
           }
         }
       }
       const assignments = supervisor.state(sessionIdOf(ctx)).workers.filter((worker) =>
         worker.festival === basename(dir) && worker.task === (task?.path ?? taskPath));
       if (assignments.some((worker) => worker.status !== "accepted" && worker.status !== "failed")) {
-        return textResult({ kind: "completion_blocked", hint: "Worker submission requires independent supervisor review and acceptance before festival completion." });
+        return textResult({ kind: "completion_blocked", reasonCode: "worker_acceptance_required",
+          missingRequirements: assignments.filter((worker) => worker.status !== "accepted" && worker.status !== "failed").map((worker) => ({ requirement: "independent_worker_acceptance", assignmentId: worker.id, status: worker.status })),
+          nextAction: { tool: "fest_supervisor", action: "status", instruction: "Inspect pending workers, obtain independent review and accept each submitted worker before completing this task." },
+          hint: "Worker submission requires independent supervisor review and acceptance before festival completion." });
       }
       const campRoot = await campRootOf(deps, ctx);
       const team = campRoot ? await readFestivalTeam(campRoot, dir) : undefined;
       if (team?.assignments.some((assignment) =>
         assignment.task === (task?.path ?? taskPath) && (assignment.status === "claimed" || assignment.status === "submitted"))) {
-        return textResult({ kind: "completion_blocked", hint: "A joined session still owns or has submitted this task. Review or release its shared team assignment before completing it." });
+        return textResult({ kind: "completion_blocked", reasonCode: "team_assignment_unresolved",
+          missingRequirements: [{ requirement: "team_assignment_review_or_release", task: completionPath }],
+          nextAction: { tool: "fest_team", action: "status", instruction: "Inspect this task's assignment and independently review and accept submitted work, or release the claim, before completing it." },
+          hint: "A joined session still owns or has submitted this task. Review or release its shared team assignment before completing it." });
       }
       const completion = await deps.fest.taskComplete(dir, task?.path ?? taskPath ?? "", params.evidence);
       if (!completion.ok) {
         return textResult({
           status: "completion_blocked",
+          kind: "completion_blocked", reasonCode: "festival_quality_gate_failed",
+          missingRequirements: [{ requirement: "festival_quality_gate", details: completion.output }],
+          nextAction: { action: "resolve_quality_gate", instruction: "Resolve only the requirements reported in output before retrying completion.", output: completion.output },
           task: task?.path ?? taskPath ?? params.task,
           output: completion.output,
           hint: "fest refused the completion — quality gates run first. Read the output, fix what it demands, then retry.",

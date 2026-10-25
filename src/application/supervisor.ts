@@ -12,6 +12,8 @@ export const SUPERVISOR_POLICY = [
   "Continue assignment, worker results, independent review, integration, task completion and commits until each festival is complete, reaches a human gate, an explicit pause or a real blocker. The extension never launches agents itself; the main agent uses host-provided native subagent tools.",
   "Submit returned results through fest_supervisor; native completion is not acceptance. Independently review and verify each festival's work, accept submitted results with evidence, then fest_task_complete and fest_commit. Keep integration, review, task completion, gates and commits under the main agent's responsibility.",
   "If a native worker disappears or becomes unverifiable, never fabricate its submission. After confirming no native job is still active, the coordinator may independently attest to work inspected in the shared worktree with accept_reviewed; this is a separate, interactive, audited acceptance and keeps the worker report empty.",
+  "Completion and acceptance calls are state transitions, not probes. Read status and its nextAction first; after a blocked response retry only when the named prerequisite has changed, not by rewording evidence. External prerequisites may be repaired and retried.",
+  "Reuse valid revision-bound verification evidence when its task, worktree revision, scope and required checks still match; independent review does not inherently require rerunning checks. Inspect the changes and evidence independently, rerunning only invalidated or missing checks. Never reuse evidence to bypass visual requirements or human gates.",
   "Use host-provided native concurrency within the portfolio limit; omp-fest does not itself launch agents. Team task claims prevent duplicate assignment across sessions, while exact-file write locks are held only during native writes.",
   "Answer worker questions through the shared team inbox and send the answer to the same native worker. Human gates remain human-only.",
 ].join(" ");
@@ -46,6 +48,33 @@ export interface Reconciliation {
   paused: boolean;
   unfinished: { assignment: WorkerAssignment; launchAllowed: false; next: string }[];
   unknownObservations: string[];
+}
+
+export interface SupervisorNextAction {
+  tool: string;
+  action: string;
+  assignment?: string;
+  instruction: string;
+}
+
+/** Describe the real lifecycle rather than suggesting speculative acceptance calls. */
+export function supervisorNextAction(row: WorkerAssignment): SupervisorNextAction {
+  const step = (tool: string, action: string, instruction: string): SupervisorNextAction => ({ tool, action, assignment: row.id, instruction });
+  if (row.status === "accepted") return step("fest_task_complete", "complete", "Record verified task completion; acceptance alone does not complete the task. Preserve integration and human gates.");
+  if (row.status === "failed" || row.runtime?.status === "failed" || row.runtime?.status === "exited") return step("fest_supervisor", "portfolio", "Confirm the old runtime is stopped, reconcile with resume, then select a fresh eligible assignment; never revive this worker.");
+  if (row.status === "ready_for_review") {
+    if (row.runtime?.status === "unverifiable") return step("fest_supervisor", "resume", "Reconcile the submitted worker's native lifecycle before normal acceptance. Preserve its submission; accept_reviewed cannot replace it.");
+    return step("fest_supervisor", "accept", "Independently inspect the existing worker submission and valid revision-bound evidence, then accept with concrete review evidence or revise with findings. Do not use accept_reviewed.");
+  }
+  if (row.runtime?.status === "completed" || row.runtime?.status === "unverifiable") return step("fest_supervisor", "accept_reviewed", "First recover any real worker result and submit it through the normal running-worker path if available. Only if no result is recoverable, independently inspect the shared worktree, confirm no native worker is active, and request interactive coordinator attestation with review evidence.");
+  if (row.runtime?.status === "running") return step("native_worker", "observe", "Observe or message the existing native worker and submit its actual returned result; do not relaunch or attest while it is active.");
+  return step("fest_supervisor", "resume", "Reconcile the existing assignment against native runtime state before recovery or acceptance; do not fabricate a runtime ID or duplicate dispatch.");
+}
+
+export class SupervisorBlocked extends Error {
+  constructor(message: string, readonly reasonCode: string, readonly missingRequirements: string[], readonly nextAction: SupervisorNextAction) {
+    super(message);
+  }
 }
 
 const runtimeStatuses: readonly string[] = ["running", "completed", "failed", "exited", "unverifiable"];
@@ -152,23 +181,23 @@ export class Supervisor {
   update(session: string, id: string, action: "running" | "submit" | "block" | "accept" | "accept_reviewed" | "revise", evidence: string, reportArtifact?: string): WorkerAssignment {
     const state = this.state(session), row = state.workers.find((item) => item.id === id);
     if (!row) throw new Error("Unknown assignment in this supervisor session.");
-    if (row.status === "accepted") throw new Error("Accepted assignments cannot be changed.");
-    if (row.status === "failed") throw new Error("Failed assignments are terminal; assign a fresh worker after failure.");
+    if (row.status === "accepted") throw new SupervisorBlocked("Accepted assignments cannot be changed.", "assignment_already_accepted", ["An open assignment"], supervisorNextAction(row));
+    if (row.status === "failed") throw new SupervisorBlocked("Failed assignments are terminal; assign a fresh worker after failure.", "assignment_failed", ["A fresh eligible assignment after confirming the old runtime stopped"], supervisorNextAction(row));
     if (action === "running") {
       if (row.status !== "assigned" && row.status !== "blocked") throw new Error("Only assigned or blocked workers can start/resume.");
-      if (row.runtime && ["failed", "exited", "unverifiable"].includes(row.runtime.status)) throw new Error("Reconcile native lifecycle before continuing this worker; do not relaunch it.");
+      if (row.runtime && ["failed", "exited", "unverifiable"].includes(row.runtime.status)) throw new SupervisorBlocked("Reconcile native lifecycle before continuing this worker; do not relaunch it.", "runtime_reconciliation_required", ["Verified native lifecycle permitting continuation"], { tool: "fest_supervisor", action: "resume", assignment: row.id, instruction: "Reconcile the existing native runtime before continuing; do not relaunch or invent a runtime ID." });
       row.status = "running";
     } else {
-      if (!evidence.trim()) throw new Error("Provide actual evidence or a concrete blocker.");
+      if (!evidence.trim()) throw new SupervisorBlocked("Provide actual evidence or a concrete blocker.", action === "accept" || action === "accept_reviewed" || action === "revise" ? "missing_review_evidence" : "missing_evidence", ["Concrete evidence for the requested transition"], { tool: "fest_supervisor", action, assignment: row.id, instruction: "Independently inspect the work and valid revision-bound evidence, then provide concrete findings and observed results; do not invent or merely reword evidence." });
       if (action === "accept_reviewed") {
-        if (!["assigned", "running", "blocked"].includes(row.status)) throw new Error("Coordinator attestation only applies before a worker submission.");
-        if (!row.runtime || !["completed", "unverifiable"].includes(row.runtime.status)) throw new Error("Coordinator attestation requires a completed or explicitly unverifiable native runtime.");
+        if (!["assigned", "running", "blocked"].includes(row.status)) throw new SupervisorBlocked("Coordinator attestation only applies before a worker submission.", "wrong_acceptance_path", ["An assignment without an existing worker submission"], supervisorNextAction(row));
+        if (!row.runtime || !["completed", "unverifiable"].includes(row.runtime.status)) throw new SupervisorBlocked("Coordinator attestation requires a completed or explicitly unverifiable native runtime.", "runtime_reconciliation_required", ["Completed or explicitly unverifiable native lifecycle", "No active native worker"], supervisorNextAction(row));
         row.review = evidence;
         row.reviewSource = "coordinator-worktree";
         row.status = "accepted";
       } else if (action === "accept" || action === "revise") {
-        if (row.status !== "ready_for_review") throw new Error("Only submitted results can be reviewed. If you inspected the shared worktree after a worker became unavailable, use accept_reviewed.");
-        if (action === "accept" && row.runtime && ["failed", "exited", "unverifiable"].includes(row.runtime.status)) throw new Error("Native lifecycle is failed, exited or unverifiable; reconcile before accepting a worker submission. Use accept_reviewed only for independently inspected work.");
+        if (row.status !== "ready_for_review") throw new SupervisorBlocked("Only submitted results can be reviewed. Reconcile the actual lifecycle before choosing an acceptance path.", "worker_submission_required", ["A real worker submission ready for independent review"], supervisorNextAction(row));
+        if (action === "accept" && row.runtime && ["failed", "exited", "unverifiable"].includes(row.runtime.status)) throw new SupervisorBlocked("Native lifecycle is failed, exited or unverifiable; reconcile before accepting a worker submission.", "runtime_reconciliation_required", ["Reconciled native lifecycle for the existing worker submission"], { tool: "fest_supervisor", action: "resume", assignment: row.id, instruction: "Recover native lifecycle evidence for this submission; do not switch to accept_reviewed or fabricate worker output." });
         row.review = evidence; row.reviewSource = "worker-submission"; row.status = action === "accept" ? "accepted" : "blocked";
       } else {
         if (action === "submit" && row.status !== "running") throw new Error("Only a running worker can submit results; record the real dispatch first. A coordinator review is not a worker submission.");

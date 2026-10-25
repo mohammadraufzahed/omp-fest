@@ -309,7 +309,11 @@ describe("festival supervisor", () => {
       const assignment = supervisor.state("s").workers[0]!;
       expect(assignment).toMatchObject({ worker: "A", status: "assigned" });
       expect(await listProjectReservations(project)).toEqual([]);
-      expect(await call({ action: "running", assignment: assignment.id })).toMatchObject({ kind: "supervisor_blocked" });
+      expect(await call({ action: "running", assignment: assignment.id })).toMatchObject({
+        kind: "supervisor_blocked", reasonCode: "native_runtime_binding_required",
+        missingRequirements: ["Host-observed running task job matching the assigned worker"],
+        nextAction: { tool: "fest_capabilities", action: "inspect", assignment: assignment.id },
+      });
       expect(supervisor.state("s").workers[0]?.status).toBe("assigned");
       await call({ action: "running", assignment: assignment.id, runtimeId: "native-a" });
       expect(supervisor.state("s").workers[0]?.runtime).toMatchObject({ runtimeId: "native-a", status: "running" });
@@ -322,6 +326,15 @@ describe("festival supervisor", () => {
       const resumedPortfolio = await supervisorPortfolioQueue(deps, restarted, "s", root);
       expect(restarted.state("s").workers[0]).toMatchObject({ id: assignment.id, status: "ready_for_review", report: submitted.report });
       expect(resumedPortfolio.queue.waiting.some((row) => row.festival === "festival" && row.task === task && row.reason.includes("owns this task"))).toBe(true);
+      const statusBeforeReview = await call({ action: "status" });
+      expect(statusBeforeReview.nextActions).toMatchObject([{ assignment: assignment.id, nextAction: { action: "accept" } }]);
+      expect(await call({ action: "accept_reviewed", assignment: assignment.id, evidence: "Reviewed existing submission" })).toMatchObject({
+        reasonCode: "wrong_acceptance_path", nextAction: { action: "accept", assignment: assignment.id },
+      });
+      expect(await call({ action: "accept", assignment: assignment.id, evidence: " " })).toMatchObject({
+        reasonCode: "missing_review_evidence", nextAction: { action: "accept" },
+      });
+      expect(supervisor.state("s").workers[0]?.status).toBe("ready_for_review");
       const accepted = await call({ action: "accept", assignment: assignment.id, evidence: "Independently exercised the integrated behavior" });
       expect(accepted).toMatchObject({ assignment: { status: "accepted" }, next: { kind: "dispatch_queue", candidates: [] } });
       const reviewedSupervisor = new Supervisor();
@@ -383,6 +396,11 @@ describe("festival supervisor", () => {
       };
       await call({ action: "assign", task, worker: "Worker A" });
       const assignment = supervisor.state("coordinator").workers[0]!;
+      expect(await call({ action: "accept_reviewed", assignment: assignment.id, evidence: "Inspected worktree" })).toMatchObject({
+        reasonCode: "runtime_reconciliation_required",
+        nextAction: { action: "resume", assignment: assignment.id },
+      });
+      expect(confirm).not.toHaveBeenCalled();
       supervisor.observeRuntime("coordinator", {
         assignmentId: assignment.id, status: "unverifiable", detail: "No native job currently observed",
       }, "unverified");
@@ -392,6 +410,7 @@ describe("festival supervisor", () => {
       running = [{ id: "still-writing", type: "task", status: "running", label: "Worker A" }];
       const active = await call({ action: "accept_reviewed", assignment: assignment.id, evidence: "Reviewed files and checks" });
       expect(active.error).toContain("still has a running native job");
+      expect(active).toMatchObject({ reasonCode: "native_worker_active", nextAction: { tool: "native_worker", action: "observe" } });
       expect(confirm).not.toHaveBeenCalled();
       running = [];
 
@@ -405,6 +424,7 @@ describe("festival supervisor", () => {
       const statusWorkers = (status.state as { workers: { id: string; status: string; runtime?: { status: string } }[] }).workers;
       expect(statusWorkers).toHaveLength(1);
       expect(statusWorkers[0]).toMatchObject({ id: assignment.id, status: "blocked", runtime: { status: "unverifiable" } });
+      expect(status.nextActions).toMatchObject([{ assignment: assignment.id, nextAction: { action: "accept_reviewed" } }]);
 
       const nextCoordinator = "coordinator-next";
       await joinFestivalTeam(root, festival, nextCoordinator, "coordinator");
