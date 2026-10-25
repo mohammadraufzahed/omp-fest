@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { withStaleAwareLock } from "./fs-lock.js";
+import { processIsAlive, withStaleAwareLock } from "./fs-lock.js";
 
 const JOURNAL_VERSION = 1;
 const MARKER = ".omp-fest-creation.json";
@@ -9,7 +10,7 @@ const OWNER = ".omp-fest-owner.json";
 const APPROVED_PLAN = "APPROVED_PLAN.json";
 const QUARANTINE = ".omp-fest-quarantine.json";
 type Journal = CreationReceipt & { version: number; state: "scaffolding"; preexisting: string[]; festivalDir?: string };
-export interface CreationReceipt { id: string; name: string; planPath: string; sessionId: string; startedAt: string; journalPath: string }
+export interface CreationReceipt { id: string; name: string; planPath: string; sessionId: string; startedAt: string; journalPath: string; pid?: number; host?: string }
 export interface FestivalCreationOrphan { receipt: CreationReceipt; festivalDir?: string }
 
 function inside(root: string, path: string): boolean {
@@ -37,7 +38,9 @@ function validReceipt(value: unknown): asserts value is Journal {
       typeof j.name !== "string" || typeof j.planPath !== "string" || typeof j.sessionId !== "string" || !j.sessionId ||
       typeof j.startedAt !== "string" || !Number.isFinite(Date.parse(j.startedAt)) || typeof j.journalPath !== "string" ||
       !Array.isArray(j.preexisting) || j.preexisting.some((n) => typeof n !== "string" || n === "." || n === ".." || n.includes(sep)) ||
-      (j.festivalDir !== undefined && typeof j.festivalDir !== "string")) throw new Error("Invalid festival creation journal.");
+      (j.festivalDir !== undefined && typeof j.festivalDir !== "string") ||
+      (j.pid !== undefined && (typeof j.pid !== "number" || !Number.isInteger(j.pid))) ||
+      (j.host !== undefined && typeof j.host !== "string")) throw new Error("Invalid festival creation journal.");
 }
 async function readJournal(path: string, expectedRoot: string): Promise<Journal> {
   const info = await lstat(path);
@@ -118,19 +121,37 @@ async function withCreationIndexLock<T>(directory: string, action: () => Promise
  */
 export function classifyCreationOrphan(orphan: FestivalCreationOrphan, nowMs = Date.now()): "resume" | "stale" | "in_flight" {
   if (orphan.festivalDir) return "resume";
+  // A recorded scaffold process that no longer exists crashed — treat as stale.
+  if (orphan.receipt.pid !== undefined && orphan.receipt.host === hostname() && !processIsAlive(orphan.receipt.pid)) return "stale";
   return nowMs - Date.parse(orphan.receipt.startedAt) > STALE_JOURNAL_MS ? "stale" : "in_flight";
 }
 
 /** Remove a verified-stale journal that never recorded a festival directory. */
 export async function clearStaleCreationJournal(campRoot: string, orphan: FestivalCreationOrphan): Promise<void> {
-  const camp = await realpath(campRoot);
   if (classifyCreationOrphan(orphan) !== "stale") throw new Error("Only stale journals without a festival directory may be cleared automatically.");
+  await clearCreationJournal(campRoot, orphan);
+}
+
+/** Remove a journal-only orphan (no festivalDir) after re-verifying its id under the index lock. */
+export async function clearCreationJournal(campRoot: string, orphan: FestivalCreationOrphan): Promise<void> {
+  const camp = await realpath(campRoot);
   const dir = await ensureStorage(camp);
   await withCreationIndexLock(dir, async () => {
     const current = await readJournal(orphan.receipt.journalPath, camp);
     if (current.id !== orphan.receipt.id || current.festivalDir) throw new Error("Creation journal changed since inspection; reread orphans before clearing.");
     await rm(orphan.receipt.journalPath);
   });
+}
+
+/**
+ * True when the journal's scaffold may still be running: a different session
+ * with a recorded live pid on this host, or a recent journal with unknown
+ * liveness. Own-session retries and dead/aged journals never count as live.
+ */
+export function creationJournalMayBeLive(orphan: FestivalCreationOrphan, sessionId: string, nowMs = Date.now()): boolean {
+  if (orphan.receipt.sessionId === sessionId) return false;
+  if (orphan.receipt.pid !== undefined && orphan.receipt.host === hostname()) return processIsAlive(orphan.receipt.pid);
+  return nowMs - Date.parse(orphan.receipt.startedAt) <= STALE_JOURNAL_MS;
 }
 
 export async function beginFestivalCreation(campRoot: string, name: string, planPath: string, sessionId: string): Promise<CreationReceipt> {
@@ -140,7 +161,9 @@ export async function beginFestivalCreation(campRoot: string, name: string, plan
   const dir = await ensureStorage(camp);
   return withCreationIndexLock(dir, async () => {
     const collisions = (await listFestivalCreationOrphans(camp)).filter((orphan) => orphan.receipt.name === name);
-    const unresolved = collisions.filter((orphan) => classifyCreationOrphan(orphan) !== "stale");
+    // Auto-clear stale, dead-pid, and same-session journals; only a possibly-live
+    // foreign scaffold blocks the retry.
+    const unresolved = collisions.filter((orphan) => classifyCreationOrphan(orphan) !== "stale" && creationJournalMayBeLive(orphan, sessionId));
     if (unresolved.length) {
       throw new Error(`Festival ${name} already has an incomplete creation transaction ${unresolved[0]?.receipt.id ?? ""}. Review /fest orphans before retrying.`);
     }
@@ -150,7 +173,7 @@ export async function beginFestivalCreation(campRoot: string, name: string, plan
     const existing = await lstat(join(planning, name)).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });
     if (existing) throw new Error(`Festival ${name} already exists in planning; existing data is never overwritten.`);
     const id = randomUUID(), journalPath = join(dir, `${id}.json`);
-    const record: Journal = { version: JOURNAL_VERSION, id, name, planPath, sessionId, startedAt: new Date().toISOString(), journalPath, state: "scaffolding", preexisting: await readdir(planning) };
+    const record: Journal = { version: JOURNAL_VERSION, id, name, planPath, sessionId, startedAt: new Date().toISOString(), journalPath, state: "scaffolding", preexisting: await readdir(planning), pid: process.pid, host: hostname() };
     const temporary = `${journalPath}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, { flag: "wx", mode: 0o600 });
@@ -158,7 +181,7 @@ export async function beginFestivalCreation(campRoot: string, name: string, plan
     } finally {
       await rm(temporary, { force: true });
     }
-    return { id, name, planPath, sessionId, startedAt: record.startedAt, journalPath };
+    return { id, name, planPath, sessionId, startedAt: record.startedAt, journalPath, pid: record.pid, host: record.host };
   });
 }
 
@@ -258,7 +281,7 @@ export async function listFestivalCreationOrphans(campRoot: string): Promise<Fes
     try {
       const journal = await readJournal(join(dir, entry), camp);
       if (`${journal.id}.json` !== entry) continue;
-      result.push({ receipt: { id: journal.id, name: journal.name, planPath: journal.planPath, sessionId: journal.sessionId, startedAt: journal.startedAt, journalPath: journal.journalPath }, ...(journal.festivalDir ? { festivalDir: journal.festivalDir } : {}) });
+      result.push({ receipt: { id: journal.id, name: journal.name, planPath: journal.planPath, sessionId: journal.sessionId, startedAt: journal.startedAt, journalPath: journal.journalPath, ...(journal.pid !== undefined ? { pid: journal.pid } : {}), ...(journal.host !== undefined ? { host: journal.host } : {}) }, ...(journal.festivalDir ? { festivalDir: journal.festivalDir } : {}) });
     } catch { /* Invalid journals are never surfaced as safe rollback candidates. */ }
   }
   return result;

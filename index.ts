@@ -153,7 +153,9 @@ function targetPaths(input: Record<string, unknown> | undefined, cwd: string): s
   }
   if (typeof input.filePath === "string") raw.push(input.filePath);
   return raw
-    .filter((p): p is string => typeof p === "string" && p.length > 0)
+    // "xd:/fest_raw"-style scheme references are not file paths — locking them
+    // would create a literal "xd:" directory inside the camp.
+    .filter((p): p is string => typeof p === "string" && p.length > 0 && !/^[a-zA-Z][a-zA-Z0-9+.-]+:/.test(p))
     .map((p) => (isAbsolute(p) ? p : resolve(cwd, p)));
 }
 function writeTool(toolName: string): boolean {

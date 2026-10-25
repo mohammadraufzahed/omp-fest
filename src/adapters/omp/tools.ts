@@ -34,7 +34,7 @@ import { BROWSER_VERIFICATION_POLICY } from "../../domain/orientation.js";
 import type { ZodLike } from "./zod-types.js";
 import { Supervisor, SUPERVISOR_POLICY } from "../../application/supervisor.js";
 import { registerFestivalTeamTools } from "./team-tools.js";
-import { beginFestivalCreation, classifyCreationOrphan, completeFestivalCreation, festivalCreationIsScaffolded, listFestivalCreationOrphans, recordFestivalCreation, rollbackFestivalCreation } from "../../application/festival-creation.js";
+import { beginFestivalCreation, classifyCreationOrphan, clearCreationJournal, completeFestivalCreation, creationJournalMayBeLive, festivalCreationIsScaffolded, listFestivalCreationOrphans, listQuarantinedFestivals, recordFestivalCreation, restoreQuarantinedFestival, rollbackFestivalCreation } from "../../application/festival-creation.js";
 import { readFestivalTeam, joinFestivalTeam } from "../../application/festival-team.js";
 import { INTEGRATION_GUIDE, integrationReviewStatus } from "../../application/integration-review.js";
 import { planningDiagnostic } from "../../application/planning-errors.js";
@@ -874,7 +874,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       if (params.draftId) {
         try {
-          if (params.action !== "preview" || params.spec) throw new Error("draftId is for persisted preview; omit spec");
+          if (params.action !== "preview" || params.spec) throw new Error("draftId only applies to action:'preview'. For scaffold, pass name alone — the latest approved revision is resolved automatically.");
           const draft = await readPlanDraft(root, params.draftId);
           if (draft.revision !== params.draftRevision) throw new Error("Draft changed; read current draft and approve the new revision");
           if (draft.missing.length) throw new Error(`Draft is incomplete: ${draft.missing.join(", ")}`);
@@ -889,7 +889,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (params.action && params.referenceAction) return planFailure("Use action for the full plan preview/scaffold flow, or referenceAction for an existing reference revision—not both.");
       if (!params.action && !params.referenceAction) return planFailure("Choose action:'preview' with a structured spec, then action:'scaffold' with the human-approved planRevision.");
       if (params.action === "preview" && !params.spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
-      if (params.action === "scaffold" && (!params.approvedRevision || params.spec)) return planFailure("Scaffolding requires the human-approved planRevision and must omit spec.", { code: "INVALID_SCAFFOLD_INPUT" });
+      if (params.action === "scaffold" && params.spec) return planFailure("Scaffolding uses the persisted approved preview — omit spec. Pass only name; the latest approved revision is used automatically.", { code: "INVALID_SCAFFOLD_INPUT" });
       if (params.action === "cancel") {
         try {
           if (!params.approvedRevision) throw new Error("Cancelling a preview requires its exact planRevision.");
@@ -947,8 +947,12 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       if (params.action === "scaffold") {
         try {
-          const revision = params.approvedRevision;
-          if (!revision) throw new Error("Scaffolding requires the human-approved planRevision.");
+          const revision = params.approvedRevision ?? (await listPlanPreviews(root))
+            .filter((preview) => preview.name === params.name && preview.state === "approved" && preview.planRevision)
+            .map((preview) => preview.planRevision ?? "")
+            .filter((rev) => rev.length > 0)
+            .at(-1);
+          if (!revision) throw new Error(`No approved preview for ${params.name}; run action:"preview" and get human approval first.`);
           const normalizedWorkingDir = params.workingDir
             ? (await resolveWorkingDir(root, deps.camp, params.workingDir)).dir
             : undefined;
@@ -1028,8 +1032,13 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const pending = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.name === params.name);
       if (pending) {
         const classification = classifyCreationOrphan(pending);
+        const mayBeLive = creationJournalMayBeLive(pending, sessionIdOf(ctx));
         if (classification === "in_flight") {
-          return textResult({ kind: "plan_failed", code: "CREATION_IN_FLIGHT", error: `A scaffold transaction for ${params.name} started recently and may still be running. If it crashed, /fest orphans rollback ${pending.receipt.id} resolves it.` });
+          if (mayBeLive) {
+            return textResult({ kind: "plan_failed", code: "CREATION_IN_FLIGHT", error: `A scaffold transaction for ${params.name} started recently in another session and may still be running.`, hint: `Once it is dead, fest_orphans {action:"rollback",transaction:"${pending.receipt.id}"} resolves it — or retry scaffold; dead/own journals self-heal.` });
+          }
+          // Own or dead journal with no festival dir — safe to clear and proceed.
+          await clearCreationJournal(root, pending).catch(() => undefined);
         }
         if (classification === "resume") {
           if (await festivalCreationIsScaffolded(pending.receipt)) {
@@ -1044,7 +1053,14 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
               return textResult({ kind: "plan_failed", error: `Prior scaffold cleanup failed: ${String(cleanupError)}`, hint: `Resolve the transaction with /fest orphans rollback ${pending.receipt.id}.` });
             }
           }
-          return textResult({ kind: "plan_failed", code: "CREATION_ORPHANED", error: `Festival ${params.name} has an incomplete scaffold that was never validated.`, orphanedCreation: pending, hint: `Review it with /fest orphans, or run /fest orphans rollback ${pending.receipt.id} to quarantine the partial festival and retry.` });
+          if (mayBeLive) {
+            return textResult({ kind: "plan_failed", code: "CREATION_ORPHANED", error: `Festival ${params.name} has an incomplete scaffold that was never validated and may still be running in another session.`, orphanedCreation: pending, hint: `Once it is dead, fest_orphans {action:"rollback",transaction:"${pending.receipt.id}"} quarantines the partial festival so you can retry.` });
+          }
+          // Dead or own incomplete scaffold — quarantine (reversible) and continue.
+          const unresolved = await rollbackFestivalCreation(pending.receipt, pending.festivalDir);
+          if (unresolved) {
+            return textResult({ kind: "plan_failed", code: "CREATION_ORPHANED", error: `Festival ${params.name} has an incomplete scaffold whose ownership marker could not be proven.`, orphanedCreation: unresolved, hint: `Inspect /fest orphans before retrying; the partial festival was left in place.` });
+          }
         }
         // stale journals are cleared inside beginFestivalCreation
       }
@@ -1385,6 +1401,67 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       }
       const result = await deps.fest.raw(cwd, params.args);
       return textResult(result);
+    },
+  });
+
+  pi.registerTool({
+    name: "fest_orphans",
+    label: "Fest Orphans",
+    description:
+      "List and resolve incomplete festival creation transactions (crashed scaffolds). " +
+      "action 'list' shows journals and quarantined partials; 'rollback' quarantines the partial " +
+      "festival and removes the journal (allowed automatically when the journal is yours, stale, or " +
+      "its process is dead — a live foreign scaffold still requires /fest select); 'restore' moves a " +
+      "quarantined festival back into planning. Orphaned same-name scaffolds also self-heal on retry.",
+    parameters: z.object({
+      action: z.enum(["list", "rollback", "restore"]).describe("Orphan inspection or recovery"),
+      transaction: z.string().optional().describe("Creation transaction id for rollback (from list)"),
+      quarantine: z.string().optional().describe("Quarantine folder id for restore (from list)"),
+    }),
+    async execute(_id: string, params: { action: "list" | "rollback" | "restore"; transaction?: string; quarantine?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const root = await campRootOf(deps, ctx);
+      if (!root) {
+        return await idleResult(deps, ctx);
+      }
+      if (params.action === "list") {
+        const orphans = await listFestivalCreationOrphans(root);
+        const quarantined = await listQuarantinedFestivals(root);
+        return textResult({
+          kind: "orphans",
+          journals: orphans.map((orphan) => ({
+            transaction: orphan.receipt.id,
+            name: orphan.receipt.name,
+            sessionId: orphan.receipt.sessionId,
+            festivalDir: orphan.festivalDir,
+            state: classifyCreationOrphan(orphan),
+            live: creationJournalMayBeLive(orphan, sessionIdOf(ctx)),
+          })),
+          quarantined,
+          nextAction: "rollback <transaction> quarantines the partial festival so scaffold can retry; restore <quarantine> brings it back.",
+        });
+      }
+      const blocked = supervisorOnly(ctx, "orphan recovery");
+      if (blocked) return blocked;
+      if (params.action === "rollback") {
+        if (!params.transaction) return textResult({ kind: "orphan_failed", error: "rollback requires the exact transaction id from action:'list'." });
+        const orphan = (await listFestivalCreationOrphans(root)).find((item) => item.receipt.id === params.transaction);
+        if (!orphan) return textResult({ kind: "orphan_failed", error: `No creation transaction ${params.transaction}; rerun action:'list'.` });
+        if (creationJournalMayBeLive(orphan, sessionIdOf(ctx))) {
+          return textResult({ kind: "coordinator_required", error: `Transaction ${params.transaction} may still be running in another session — it is not safe to roll back automatically.`, orphan, hint: "Use /fest select then /fest orphans rollback once the other session is confirmed dead." });
+        }
+        if (!orphan.festivalDir) {
+          await clearCreationJournal(root, orphan);
+          return textResult({ kind: "orphan_cleared", transaction: orphan.receipt.id, cleared: "journal", nextSteps: "No festival directory was created; retry fest_plan action:'scaffold'." });
+        }
+        const unresolved = await rollbackFestivalCreation(orphan.receipt, orphan.festivalDir);
+        if (unresolved) {
+          return textResult({ kind: "orphan_failed", error: "Ownership marker did not match — the partial festival was left in place for human review.", orphan: unresolved });
+        }
+        return textResult({ kind: "orphan_cleared", transaction: orphan.receipt.id, cleared: "quarantined+journal", nextSteps: "The partial festival moved to .ompfest/orphans (reversible with action:'restore'); retry fest_plan action:'scaffold'." });
+      }
+      if (!params.quarantine) return textResult({ kind: "orphan_failed", error: "restore requires the quarantine folder id from action:'list'." });
+      const restored = await restoreQuarantinedFestival(root, params.quarantine);
+      return textResult({ kind: "orphan_restored", festivalDir: restored });
     },
   });
 
