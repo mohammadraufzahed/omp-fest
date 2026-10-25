@@ -877,3 +877,22 @@ it("fest_capabilities contract:true returns the agent contract", async () => {
   expect(contract.contract).toContain("fest_complete");
   expect(contract.contract.length).toBeGreaterThan(400);
 });
+
+it("camp_rules manages the camp RULES.md and propagates to festivals", async () => {
+  const root = await makeCamp();
+  const { pi, toolExecutors } = mockPi(root);
+  ompFest(pi as never);
+  const rules = toolExecutors.get("camp_rules"), status = toolExecutors.get("camp_status");
+  if (!rules || !status) throw new Error("Missing camp tools");
+  const ctx = { cwd: root, sessionManager: { getSessionId: () => "main" } };
+  const added = JSON.parse((await rules("t", { action: "add", rule: "no force-push" }, undefined, undefined, ctx)).content[0]!.text) as { kind: string };
+  expect(added.kind).toBe("camp_rules_updated");
+  const listed = JSON.parse((await rules("t", { action: "list" }, undefined, undefined, ctx)).content[0]!.text) as { rules: string[] };
+  expect(listed.rules).toEqual(["no force-push"]);
+  const view = JSON.parse((await status("t", {}, undefined, undefined, ctx)).content[0]!.text) as { rules?: { count: number } };
+  expect(view.rules?.count).toBe(1);
+  const removed = JSON.parse((await rules("t", { action: "remove", rule: "1" }, undefined, undefined, ctx)).content[0]!.text) as { kind: string };
+  expect(removed.kind).toBe("camp_rules_updated");
+  const worker = JSON.parse((await rules("t", { action: "add", rule: "x" }, undefined, undefined, { cwd: root, agent: { kind: "sub" } })).content[0]!.text) as { kind: string };
+  expect(worker.kind).toBe("supervisor_authority_required");
+});

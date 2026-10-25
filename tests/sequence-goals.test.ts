@@ -111,7 +111,7 @@ describe("seedFestivalRules", () => {
     const fest = await mkdtemp(join(tmpdir(), "rules-fest-"));
 
     const r = await seedFestivalRules(camp, fest, "- no new deps\n- tests mandatory");
-    expect(r).toEqual({ file: "FESTIVAL_RULES.md", seeded: true, constraints: true });
+    expect(r).toEqual({ file: "FESTIVAL_RULES.md", seeded: true, constraints: true, campRules: false });
     const text = await readFile(join(fest, "FESTIVAL_RULES.md"), "utf8");
     expect(text).toContain("## Engineering Excellence");
     expect(text).toContain("## Constraints & Rules (agreed during planning)");
@@ -165,7 +165,7 @@ describe("stampGateRules", () => {
     const gate = await readFile(join(seq, "03_testing.md"), "utf8");
     expect(gate).toContain("## Constraints & Rules (agreed during planning)");
     expect(gate).toContain("- no new deps");
-    expect(gate).toContain("a violated constraint fails this gate");
+    expect(gate).toContain("a violated rule fails this gate");
     const task = await readFile(join(seq, "01_impl.md"), "utf8");
     expect(task).not.toContain("Constraints & Rules");
   });

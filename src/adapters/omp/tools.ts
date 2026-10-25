@@ -19,7 +19,8 @@ import { LoopTracker } from "../../application/loop-tracker.js";
 import { FESTIVAL_CLAIM_ENTRY } from "../../application/session-claim.js";
 import { sessionIdOf } from "../../application/session-id.js";
 import { resolveWorkingDir, stampWorkingDir } from "../../application/sequence-goals.js";
-import { festivalConstraints, seedFestivalRules, stampGateRules } from "../../application/festival-rules.js";
+import { campRules, campRulesCount, CAMP_RULES_FILE, CAMP_RULES_SKELETON, festivalConstraints, seedFestivalRules, stampGateRules, syncCampRules } from "../../application/festival-rules.js";
+import { writeAtomically } from "../../application/fs-atomic.js";
 import { inspectTaskVisualEvidence, recordVisualEvidence, visualEvidenceStatus, type VisualEvidence } from "../../application/visual-evidence.js";
 import { applyReferenceRevision, findReuseCandidates, inspectReferenceRevision, renderPlanPreview } from "../../application/visual-plan-review.js";
 import { installVisualReferences, prepareVisualReferences, referencesForTask, taskChecks, validateVisualReferences } from "../../application/visual-references.js";
@@ -1345,14 +1346,21 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!(await lstat(configPath).catch(() => undefined))) {
         await writeFile(configPath, `${JSON.stringify(DEFAULT_CONFIG, null, 2)}\n`);
       }
+      const rulesPath = join(ctx.cwd, CAMP_RULES_FILE);
+      let rulesSeeded = false;
+      if (!(await lstat(rulesPath).catch(() => undefined))) {
+        await writeFile(rulesPath, CAMP_RULES_SKELETON);
+        rulesSeeded = true;
+      }
       const festOk = await deps.fest.available();
       deps.detect.bustCache?.();
       return textResult({
         kind: "camp_initialized",
         campRoot: ctx.cwd,
+        ...(rulesSeeded ? { rulesFile: CAMP_RULES_FILE } : {}),
         output: result.stdout.trim() || undefined,
         ...(festOk ? {} : { warning: "fest CLI not found — install it with: npm i -g @obedience-corp/festival" }),
-        nextAction: "Camp ready — start work with /fest idea <text> then /fest plan <goal>.",
+        nextAction: "Camp ready — edit RULES.md for camp-wide rules, then /fest idea <text> -> /fest plan <goal>.",
       });
     },
   });
@@ -1369,6 +1377,8 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       const root = location.campRoot;
       if (!root) return await idleResult(deps, ctx);
       const sid = sessionIdOf(ctx);
+      const syncedRules = await syncCampRules(root).catch(() => 0);
+      const rules = await campRules(root).catch(() => undefined);
       const festivals = await deps.detect.listFestivals(root);
       const orphans = await listFestivalCreationOrphans(root);
       const projects = await deps.camp.projects(root).catch(() => []);
@@ -1395,10 +1405,72 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
         kind: "camp_status",
         camp: location.campName,
         sessionId: sid,
+        ...(rules ? { rules: { file: CAMP_RULES_FILE, count: campRulesCount(rules), ...(syncedRules ? { synced: syncedRules } : {}) } } : {}),
         festivals: rows,
         orphans: orphans.map((orphan) => ({ transaction: orphan.receipt.id, name: orphan.receipt.name, state: classifyCreationOrphan(orphan) })),
         reservations: reservations.map((row) => ({ worker: row.worker ?? row.sessionId, files: row.files, project: basename(row.projectDir) })),
       });
+    },
+  });
+
+  pi.registerTool({
+    name: "camp_rules",
+    label: "Camp Rules",
+    description:
+      "Read or edit the camp's RULES.md — the rulebook enforced in every festival (seeded into " +
+      "FESTIVAL_RULES.md and gate tasks). add/remove/sync are supervisor-only; workers may list/show.",
+    parameters: z.object({
+      action: z.enum(["show", "list", "add", "remove", "sync"]).describe("show = full file; list = numbered rules; add = append a bullet; remove = delete by 1-based index or exact text; sync = propagate camp RULES.md into all festivals now"),
+      rule: z.string().optional().describe("Rule text (add) or text/index to remove"),
+    }),
+    async execute(_id: string, params: { action: string; rule?: string }, _signal: unknown, _onUpdate: unknown, ctx: ToolContextLike) {
+      const location = await deps.detect.locate(ctx.cwd);
+      const root = location.campRoot;
+      if (!root) return await idleResult(deps, ctx);
+      const rulesPath = join(root, CAMP_RULES_FILE);
+      const read = async () => (await readFile(rulesPath, "utf8").catch(() => "")).trimEnd();
+      if (params.action === "show" || params.action === "list") {
+        const text = await read();
+        if (!text) {
+          return textResult({ kind: "camp_rules", rules: [], hint: `No ${CAMP_RULES_FILE} yet — create with camp_rules{action:"add", rule:"..."} or /fest rules add.` });
+        }
+        const items = text.split("\n").map((line) => line.trim()).filter((line) => /^[-*]\s+\S/.test(line)).map((line) => line.replace(/^[-*]\s+/, ""));
+        return textResult({ kind: "camp_rules", file: rulesPath, rules: items, ...(params.action === "show" ? { text } : {}) });
+      }
+      const blocked = supervisorOnly(ctx, "camp rules mutation");
+      if (blocked) return blocked;
+      if (params.action === "sync") {
+        const synced = await syncCampRules(root);
+        return textResult({ kind: "camp_rules_synced", synced });
+      }
+      if (params.action === "add") {
+        const rule = params.rule?.trim();
+        if (!rule) return textResult({ kind: "camp_rules_failed", code: "MISSING_RULE", retryable: true, nextAction: "Pass rule: the rule text to append." });
+        const text = await read();
+        const bullet = `- ${rule.replace(/^[-*]\s+/, "")}`;
+        const next = text ? `${text}\n${bullet}\n` : `${CAMP_RULES_SKELETON.trimEnd()}\n\n${bullet}\n`;
+        await writeAtomically(rulesPath, next);
+        const synced = await syncCampRules(root);
+        return textResult({ kind: "camp_rules_updated", added: bullet, file: rulesPath, synced });
+      }
+      if (params.action === "remove") {
+        const selector = params.rule?.trim();
+        if (!selector) return textResult({ kind: "camp_rules_failed", code: "MISSING_RULE", retryable: true, nextAction: "Pass rule: the 1-based index or exact rule text to remove." });
+        const text = await read();
+        if (!text) return textResult({ kind: "camp_rules", rules: [], hint: "No rules file." });
+        const lines = text.split("\n");
+        const bullets = lines.map((line, i) => ({ line, i })).filter((row) => /^\s*[-*]\s+\S/.test(row.line));
+        const index = /^\d+$/.test(selector) ? Number.parseInt(selector, 10) : undefined;
+        const target = index !== undefined
+          ? bullets[index - 1]
+          : bullets.find((row) => row.line.replace(/^\s*[-*]\s+/, "") === selector || row.line.includes(selector));
+        if (!target) return textResult({ kind: "camp_rules_failed", code: "RULE_NOT_FOUND", retryable: true, nextAction: "Run camp_rules{action:\"list\"} to see numbered rules." });
+        lines.splice(target.i, 1);
+        await writeAtomically(rulesPath, `${lines.join("\n").trimEnd()}\n`);
+        const synced = await syncCampRules(root);
+        return textResult({ kind: "camp_rules_updated", removed: target.line.trim(), file: rulesPath, synced });
+      }
+      return textResult({ kind: "camp_rules_failed", code: "UNKNOWN_ACTION", retryable: false });
     },
   });
 

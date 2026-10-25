@@ -9,6 +9,7 @@ import { summarizeProgress } from "../domain/progress.js";
 import type { CampDetect } from "../ports.js";
 import { claimedFestivalDir } from "./fest-resolve.js";
 import { festivalOwner } from "./festival-ownership.js";
+import { campRules, campRulesCount } from "./festival-rules.js";
 import type { LoopTracker } from "./loop-tracker.js";
 
 export interface DigestDeps {
@@ -31,12 +32,15 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
   // A new omp session is intentionally unselected. Never fall back to the
   // camp-wide active festival because that can expose another agent's work.
   const festivalDir = await claimedFestivalDir(deps.tracker, deps.detect, sessionId, location.campRoot);
+  const rulesCount = campRulesCount(await campRules(location.campRoot));
+  const rulesLine = rulesCount > 0 ? `camp rules: ${rulesCount} (camp RULES.md applies to every festival — violations fail gates)` : undefined;
   if (!festivalDir) {
     const festivals = await deps.detect.listFestivals(location.campRoot);
     const names = festivals.map((f) => `${f.id} (${f.status})`).join(", ") || "none";
     return [
       `fest: camp=${location.campName ?? location.campRoot} — no active festival. festivals: ${names}.`,
       "This session is explicitly unselected. Use /fest select <id> to coordinate (transfer requires confirmation) or /fest join <id> to collaborate without transfer; start /fest idea → /fest plan for new work.",
+      ...(rulesLine ? [rulesLine] : []),
       RULES,
     ].join("\n");
   }
@@ -52,6 +56,7 @@ export async function buildStateDigest(deps: DigestDeps, cwd: string, sessionId 
   const lines = [
     `fest: camp=${location.campName ?? "?"} festival=${festivalId} unit=${unit} pending=${pending.length} progress=${progress.completed}/${progress.total}`,
   ];
+  if (rulesLine) lines.push(rulesLine);
   if (progress.gatePending) {
     lines.push(
       coordinator
