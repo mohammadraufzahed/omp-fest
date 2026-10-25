@@ -1,6 +1,6 @@
 import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { beginFestivalCreation, completeFestivalCreation, listFestivalCreationOrphans, listQuarantinedFestivals, quarantineFestival, restoreQuarantinedFestival, recordFestivalCreation, rollbackFestivalCreation } from "../src/application/festival-creation.js";
 
@@ -19,7 +19,7 @@ describe("festival creation lifecycle", () => {
   it("journals scaffolding, records marker, lists it, and completes cleanly", async () => {
     const { camp, planning } = await fixture(), receipt = await creation(camp), festival = join(planning, receipt.name);
     expect(JSON.parse(await readFile(receipt.journalPath, "utf8"))).toMatchObject({ id: receipt.id, state: "scaffolding" });
-    await mkdir(festival); await recordFestivalCreation(receipt, festival);
+    await mkdir(festival); await recordFestivalCreation(receipt, relative(camp, festival));
     await mkdir(join(camp, ".ompfest", "plans"), { recursive: true });
     await writeFile(join(camp, receipt.planPath), "# Approved plan\n");
     await writeFile(join(camp, `${receipt.planPath}.status.json`), JSON.stringify({ state: "scaffolded", festivalDir: festival }));
@@ -102,6 +102,18 @@ describe("festival creation lifecycle", () => {
     expect(orphan?.festivalDir).toBe(festival);
     expect(await readFile(join(festival, "keep.txt"), "utf8")).toBe("user data");
     expect(await readFile(receipt.journalPath, "utf8")).toBeTruthy();
+  });
+
+  it("rejects nested or mismatched targets for a creation receipt", async () => {
+    const { camp, planning } = await fixture(), receipt = await creation(camp);
+    const nested = join(planning, "nested", receipt.name);
+    await mkdir(nested, { recursive: true });
+    await expect(recordFestivalCreation(receipt, nested)).rejects.toThrow("direct child");
+    const mismatched = join(planning, "other-name");
+    await mkdir(mismatched);
+    await expect(recordFestivalCreation(receipt, mismatched)).rejects.toThrow(`exactly festivals/planning/${receipt.name}`);
+    await expect(readFile(join(nested, ".omp-fest-creation.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(join(mismatched, ".omp-fest-creation.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects invalid, out-of-root, and symlink targets", async () => {

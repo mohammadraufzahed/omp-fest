@@ -27,7 +27,6 @@ async function setup() {
   const referencesDir = join(plans, "feature.references");
   const page = join(referencesDir, "pages", "results");
   const festival = join(root, "festivals", "planning", "feature");
-  const sequence = join(festival, "001_BUILD", "01_ui");
   const taskPath = "001_BUILD/01_ui/01_results.md";
   await mkdir(page, { recursive: true });
   await mkdir(join(root, "projects"), { recursive: true });
@@ -51,20 +50,22 @@ async function setup() {
     }] }],
   };
   const scaffoldFromPlan = vi.fn(async (_campRoot: string, options: { name: string; plan: string; dest?: string; dryRun?: boolean }) => {
+    const festivalDir = join(root, "festivals", "planning", options.name);
+    const sequenceDir = join(festivalDir, "001_BUILD", "01_ui");
     const result = {
       ok: true,
-      festival_dir: festival,
+      festival_dir: festivalDir,
       phases_created: 1,
       sequences_created: 1,
       tasks_created: 1,
       dry_run: options.dryRun === true,
     };
     if (options.dryRun) return JSON.stringify(result);
-    await mkdir(sequence, { recursive: true });
-    await writeFile(join(festival, "fest.yaml"), "id: feature\n");
-    await writeFile(join(festival, "001_BUILD", "PHASE_GOAL.md"), "---\nfest_name: build\n---\n");
-    await writeFile(join(sequence, "01_results.md"), "---\nfest_type: task\nfest_name: results\n---\n# Task: results\n\nTemplate-only guidance is preserved.\n");
-    await writeFile(join(sequence, "SEQUENCE_GOAL.md"), "---\nfest_name: ui\nfest_tracking: true\n---\n");
+    await mkdir(sequenceDir, { recursive: true });
+    await writeFile(join(festivalDir, "fest.yaml"), `id: ${options.name}\n`);
+    await writeFile(join(festivalDir, "001_BUILD", "PHASE_GOAL.md"), "---\nfest_name: build\n---\n");
+    await writeFile(join(sequenceDir, "01_results.md"), "---\nfest_type: task\nfest_name: results\n---\n# Task: results\n\nTemplate-only guidance is preserved.\n");
+    await writeFile(join(sequenceDir, "SEQUENCE_GOAL.md"), "---\nfest_name: ui\nfest_tracking: true\n---\n");
     return JSON.stringify(result);
   });
   const promote = vi.fn(() => Promise.resolve("ok"));

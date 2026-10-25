@@ -44,9 +44,33 @@ export async function stampWorkingDir(festivalDir: string, workingDir: string): 
 }
 
 /**
+ * Resolve one working directory against the canonical camp root and return
+ * the camp-relative path used by plan artifacts and generated festivals.
+ */
+async function canonicalWorkingDir(campRoot: string, input: string): Promise<string> {
+  const root = await realpath(campRoot);
+  const candidate = resolve(root, input);
+  let target: string;
+  try {
+    target = await realpath(candidate);
+  } catch {
+    throw new Error(`workingDir does not exist from the camp root: ${input}`);
+  }
+  if (!(await stat(target)).isDirectory()) throw new Error(`workingDir must be a directory: ${input}`);
+  const rel = relative(root, target);
+  if (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) return rel.split(sep).join("/") || ".";
+  for (const entry of await readdir(join(root, "projects")).catch(() => [] as string[])) {
+    const link = join(root, "projects", entry);
+    if (await realpath(link).catch(() => undefined) === target) return `projects/${entry}`;
+  }
+  throw new Error("workingDir must be inside the camp or reachable through a projects/ link");
+}
+
+/**
  * Pick the working dir a fresh festival should target: the explicit value,
  * else the camp's single registered project, else "." when the camp has no
  * projects, else undefined (multiple projects and the human must choose).
+ * Explicit relative paths are always interpreted from the camp root.
  */
 export async function resolveWorkingDir(
   campRoot: string,
@@ -54,51 +78,32 @@ export async function resolveWorkingDir(
   explicit?: string,
 ): Promise<{ dir?: string; candidates: string[] }> {
   if (explicit && explicit.length > 0) {
-    const absolute = resolve(campRoot, explicit);
-    const relativeDir = relative(campRoot, absolute);
-    if (relativeDir !== ".." && !relativeDir.startsWith(`..${sep}`) && !isAbsolute(relativeDir)) {
-      return { dir: relativeDir || ".", candidates: [] };
-    }
-    return { dir: explicit, candidates: [] };
+    const dir = await canonicalWorkingDir(campRoot, explicit);
+    return { dir, candidates: [] };
   }
+  const root = await realpath(campRoot);
   // `camp project list` is authoritative — projects/ also holds camp-internal
   // entries (OBEY.md, worktrees/) that aren't projects.
   const registered = await camp.projects(campRoot).catch(() => [] as { name: string; path: string }[]);
-  const candidates = registered.map((project) => {
-    const rel = relative(campRoot, resolve(campRoot, project.path));
-    return rel.length > 0 && !rel.startsWith("..") ? rel : project.path;
-  });
-  if (candidates.length === 0) {
-    for (const entry of await readdir(join(campRoot, "projects")).catch(() => [] as string[])) {
-      if (entry.startsWith(".")) {
-        continue;
-      }
-      const isDir = (await stat(join(campRoot, "projects", entry)).catch(() => undefined))?.isDirectory();
-      if (isDir === true) {
-        candidates.push(`projects/${entry}`);
-      }
+  const candidates = await Promise.all(registered.map(async (project) => {
+    try { return await canonicalWorkingDir(root, project.path); }
+    catch { return undefined; }
+  }));
+  const validCandidates = [...new Set(candidates.filter((path): path is string => !!path))];
+  if (validCandidates.length === 0) {
+    for (const entry of await readdir(join(root, "projects")).catch(() => [] as string[])) {
+      if (entry.startsWith(".")) continue;
+      const path = join(root, "projects", entry);
+      const isDir = (await stat(path).catch(() => undefined))?.isDirectory();
+      if (isDir === true) validCandidates.push(`projects/${entry}`);
     }
   }
-  if (candidates.length === 1) {
-    return { dir: candidates[0], candidates };
-  }
-  if (candidates.length === 0) {
-    return { dir: ".", candidates };
-  }
-  return { candidates };
+  if (validCandidates.length === 1) return { dir: validCandidates[0], candidates: validCandidates };
+  if (validCandidates.length === 0) return { dir: ".", candidates: [] };
+  return { candidates: validCandidates };
 }
 
-/** Frontmatter is resolved by fest from the camp, not from the invoking process. */
+/** Frontmatter always stores a camp-relative path, including linked external checkouts. */
 export async function campRelativeWorkingDir(campRoot: string, workingDir: string): Promise<string> {
-  const root = await realpath(campRoot);
-  const absolute = resolve(root, workingDir);
-  const rel = relative(root, absolute);
-  if (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) return rel.split(sep).join("/") || ".";
-  // External checkouts must use their camp link so the generated festival is portable.
-  const target = await realpath(absolute);
-  for (const entry of await readdir(join(root, "projects")).catch(() => [] as string[])) {
-    const candidate = join(root, "projects", entry);
-    if (await realpath(candidate).catch(() => undefined) === target) return `projects/${entry}`;
-  }
-  throw new Error("workingDir must be inside the camp or have a projects/ link");
+  return canonicalWorkingDir(campRoot, workingDir);
 }

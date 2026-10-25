@@ -60,11 +60,11 @@ async function planningRoot(campRoot: string): Promise<{ camp: string; planning:
 }
 async function safeFestivalPath(campRoot: string, festivalDir: string): Promise<{ camp: string; planning: string; target: string }> {
   const { camp, planning } = await planningRoot(campRoot);
-  const target = resolve(festivalDir);
-  if (!inside(planning, target) || target === planning) throw new Error("Festival directory must be inside festivals/planning.");
-  const rel = relative(planning, target).split(sep);
-  let parent = planning;
-  for (const part of rel.slice(0, -1)) { parent = join(parent, part); await realDirectory(parent); }
+  const target = resolve(camp, festivalDir);
+  const rel = relative(planning, target);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || rel.includes(sep)) {
+    throw new Error("Festival directory must be a direct child of festivals/planning.");
+  }
   const info = await lstat(target);
   if (!info.isDirectory() || info.isSymbolicLink() || await realpath(target) !== target) throw new Error("Festival target must be a real directory, not a symlink.");
   return { camp, planning, target };
@@ -188,8 +188,11 @@ export async function beginFestivalCreation(campRoot: string, name: string, plan
 export async function recordFestivalCreation(receipt: CreationReceipt, festivalDir: string): Promise<void> {
   const camp = await realpath(resolve(receipt.journalPath, "../../.."));
   const journal = await readJournal(receipt.journalPath, camp);
-  if (journal.id !== receipt.id || journal.sessionId !== receipt.sessionId) throw new Error("Festival creation receipt does not match journal.");
+  if (journal.id !== receipt.id || journal.sessionId !== receipt.sessionId || journal.name !== receipt.name || journal.planPath !== receipt.planPath) {
+    throw new Error("Festival creation receipt does not match journal.");
+  }
   const { target } = await safeFestivalPath(camp, festivalDir);
+  if (basename(target) !== receipt.name) throw new Error(`Festival target must be exactly festivals/planning/${receipt.name}.`);
   if (journal.preexisting.includes(basename(target))) throw new Error("Cannot mark a pre-existing festival as newly created.");
   const markerPath = join(target, MARKER);
   const current = await lstat(markerPath).catch((error: unknown) => { if (enoent(error)) return undefined; throw error; });

@@ -4,9 +4,9 @@
  * Covers stamping into real sequence goals, idempotency, and the
  * project-resolution ladder (explicit > single project > "." > ambiguous).
  */
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveWorkingDir, stampWorkingDir } from "../src/application/sequence-goals.js";
 import { festivalConstraints, seedFestivalRules, stampGateRules } from "../src/application/festival-rules.js";
@@ -62,11 +62,23 @@ describe("stampWorkingDir", () => {
 });
 
 describe("resolveWorkingDir", () => {
-  it("uses the explicit param when given", async () => {
+  it("resolves explicit paths from camp root and rejects missing targets", async () => {
     const root = await mkdtemp(join(tmpdir(), "wd-"));
     await mkdir(join(root, "projects", "api"), { recursive: true });
-    const r = await resolveWorkingDir(root, NO_PROJECTS, "projects/web");
-    expect(r.dir).toBe("projects/web");
+    const r = await resolveWorkingDir(root, NO_PROJECTS, "projects/api");
+    expect(r.dir).toBe("projects/api");
+    await expect(resolveWorkingDir(root, NO_PROJECTS, "projects/missing")).rejects.toThrow("does not exist from the camp root");
+  });
+
+  it("converts an external checkout to its camp projects link", async () => {
+    const root = await mkdtemp(join(tmpdir(), "wd-"));
+    const external = await mkdtemp(join(tmpdir(), "external-project-"));
+    await mkdir(join(root, "projects"), { recursive: true });
+    await symlink(external, join(root, "projects", "linked"));
+    const result = await resolveWorkingDir(root, NO_PROJECTS, external);
+    expect(result.dir).toBe("projects/linked");
+    const absolute = await resolveWorkingDir(root, NO_PROJECTS, resolve(root, "projects/linked"));
+    expect(absolute.dir).toBe("projects/linked");
   });
 
   it("picks the single project on disk", async () => {
@@ -92,8 +104,9 @@ describe("resolveWorkingDir", () => {
     expect(r.candidates).toEqual(["projects/api", "projects/web"]);
   });
 
-  it("falls back to camp.projects when projects/ is absent", async () => {
+  it("uses camp.projects as the authoritative project list", async () => {
     const root = await mkdtemp(join(tmpdir(), "wd-"));
+    await mkdir(join(root, "projects", "lib"), { recursive: true });
     const camp = {
       projects: () => Promise.resolve([{ name: "lib", path: "projects/lib" }]),
     } as unknown as CampCli;

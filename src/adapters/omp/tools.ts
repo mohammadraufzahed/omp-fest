@@ -157,7 +157,7 @@ async function interactivePlanReview(
     return textResult({
       ...payload,
       approval: "awaiting_human",
-      nextSteps: "Present this proposal to the human and wait for approval. Then call action:'scaffold' with approvedRevision; do not supply spec.",
+      nextSteps: "Present this proposal to the human and wait for approval. Paths shown are anchored to the camp root: workingDir is the selected project; inspection, task files, and verification paths are relative to that project. Then call action:'scaffold' with approvedRevision; do not supply spec.",
     });
   }
   const preview = typeof payload.preview === "string" ? payload.preview : JSON.stringify(payload.preview, null, 2);
@@ -169,7 +169,7 @@ async function interactivePlanReview(
     `Plan revision: ${typeof payload.planRevision === "string" ? payload.planRevision : "unknown"}`,
     `Tasks: ${String((payload.counts as { tasks?: number } | undefined)?.tasks ?? "unknown")}`,
     "",
-    "Preview persists the structure plan, rendered preview, plan artifact and status under .ompfest/plans. Rejecting does not scaffold or create the festival, and leaves those saved files in place.",
+    "Path check: workingDir resolves from the camp root and must be inside the camp or reachable via projects/<link>. Inspection, task-file, verification cwd, and evidence paths resolve from that project. The generated festival stores workingDir as a camp-relative path.",
   ];
   const floated = await showCard(ui, {
     title: "✦ Plan proposal review",
@@ -184,7 +184,7 @@ async function interactivePlanReview(
     const revision = typeof payload.planRevision === "string" ? payload.planRevision : "";
     if (!revision) return textResult({ ...payload, approval: "awaiting_human", error: "Missing planRevision; approval was not recorded." });
     await markPlanApproved(approval.root, approval.plan, approval.name, revision, approval.references);
-    return textResult({ ...payload, approval: "approved", nextSteps: "Plan approved. Call action:'scaffold' with this planRevision and omit spec." });
+    return textResult({ ...payload, approval: "approved", nextSteps: "Plan approved. Call action:'scaffold' with this planRevision and omit spec. Keep workingDir and all project-relative paths exactly as approved." });
   }
   const revision = typeof payload.planRevision === "string" ? payload.planRevision : "";
   if (revision) await abandonPlanPreview(approval.root, approval.plan, approval.name, revision, "rejected");
@@ -840,7 +840,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
     name: "fest_plan",
     label: "Fest Plan (Scaffold From Plan)",
     description:
-      "Single stateful planning API. Use action create/update/read/list for persisted incremental drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
+      "Single stateful planning API. Path contract for every stage: relative plan/referencesDir paths and workingDir are camp-root-relative; workingDir must identify an existing project directory inside the camp or an external checkout reachable through projects/<link>. Inspection, task files, verification cwd and evidencePath are relative to the selected project. Stage 1 create/update: ask which project when ambiguous and save the resolved workingDir. Stage 2 preview: use that project root, validate paths there, show the resolved target and wait for human approval. Stage 3 scaffold: use only the approved revision and its canonical camp-relative project target; never reconstruct paths from the process cwd. Final output reports absolute festivalDir and camp-relative workingDir. Use action create/update/read/list for persisted drafts, preview for review, and scaffold only after the human approves planRevision. Draft fields stay server-side; update only changed fields. Verification may omit evidencePath when safely inferred from the declared package runner manifest or direct command target. Planning conflicts return choices for a conversational human decision; never open a blocking selection UI. Creation is independent of existing festival ownership. Attachment role must be explicit; only ui_design can supply visual references.",
     parameters: z.object({
       action: z.enum(["create", "read", "update", "delete", "list", "preview", "scaffold", "cancel"]).optional(),
       name: z.string().optional(), plan: z.string().optional(), draftId: z.string().optional(), draftRevision: z.string().optional(),
@@ -899,7 +899,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           const draft = draftAction === "create"
             ? await createPlanDraft(root, { ...patch, name: params.name ?? "" })
             : await updatePlanDraft(root, params.draftId ?? "", params.draftRevision ?? "", patch);
-          return textResult({ kind: draft.missing.length ? "plan_draft_incomplete" : "plan_draft", draftId: draft.draftId, revision: draft.revision, name: draft.fields.name, goal: draft.spec.goal, missing: draft.missing, attachments: draft.fields.attachments, nextAction: draft.missing.length ? "Ask only for listed missing decisions, then update this draft with its current revision." : `Call fest_plan {action:"preview",draftId:"${draft.draftId}",draftRevision:"${draft.revision}"}.` });
+          return textResult({ kind: draft.missing.length ? "plan_draft_incomplete" : "plan_draft", draftId: draft.draftId, revision: draft.revision, name: draft.fields.name, goal: draft.spec.goal, missing: draft.missing, attachments: draft.fields.attachments, pathPolicy: "workingDir is camp-root-relative (for example projects/web); inspection, task files, verification cwd, and evidencePath are project-relative.", nextAction: draft.missing.length ? "Ask only for listed missing decisions. If workingDir is missing or ambiguous, ask which existing project in this camp to target; use the exact camp-relative project path, then update with this revision." : `Call fest_plan {action:"preview",draftId:"${draft.draftId}",draftRevision:"${draft.revision}"}.` });
         } catch (error) { return planFailure(error); }
       }
       if (params.draftId) {
@@ -914,8 +914,10 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
       if (!params.name || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(params.name)) return planFailure("name must be a lowercase festival slug", { field: "name" });
       params.plan ??= join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
       const canonicalPlan = join(root, ".ompfest", "plans", `${params.name}.STRUCTURE.md`);
-      const planPath = resolve(params.plan) === resolve(canonicalPlan) ? params.plan : canonicalPlan;
-      const planWarnings = params.plan === planPath ? [] : [`plan was normalized to ${planPath}`];
+      const suppliedPlan = resolve(root, params.plan);
+      const planPath = canonicalPlan;
+      const planWarnings = suppliedPlan === canonicalPlan ? [] : [`plan was normalized to the camp plan path ${canonicalPlan}`];
+      if (params.referencesDir) params.referencesDir = resolve(root, params.referencesDir);
       if (params.action && params.referenceAction) return planFailure("Use action for the full plan preview/scaffold flow, or referenceAction for an existing reference revision—not both.");
       if (!params.action && !params.referenceAction) return planFailure("Choose action:'preview' with a structured spec, then action:'scaffold' with the human-approved planRevision.");
       if (params.action === "preview" && !params.spec) return planFailure("Plan preview requires a structured spec.", { code: "MISSING_SPEC", field: "spec" });
@@ -968,6 +970,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           return await interactivePlanReview(ctx, {
             kind: "plan_preview", plan: prepared.plan, preview: prepared.preview, previewFile: prepared.previewFile,
             counts: prepared.counts, planRevision: prepared.planRevision, reuseCandidates,
+            pathPolicy: { campRoot: root, workingDir: project.dir, projectPaths: "inspection, task files, verification cwd, and evidencePath are relative to workingDir" },
             ...(planWarnings.length || normalized.warnings.length ? { warnings: [...planWarnings, ...normalized.warnings] } : {}),
             ...(visual ? { visualPreview: visual } : {}),
           }, { root, plan: planPath, name: params.name, references: bundle?.files ?? [] });
@@ -1136,6 +1139,7 @@ export function registerTools(pi: PiLike, deps: ToolDeps): void {
           ...(bundle ? { visualReferences: bundle.pages.map((page) => `references/pages/${page}/PAGE.md`) } : {}),
           rules: { ...rulesSeed, gateFilesStamped: gateRules },
           ...(workingDir ? { workingDir, sequencesStamped: stamped } : {}),
+          pathPolicy: { festivalDir, workingDir: workingDir ?? null, workingDirBase: "camp root", projectPathBase: "workingDir" },
           qualityGates: gates,
           validation: { score: scaffoldValidation.score },
           ...(skipped.length > 0 ? {

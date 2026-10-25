@@ -259,12 +259,29 @@ explicit missing field, not invented test proof. `/fest draft` provides native
 field editing and preview. Call `fest_plan` with `action:"preview"`, `draftId`
 and `draftRevision` to consume persisted content without resending a nested spec.
 
+Path preparation is stage-specific:
+
+1. **Create/update draft:** identify the camp root first. Resolve `workingDir` from
+   that root (for example, `projects/web`); choose an existing project if several
+   are registered. An external checkout is valid only through a `projects/<link>`
+   entry. Save the resolved camp-relative path in the draft.
+2. **Preview and approval:** resolve `plan` and `referencesDir` from the camp root.
+   Resolve inspection, task-file, verification `cwd`, and evidence paths from the
+   selected project. Show the resolved project in the preview; do not approve a
+   proposal whose paths were not validated against that project.
+3. **Scaffold:** reuse the approved revision and its canonical paths; do not derive
+   paths from the invoking process CWD or retype a different project path. The tool
+   returns an absolute `festivalDir` and a camp-relative `workingDir`.
+
+
 Scaffolding renders festival/overview/phase/sequence/task documents from the
 approved contract, retains independent user notes and constraints, and removes
 obsolete template sections instead of substituting fake placeholder values.
-Working directories are camp-relative, and hierarchy underscores remain literal.
-The scaffold must validate before activation; real validation failures remain
-failures and are not bypassed.
+Working directories are canonical camp-relative paths, and hierarchy underscores remain literal.
+Relative plan, `workingDir`, and `referencesDir` inputs resolve from the camp root,
+never the process working directory. Festival creation accepts only the exact
+`festivals/planning/<name>` target reported for the approved slug. The scaffold must
+validate before activation; real validation failures remain failures and are not bypassed.
 
 ### Plan from an inspected repository
 
@@ -321,17 +338,17 @@ Generate the plan through the tool, rather than writing parser-sensitive Markdow
 fest_plan({
   action: "preview",
   name: "feature",
-  plan: "<absolute camp>/.ompfest/plans/feature.STRUCTURE.md",
+  plan: ".ompfest/plans/feature.STRUCTURE.md",
   workingDir: "projects/<target>",
   spec, // StructuredPlan described above
   rules: "<agreed constraints>",
-  // referencesDir: "<absolute camp>/.ompfest/plans/feature.references",
+  // referencesDir: ".ompfest/plans/feature.references",
 });
 ```
-`workingDir` may also be an absolute path to a linked checkout outside the camp.
-When the checkout is linked inside the camp, either its camp-relative link or its
-absolute checkout path works. Inspection and task paths remain relative to that
-working directory and must resolve inside the checkout.
+`workingDir` may also be an absolute path to an existing linked checkout outside
+the camp; the tool resolves it to the matching `projects/<link>` before saving
+the approved artifact. Inspection and task paths remain relative to the selected
+project and must resolve inside that checkout.
 
 
 Preview validates the contract, writes deterministic `STRUCTURE.md`, persists the
