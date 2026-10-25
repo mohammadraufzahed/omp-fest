@@ -4,7 +4,8 @@
  */
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DEFAULT_CONFIG, type Autonomy, type OmpFestConfig } from "./types.js";
+import { conventionWarnings } from "../application/conventions.js";
+import { DEFAULT_CONFIG, DEFAULT_CONVENTIONS, type Autonomy, type Conventions, type OmpFestConfig } from "./types.js";
 
 const FILE_NAME = ".ompfest.json";
 
@@ -14,13 +15,16 @@ export async function loadConfig(dir: string): Promise<OmpFestConfig> {
     const raw = await readFile(join(dir, FILE_NAME), "utf8");
     parsed = JSON.parse(raw) as Partial<OmpFestConfig>;
   } catch {
-    return { ...DEFAULT_CONFIG };
+    return { ...DEFAULT_CONFIG, conventions: { ...DEFAULT_CONVENTIONS } };
   }
+  const conventions = sanitizeConventions(parsed.conventions);
   return {
     ...DEFAULT_CONFIG,
     ...pickDefined(parsed),
+    conventions,
     autonomyCeiling: sanitizeAutonomy(parsed.autonomyCeiling) ?? DEFAULT_CONFIG.autonomyCeiling,
     delegateMode: sanitizeDelegateMode(parsed.delegateMode) ?? DEFAULT_CONFIG.delegateMode,
+    configWarnings: conventionWarnings(conventions),
   };
 }
 
@@ -36,6 +40,10 @@ export async function saveConfig(dir: string, patch: Partial<OmpFestConfig>): Pr
     existing = {};
   }
   const merged = { ...existing, ...patch };
+  if (patch.conventions !== undefined) {
+    const prior = existing.conventions && typeof existing.conventions === "object" ? existing.conventions as Record<string, unknown> : {};
+    merged.conventions = { ...prior, ...patch.conventions };
+  }
   await writeFile(join(dir, FILE_NAME), `${JSON.stringify(merged, null, 2)}\n`, "utf8");
   return loadConfig(dir);
 }
@@ -56,4 +64,17 @@ function sanitizeAutonomy(value: unknown): Autonomy | undefined {
 
 function sanitizeDelegateMode(value: unknown): OmpFestConfig["delegateMode"] | undefined {
   return value === "auto" || value === "always" || value === "never" ? value : undefined;
+}
+
+function sanitizeConventions(value: unknown): Conventions {
+  const out: Conventions = { ...DEFAULT_CONVENTIONS };
+  if (!value || typeof value !== "object") return out;
+  const v = value as Record<string, unknown>;
+  if (typeof v.festivalName === "string") out.festivalName = v.festivalName;
+  if (typeof v.branch === "string" && v.branch.trim()) out.branch = v.branch;
+  if (typeof v.worktreeDir === "string" && v.worktreeDir.trim()) out.worktreeDir = v.worktreeDir;
+  if (v.commitStyle === "free" || v.commitStyle === "conventional" || v.commitStyle === "prefix") out.commitStyle = v.commitStyle;
+  if (typeof v.commitPrefix === "string") out.commitPrefix = v.commitPrefix;
+  if (v.finishMerge === "merge" || v.finishMerge === "squash") out.finishMerge = v.finishMerge;
+  return out;
 }

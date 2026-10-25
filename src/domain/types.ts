@@ -155,6 +155,31 @@ export type GateDecision =
   | { action: "reject"; reason: string }
   | { action: "pending" };
 
+/** Machine-checkable camp conventions (vs RULES.md judgement rules). See conventions.ts. */
+export interface Conventions {
+  /** Regex festival names must match at scaffold; empty = unchecked. */
+  festivalName: string;
+  /** Worktree branch template; {festival}/{project}/{camp} placeholders. */
+  branch: string;
+  /** Worktree dir template relative to the camp root. */
+  worktreeDir: string;
+  /** "free" passes messages through, "conventional" validates type(scope): subject, "prefix" prepends commitPrefix. */
+  commitStyle: "free" | "conventional" | "prefix";
+  /** Prepended to commit messages when commitStyle is "prefix". */
+  commitPrefix?: string;
+  /** How fest_complete merges festival worktree branches back. */
+  finishMerge: "merge" | "squash";
+}
+
+export const DEFAULT_CONVENTIONS: Conventions = {
+  festivalName: "",
+  branch: "fest/{festival}",
+  worktreeDir: "projects/worktrees/{project}/{festival}",
+  commitStyle: "free",
+  commitPrefix: "[{camp}:{festival}]",
+  finishMerge: "merge",
+};
+
 export interface OmpFestConfig {
   statusLine: boolean;
   watchTransitions: boolean;
@@ -169,6 +194,10 @@ export interface OmpFestConfig {
   writeLocks: boolean;
   /** Subagent delegation policy: "never" blocks worker spawns, "always" delegates every unit, "auto" delegates units with disjoint scope. */
   delegateMode: "auto" | "always" | "never";
+  /** Machine-checkable naming/commit conventions enforced by the plugin. */
+  conventions: Conventions;
+  /** Non-fatal config problems found at load time (never persisted). */
+  configWarnings?: string[];
 }
 
 export const DEFAULT_CONFIG: OmpFestConfig = {
@@ -182,4 +211,5 @@ export const DEFAULT_CONFIG: OmpFestConfig = {
   evidenceRequiredOnGates: true,
   writeLocks: true,
   delegateMode: "auto",
+  conventions: DEFAULT_CONVENTIONS,
 };
